@@ -1,0 +1,39 @@
+name: EasyPost sandbox
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  sandbox:
+    name: EasyPost test-mode E2E
+    # Repository contributors can run the deterministic suite without a key.
+    # Live credentials are restricted to trusted code in this repository.
+    if: >-
+      github.repository == 'jessfraz/ha-packages' &&
+      github.actor != 'dependabot[bot]' &&
+      (github.event_name != 'pull_request' ||
+       github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    concurrency:
+      group: easypost-sandbox
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install stable --profile minimal
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - name: Compile without provider credentials
+        run: cargo test --locked --test easypost_live --no-run
+      - name: Exercise the real EasyPost test API
+        timeout-minutes: 3
+        env:
+          EASYPOST_TEST_API_KEY: ${{ secrets.EASYPOST_TEST_API_KEY }}
+        run: cargo test --locked --test easypost_live -- --ignored --test-threads=1

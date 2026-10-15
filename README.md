@@ -398,6 +398,25 @@ EXPECTORATE=overwrite cargo test --test api generated_openapi
 Tests start real HTTP servers and SQLite databases, including a local EasyPost
 fixture. The Home Assistant suite uses Home Assistant itself and includes a
 contract test against the compiled Rust binary. CI builds that binary before
-running the Python suite. Tests do not register real trackers or require API
-keys. Actual HAOS installation and live carrier coverage still need testing
-on the target system.
+running the Python suite. The default suite needs no API keys and makes no
+external provider requests.
+
+The separate **EasyPost sandbox** CI workflow uses the repository's
+`EASYPOST_TEST_API_KEY` Actions secret. It runs against EasyPost's test API on
+main, trusted same-repository pull requests and manual dispatches. Fork and
+Dependabot pull requests run the deterministic suite without provider secrets.
+The key is available only to the live test step; an absent or non-test key
+fails before any provider request.
+
+Run the same test locally with an EasyPost test key in the environment:
+
+```sh
+cargo test --locked --test easypost_live -- --ignored --test-threads=1
+```
+
+It exercises the real HTTP API, SQLite restart/replay, auto-detected USPS,
+explicit UPS and FedEx Default, unscanned and delivered states, carrier scan
+history, accepted tracking edits and rejected creates/edits. Only synthetic
+`EZ…` test codes are submitted. These canned test responses validate our API
+integration; they do not establish live carrier-account coverage. Actual
+HAOS installation and production carrier coverage need separate verification.
