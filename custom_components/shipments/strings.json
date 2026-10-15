@@ -11,7 +11,7 @@
       },
       "app": {
         "title": "Start the Shipments app",
-        "description": "Install and start Shipments in Settings → Apps, then select Submit to find it. The custom integration must be installed and Home Assistant restarted first. Standalone installations can use the standalone service option instead."
+        "description": "Install and start Shipments in Settings \u2192 Apps, then select Submit to find it. The custom integration must be installed and Home Assistant restarted first. Standalone installations can use the standalone service option instead."
       },
       "hassio_confirm": {
         "title": "Connect the Shipments app",
@@ -37,7 +37,7 @@
     "error": {
       "cannot_connect": "Cannot connect to the Shipments service. Check that it is running and try again.",
       "invalid_auth": "The service rejected its credential.",
-      "integration_required": "This connection needs an integration credential. An ingestion credential cannot connect Home Assistant.",
+      "integration_required": "Home Assistant needs an integration credential. Owner and ingestion credentials cannot connect the integration.",
       "invalid_url": "Enter an HTTP or HTTPS origin without credentials, path, query, or fragment.",
       "app_not_found": "The Shipments app has not announced a connection. Install or start it, then try again.",
       "supervisor_required": "This Home Assistant installation does not manage apps. Connect a standalone service instead.",
@@ -58,7 +58,7 @@
         "name": "Active"
       },
       "expected": {
-        "name": "Expected"
+        "name": "Awaiting pickup"
       },
       "in_transit": {
         "name": "In transit"
@@ -74,7 +74,49 @@
       },
       "sync_errors": {
         "name": "Sync errors"
+      },
+      "inbound_active": {
+        "name": "Inbound active"
+      },
+      "inbound_out_for_delivery": {
+        "name": "Inbound out for delivery"
+      },
+      "inbound_exceptions": {
+        "name": "Inbound exceptions"
+      },
+      "outbound_active": {
+        "name": "Outbound active"
+      },
+      "outbound_exceptions": {
+        "name": "Outbound exceptions"
       }
+    },
+    "binary_sensor": {
+      "exceptions": {
+        "name": "Exceptions"
+      },
+      "sync_errors": {
+        "name": "Sync errors"
+      }
+    },
+    "calendar": {
+      "inbound_deliveries": {
+        "name": "Inbound deliveries"
+      }
+    }
+  },
+  "issues": {
+    "version_mismatch": {
+      "title": "Shipments app and integration versions differ",
+      "description": "The app is version {app_version}, and this integration is version {integration_version}. Update both Shipments components to the same release, then reload the integration."
+    },
+    "event_stream_unavailable": {
+      "title": "Shipment status events are unavailable",
+      "description": "Shipments cannot read or checkpoint its status event feed. Counts and delivery estimates still update. Check the app connection and storage, then reload the integration. The saved cursor will resume when the connection recovers."
+    },
+    "event_history_reset": {
+      "title": "Shipment event history was reset",
+      "description": "The app has less event history than the saved Home Assistant checkpoint, usually after an app-only restore. Events now resume from the current tail to avoid replaying old shipments. Some transitions from the missing history could not be delivered. Review automations that depend on these events."
     }
   }
 }

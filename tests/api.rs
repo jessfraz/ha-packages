@@ -50,6 +50,25 @@ impl App {
             .unwrap();
         assert_eq!(created.status(), StatusCode::CREATED);
         let created: CreatedAgentCredential = created.json().await.unwrap();
+        if ingress_peer.is_some() {
+            let report = shipments::installation::IntegrationPresence {
+                version: env!("CARGO_PKG_VERSION").into(),
+                administrator_ids: vec!["human".into()],
+                backup: shipments::installation::BackupReport {
+                    status: shipments::installation::BackupStatus::Standalone,
+                    last_backup: None,
+                },
+            };
+            let response = Client::new()
+                .post(format!("{url}/v1/integration/presence"))
+                .bearer_auth(INTEGRATION)
+                .header("X-Shipments-Actor", "ha:integration")
+                .json(&report)
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        }
         let server = if let Some(peer) = ingress_peer {
             server.close().await.unwrap();
             api::start(
@@ -717,6 +736,7 @@ async fn integration_credential_is_scoped_and_installation_requires_a_real_check
         .unwrap();
     assert_eq!(events.items[0].actor_id, "ha:human");
     let report = IntegrationPresence {
+        administrator_ids: Vec::new(),
         version: "0.2.0".into(),
         backup: BackupReport {
             status: BackupStatus::Complete,
@@ -1860,5 +1880,52 @@ async fn owners_and_agents_create_and_change_direction_without_reverifying_track
         vec![Direction::Outbound, Direction::Inbound, Direction::Inbound]
     );
     assert_eq!(app.provider_fixture.as_ref().unwrap().calls(), 0);
+    app.close().await;
+}
+
+#[tokio::test]
+async fn ordinary_ingress_users_can_read_but_cannot_claim_administrator_permissions() {
+    let app = App::new(Some("127.0.0.1".parse().unwrap())).await;
+    let response = app
+        .request(Method::GET, "/v1/system")
+        .header("X-Remote-User-Id", "visitor")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let system: System = response.json().await.unwrap();
+    assert_eq!(system.credential_role, "user");
+    let response = app
+        .request(Method::GET, "/v1/shipments")
+        .header("X-Remote-User-Id", "visitor")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    for path in ["/v1/agents", "/v1/installation"] {
+        assert_eq!(
+            app.request(Method::GET, path)
+                .header("X-Remote-User-Id", "visitor")
+                .header("X-Shipments-Admin", "true")
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::FORBIDDEN
+        );
+    }
+    assert_eq!(
+        app.request(Method::POST, "/v1/agents")
+            .header("X-Remote-User-Id", "visitor")
+            .header("X-Shipments-Request", "1")
+            .json(&CreateAgent {
+                name: "Forbidden".into()
+            })
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::FORBIDDEN
+    );
     app.close().await;
 }

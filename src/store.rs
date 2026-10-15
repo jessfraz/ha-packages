@@ -955,6 +955,142 @@ impl Store {
                 Ok(Event {id,shipment_id:parse_id(&shipment_id)?,kind:serde_json::from_str(&kind)?,actor_id,at,detail,snapshot:snapshot.as_deref().map(serde_json::from_str).transpose()?})).collect()
     }
 
+    /// Page active inbound estimates without loading carrier scan history.
+    pub async fn delivery_estimates(
+        &self,
+        after: Option<DeliveryEstimatePosition>,
+        limit: u32,
+    ) -> Result<Vec<DeliveryEstimateEntry>, Error> {
+        #[derive(FromRow)]
+        struct EstimateRow {
+            id: String,
+            title: String,
+            tracking_carrier: Option<String>,
+            status: String,
+            estimated_delivery_at: String,
+            expected_sort_key: i64,
+        }
+        let mut query = delivery_estimates_query(after, limit);
+        query
+            .build_query_as::<EstimateRow>()
+            .fetch_all(&self.pool)
+            .await?
+            .into_iter()
+            .map(|row| {
+                let id = parse_id(&row.id)?;
+                Ok(DeliveryEstimateEntry {
+                    estimate: DeliveryEstimate {
+                        id,
+                        title: row.title,
+                        direction: Direction::Inbound,
+                        carrier: row
+                            .tracking_carrier
+                            .map(|value| {
+                                value
+                                    .parse::<Carrier>()
+                                    .map_err(|_| Error::Invalid("invalid stored carrier".into()))
+                            })
+                            .transpose()?,
+                        status: serde_json::from_str(&row.status)?,
+                        estimated_delivery_at: row.estimated_delivery_at,
+                    },
+                    position: DeliveryEstimatePosition {
+                        id,
+                        sort_key: row.expected_sort_key,
+                    },
+                })
+            })
+            .collect()
+    }
+
+    /// With no cursor, establish a tail checkpoint without replaying history.
+    pub async fn state_events(
+        &self,
+        after: Option<i64>,
+        limit: u32,
+    ) -> Result<StateEventPage, Error> {
+        if !(1..=200).contains(&limit) || after.is_some_and(|value| value < 0) {
+            return Err(Error::Invalid("invalid event cursor or limit".into()));
+        }
+        let mut transaction = self.pool.begin().await?;
+        let head: i64 = sqlx::query_scalar("SELECT coalesce(max(id),0) FROM state_events")
+            .fetch_one(&mut *transaction)
+            .await?;
+        let Some(after) = after else {
+            transaction.commit().await?;
+            return Ok(StateEventPage {
+                items: Vec::new(),
+                next_after: head,
+                has_more: false,
+            });
+        };
+        if after > head {
+            return Err(Error::Conflict("event checkpoint is ahead of the restored history; establish a new tail checkpoint".into()));
+        }
+        #[derive(FromRow)]
+        struct StateRow {
+            id: i64,
+            shipment_id: String,
+            event_type: String,
+            status: String,
+            title: String,
+            carrier: Option<String>,
+            direction: String,
+            at: String,
+        }
+        let mut rows: Vec<StateRow> = sqlx::query_as(
+            "SELECT id, shipment_id, event_type, status, title, carrier, direction, at
+             FROM state_events WHERE id > ? ORDER BY id LIMIT ?",
+        )
+        .bind(after)
+        .bind(i64::from(limit) + 1)
+        .fetch_all(&mut *transaction)
+        .await?;
+        let has_more = rows.len() > limit as usize;
+        rows.truncate(limit as usize);
+        let next_after = rows.last().map_or(after, |row| row.id);
+        let items = rows
+            .into_iter()
+            .map(|row| {
+                Ok(StateEvent {
+                    id: row.id,
+                    shipment_id: parse_id(&row.shipment_id)?,
+                    event_type: match row.event_type.as_str() {
+                        "out_for_delivery" => StateEventType::OutForDelivery,
+                        "delivered" => StateEventType::Delivered,
+                        "exception" => StateEventType::Exception,
+                        _ => return Err(Error::Invalid("invalid stored event type".into())),
+                    },
+                    status: serde::Deserialize::deserialize(serde::de::value::StrDeserializer::<
+                        serde::de::value::Error,
+                    >::new(&row.status))
+                    .map_err(|_| Error::Invalid("invalid stored status".into()))?,
+                    title: row.title,
+                    carrier: row
+                        .carrier
+                        .map(|value| {
+                            value
+                                .parse::<Carrier>()
+                                .map_err(|_| Error::Invalid("invalid stored carrier".into()))
+                        })
+                        .transpose()?,
+                    direction: match row.direction.as_str() {
+                        "inbound" => Direction::Inbound,
+                        "outbound" => Direction::Outbound,
+                        _ => return Err(Error::Invalid("invalid stored direction".into())),
+                    },
+                    at: row.at,
+                })
+            })
+            .collect::<Result<Vec<_>, Error>>()?;
+        transaction.commit().await?;
+        Ok(StateEventPage {
+            items,
+            next_after,
+            has_more,
+        })
+    }
+
     pub async fn summary(&self, direction: Option<Direction>) -> Result<Summary, Error> {
         let mut query = QueryBuilder::<Sqlite>::new(
             "SELECT coalesce(override_status,carrier_status,'\"expected\"') AS status,count(*),count(last_error) FROM shipments WHERE archived=0",
@@ -1021,4 +1157,33 @@ impl Store {
         .await?;
         Ok(())
     }
+}
+
+fn delivery_estimates_query(
+    after: Option<DeliveryEstimatePosition>,
+    limit: u32,
+) -> QueryBuilder<Sqlite> {
+    let mut query = QueryBuilder::new(
+        r#"SELECT id, title, tracking_carrier,
+                  coalesce(override_status, carrier_status, '"expected"') AS status,
+                  json_extract(carrier_tracking, '$.estimated_delivery_at') AS estimated_delivery_at,
+                  expected_sort_key
+           FROM shipments
+           WHERE archived = 0 AND direction = 'inbound'
+             AND expected_sort_key < 9223372036854775807
+             AND coalesce(override_status, carrier_status, '"expected"')
+                 NOT IN ('"delivered"', '"return_to_sender"', '"cancelled"')"#,
+    );
+    if let Some(after) = after {
+        query
+            .push(" AND (expected_sort_key,id)>(")
+            .push_bind(after.sort_key)
+            .push(",")
+            .push_bind(after.id.to_string())
+            .push(")");
+    }
+    query
+        .push(" ORDER BY expected_sort_key,id LIMIT ")
+        .push_bind(limit.min(201));
+    query
 }

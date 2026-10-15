@@ -8,6 +8,7 @@ import pytest
 from aiohttp import web
 from homeassistant.auth.const import GROUP_ID_USER
 from homeassistant.core import HomeAssistant
+from homeassistant.loader import async_get_integration
 from pytest_homeassistant_custom_component.common import MockConfigEntry, MockUser
 
 from custom_components.shipments.const import CONF_BACKEND_URL, CONF_TOKEN, DOMAIN
@@ -44,10 +45,34 @@ class Backend:
     responses: dict[tuple[str, str], tuple[int, bytes, dict[str, str]]] = field(
         default_factory=dict
     )
-    role: str = "owner"
+    summaries: dict[str, dict[str, int]] = field(
+        default_factory=lambda: {
+            "": SUMMARY.copy(),
+            "inbound": {
+                **SUMMARY,
+                "active": 3,
+                "in_transit": 1,
+                "delivered": 2,
+                "sync_errors": 0,
+            },
+            "outbound": {
+                **SUMMARY,
+                "active": 1,
+                "expected": 0,
+                "in_transit": 1,
+                "out_for_delivery": 0,
+                "delivered": 1,
+            },
+        }
+    )
+    role: str = "integration"
+    version: str = ""
     delay_seconds: float = 0
+    event_read_started: asyncio.Event = field(default_factory=asyncio.Event)
 
     async def handle(self, request: web.Request) -> web.Response:
+        if request.path == "/v1/events":
+            self.event_read_started.set()
         self.requests.append(
             ReceivedRequest(
                 request.method,
@@ -59,13 +84,31 @@ class Backend:
         )
         if self.delay_seconds:
             await asyncio.sleep(self.delay_seconds)
-        if response := self.responses.get((request.method, request.path)):
+        response = self.responses.get(
+            (request.method, request.path_qs),
+            self.responses.get((request.method, request.path)),
+        )
+        if response:
             status, body, headers = response
             return web.Response(status=status, body=body, headers=headers)
         if request.path == "/v1/system":
-            return web.json_response({"credential_role": self.role})
+            return web.json_response(
+                {"credential_role": self.role, "version": self.version}
+            )
         if request.path == "/v1/summary":
-            return web.json_response(SUMMARY)
+            return web.json_response(self.summaries[request.query.get("direction", "")])
+        if request.path == "/v1/shipments" and request.method == "GET":
+            return web.json_response({"items": [], "next_page": None})
+        if request.path == "/v1/delivery-estimates":
+            return web.json_response({"items": [], "next_page": None})
+        if request.path == "/v1/events":
+            return web.json_response(
+                {
+                    "items": [],
+                    "next_after": int(request.query.get("after", "0")),
+                    "has_more": False,
+                }
+            )
         return web.json_response(
             {"id": SHIPMENT_ID, "revision": 7, "status": "expected"},
             headers={"ETag": '"7"'},
@@ -93,8 +136,9 @@ async def hass_user_token(hass: HomeAssistant, hass_user: MockUser) -> str:
 
 
 @pytest.fixture
-async def backend(aiohttp_server, socket_enabled) -> AsyncIterator[Backend]:
+async def backend(hass, aiohttp_server, socket_enabled) -> AsyncIterator[Backend]:
     upstream = Backend()
+    upstream.version = str((await async_get_integration(hass, DOMAIN)).version)
     app = web.Application()
     app.router.add_route("*", "/{path:.*}", upstream.handle)
     server = await aiohttp_server(app)
@@ -110,5 +154,5 @@ async def entry(hass: HomeAssistant, backend: Backend) -> MockConfigEntry:
     )
     entry.add_to_hass(hass)
     assert await hass.config_entries.async_setup(entry.entry_id)
-    await hass.async_block_till_done()
+    await hass.async_block_till_done(wait_background_tasks=True)
     return entry

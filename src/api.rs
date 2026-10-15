@@ -107,11 +107,13 @@ async fn authenticate(
             ));
         }
         let user = header(request, "x-remote-user-id")
-            .filter(|value| !value.is_empty())
+            .filter(|value| {
+                !value.is_empty() && value.len() <= 200 && !value.chars().any(char::is_control)
+            })
             .ok_or_else(|| client_error(StatusCode::UNAUTHORIZED, "missing Home Assistant user"))?;
         Principal {
             actor: format!("ha:{user}"),
-            owner: true,
+            owner: context.installation.is_admin(user).await,
             integration: false,
         }
     } else {
@@ -559,6 +561,82 @@ async fn shipment_events(
     Ok(HttpResponseOk(page))
 }
 
+#[derive(Deserialize, Serialize, JsonSchema)]
+struct EstimateFilter {}
+#[derive(Deserialize, Serialize, JsonSchema)]
+struct EstimateCursor {
+    after: Uuid,
+    sort_key: i64,
+}
+/// Active inbound carrier estimates for native Home Assistant calendars.
+#[endpoint {method=GET,path="/v1/delivery-estimates",tags=["system"]}]
+async fn delivery_estimates(
+    request: RequestContext<Arc<Context>>,
+    query: Query<PaginationParams<EstimateFilter, EstimateCursor>>,
+) -> Result<
+    HttpResponseHeaders<HttpResponseOk<ResultsPage<DeliveryEstimate>>, PrivateHeaders>,
+    HttpError,
+> {
+    authenticate(&request, false).await?;
+    let params = query.into_inner();
+    let limit = request.page_limit(&params)?.get().min(200);
+    let after = match params.page {
+        WhichPage::First(_) => None,
+        WhichPage::Next(cursor) => Some(DeliveryEstimatePosition {
+            id: cursor.after,
+            sort_key: cursor.sort_key,
+        }),
+    };
+    let mut entries = request
+        .context()
+        .store
+        .delivery_estimates(after, limit + 1)
+        .await?;
+    let more = entries.len() > limit as usize;
+    entries.truncate(limit as usize);
+    let mut page = ResultsPage::new(entries, &EstimateFilter {}, |entry, _| EstimateCursor {
+        after: entry.position.id,
+        sort_key: entry.position.sort_key,
+    })?;
+    if !more {
+        page.next_page = None;
+    }
+    let page = ResultsPage {
+        items: page.items.into_iter().map(|entry| entry.estimate).collect(),
+        next_page: page.next_page,
+    };
+    Ok(HttpResponseHeaders::new(
+        HttpResponseOk(page),
+        private_headers(),
+    ))
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct StateEventQuery {
+    after: Option<i64>,
+    limit: Option<u32>,
+}
+/// Consume persisted state transitions. Omit after on first setup to start at
+/// the current tail; subsequent requests use the returned next_after cursor.
+#[endpoint {method=GET,path="/v1/events",tags=["system"]}]
+async fn state_events(
+    request: RequestContext<Arc<Context>>,
+    query: Query<StateEventQuery>,
+) -> Result<HttpResponseHeaders<HttpResponseOk<StateEventPage>, PrivateHeaders>, HttpError> {
+    authenticate(&request, false).await?;
+    let query = query.into_inner();
+    let page = request
+        .context()
+        .store
+        .state_events(query.after, query.limit.unwrap_or(100))
+        .await?;
+    Ok(HttpResponseHeaders::new(
+        HttpResponseOk(page),
+        private_headers(),
+    ))
+}
+
 #[endpoint {method=GET,path="/v1/summary",tags=["system"]}]
 async fn summary(
     request: RequestContext<Arc<Context>>,
@@ -593,6 +671,8 @@ async fn system(
         "owner"
     } else if principal.integration {
         "integration"
+    } else if request.context().ingress_peer.is_some() {
+        "user"
     } else {
         "agent"
     }
@@ -773,7 +853,7 @@ async fn style(request: RequestContext<Arc<Context>>) -> Result<Response<Body>, 
 
 pub fn description() -> Result<ApiDescription<Arc<Context>>> {
     let mut api = ApiDescription::new();
-    let endpoints: [dropshot::ApiEndpoint<Arc<Context>>; 24] = [
+    let endpoints: [dropshot::ApiEndpoint<Arc<Context>>; 26] = [
         shipments_list.into(),
         carriers_list.into(),
         shipments_create.into(),
@@ -786,6 +866,8 @@ pub fn description() -> Result<ApiDescription<Arc<Context>>> {
         shipment_restore.into(),
         shipment_refresh.into(),
         shipment_events.into(),
+        delivery_estimates.into(),
+        state_events.into(),
         summary.into(),
         system.into(),
         installation.into(),

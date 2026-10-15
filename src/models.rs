@@ -470,3 +470,52 @@ pub struct CreatedAgentCredential {
     pub credential: AgentCredential,
     pub token: String,
 }
+
+/// An effective state transition preserved for Home Assistant notifications.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum StateEventType {
+    OutForDelivery,
+    Delivered,
+    Exception,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+pub struct StateEvent {
+    pub id: i64,
+    pub shipment_id: Uuid,
+    pub event_type: StateEventType,
+    pub status: Status,
+    pub title: String,
+    pub carrier: Option<crate::carrier::Carrier>,
+    pub direction: Direction,
+    pub at: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+pub struct StateEventPage {
+    pub items: Vec<StateEvent>,
+    /// Persist only after delivering every item in this page. A crash can
+    /// replay an event; its stable id lets consumers deduplicate it.
+    pub next_after: i64,
+    pub has_more: bool,
+}
+
+/// Small calendar projection; polling this never transfers tracking history.
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+pub struct DeliveryEstimate {
+    pub id: Uuid,
+    pub title: String,
+    pub carrier: Option<crate::carrier::Carrier>,
+    pub direction: Direction,
+    pub status: Status,
+    pub estimated_delivery_at: String,
+}
+pub struct DeliveryEstimatePosition {
+    pub id: Uuid,
+    pub sort_key: i64,
+}
+pub struct DeliveryEstimateEntry {
+    pub estimate: DeliveryEstimate,
+    pub position: DeliveryEstimatePosition,
+}

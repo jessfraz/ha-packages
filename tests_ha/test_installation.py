@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock
 import pytest
 from aiohasupervisor import SupervisorClient
 from aiohttp import web
+from homeassistant.auth.models import User
 from homeassistant.config_entries import ConfigEntryState
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryNotReady
@@ -133,10 +134,18 @@ async def test_loaded_presence_contains_only_matching_backup_coverage(
         inventory.backups.append(backup(APP_SLUG, now - timedelta(days=4), core=True))
     await entry.runtime_data.async_refresh()
     assert entry.state is ConfigEntryState.LOADED
-    assert [request.path for request in backend.requests][:3] == [
-        "/v1/summary",
-        "/v1/summary",
-        PRESENCE_PATH,
+    assert [
+        (request.path, request.query)
+        for request in backend.requests
+        if request.path in {"/v1/summary", PRESENCE_PATH}
+    ][:7] == [
+        ("/v1/summary", {}),
+        ("/v1/summary", {"direction": "inbound"}),
+        ("/v1/summary", {"direction": "outbound"}),
+        ("/v1/summary", {}),
+        ("/v1/summary", {"direction": "inbound"}),
+        ("/v1/summary", {"direction": "outbound"}),
+        (PRESENCE_PATH, {}),
     ]
     reports = check_ins(backend)
     assert len(reports) == 2
@@ -144,6 +153,11 @@ async def test_loaded_presence_contains_only_matching_backup_coverage(
     integration = await async_get_integration(hass, DOMAIN)
     assert report == {
         "version": str(integration.version),
+        "administrator_ids": [
+            user.id
+            for user in await hass.auth.async_get_users()
+            if user.is_active and user.is_admin
+        ],
         "backup": {
             "status": status,
             "last_backup": int(
@@ -204,16 +218,21 @@ async def test_failed_entity_setup_does_not_claim_loaded(
 
 
 @pytest.mark.parametrize("failure_status", [401, 503])
+@pytest.mark.parametrize("direction", [None, "inbound", "outbound"])
 async def test_failed_summary_never_sends_check_in(
     hass: HomeAssistant,
     backend: Backend,
     inventory: BackupInventory,
     failure_status: int,
+    direction: str | None,
 ) -> None:
     entry = await setup_paired(hass, backend)
     count = len(check_ins(backend))
     backup_calls = inventory.requests
-    backend.responses[("GET", "/v1/summary")] = (failure_status, b"{}", {})
+    path = "/v1/summary"
+    if direction is not None:
+        path += f"?direction={direction}"
+    backend.responses[("GET", path)] = (failure_status, b"{}", {})
     await entry.runtime_data.async_refresh()
     assert not entry.runtime_data.last_update_success
     assert len(check_ins(backend)) == count
@@ -302,6 +321,32 @@ async def test_old_full_backup_cannot_promote_new_app_only_backup(
         "status": "app_only",
         "last_backup": int((paired + timedelta(hours=1)).timestamp()),
     }
+
+
+async def test_unload_during_admin_lookup_does_not_claim_presence(
+    hass: HomeAssistant, backend: Backend, monkeypatch
+) -> None:
+    entry = await setup_paired(hass, backend)
+    started = asyncio.Event()
+    release = asyncio.Event()
+    original = hass.auth.async_get_users
+
+    async def users() -> list[User]:
+        started.set()
+        await release.wait()
+        return await original()
+
+    monkeypatch.setattr(hass.auth, "async_get_users", users)
+    before = len(check_ins(backend))
+    entry.async_create_background_task(
+        hass, entry.runtime_data.async_refresh(), "test admin lookup"
+    )
+    async with asyncio.timeout(2):
+        await started.wait()
+    assert await hass.config_entries.async_unload(entry.entry_id)
+    release.set()
+    await hass.async_block_till_done(wait_background_tasks=True)
+    assert len(check_ins(backend)) == before
 
 
 @pytest.mark.parametrize("status", [404, 503])

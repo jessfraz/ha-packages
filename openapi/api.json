@@ -371,6 +371,64 @@
         ],
         "type": "object"
       },
+      "DeliveryEstimate": {
+        "description": "Small calendar projection; polling this never transfers tracking history.",
+        "properties": {
+          "carrier": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Carrier"
+              }
+            ],
+            "nullable": true
+          },
+          "direction": {
+            "$ref": "#/components/schemas/Direction"
+          },
+          "estimated_delivery_at": {
+            "type": "string"
+          },
+          "id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "status": {
+            "$ref": "#/components/schemas/Status"
+          },
+          "title": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "direction",
+          "estimated_delivery_at",
+          "id",
+          "status",
+          "title"
+        ],
+        "type": "object"
+      },
+      "DeliveryEstimateResultsPage": {
+        "description": "A single page of results",
+        "properties": {
+          "items": {
+            "description": "list of items on this page of results",
+            "items": {
+              "$ref": "#/components/schemas/DeliveryEstimate"
+            },
+            "type": "array"
+          },
+          "next_page": {
+            "description": "token used to fetch the next page of results (if any)",
+            "nullable": true,
+            "type": "string"
+          }
+        },
+        "required": [
+          "items"
+        ],
+        "type": "object"
+      },
       "Direction": {
         "enum": [
           "inbound",
@@ -494,6 +552,9 @@
             "format": "int64",
             "nullable": true,
             "type": "integer"
+          },
+          "version": {
+            "$ref": "#/components/schemas/Check"
           }
         },
         "required": [
@@ -501,13 +562,21 @@
           "backend",
           "backup",
           "easypost",
-          "integration"
+          "integration",
+          "version"
         ],
         "type": "object"
       },
       "IntegrationPresence": {
         "additionalProperties": false,
         "properties": {
+          "administrator_ids": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
           "backup": {
             "$ref": "#/components/schemas/BackupReport"
           },
@@ -800,6 +869,84 @@
         ],
         "type": "object"
       },
+      "StateEvent": {
+        "properties": {
+          "at": {
+            "type": "string"
+          },
+          "carrier": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Carrier"
+              }
+            ],
+            "nullable": true
+          },
+          "direction": {
+            "$ref": "#/components/schemas/Direction"
+          },
+          "event_type": {
+            "$ref": "#/components/schemas/StateEventType"
+          },
+          "id": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "shipment_id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "status": {
+            "$ref": "#/components/schemas/Status"
+          },
+          "title": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "at",
+          "direction",
+          "event_type",
+          "id",
+          "shipment_id",
+          "status",
+          "title"
+        ],
+        "type": "object"
+      },
+      "StateEventPage": {
+        "properties": {
+          "has_more": {
+            "type": "boolean"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/StateEvent"
+            },
+            "type": "array"
+          },
+          "next_after": {
+            "description": "Persist only after delivering every item in this page. A crash can replay an event; its stable id lets consumers deduplicate it.",
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "has_more",
+          "items",
+          "next_after"
+        ],
+        "type": "object"
+      },
+      "StateEventType": {
+        "description": "An effective state transition preserved for Home Assistant notifications.",
+        "enum": [
+          "out_for_delivery",
+          "delivered",
+          "exception"
+        ],
+        "type": "string"
+      },
       "Status": {
         "enum": [
           "expected",
@@ -1042,7 +1189,7 @@
   "info": {
     "description": "Persistent local shipment records, manual corrections, and carrier synchronization. Use a Bearer owner or ingestion token. Creates require Idempotency-Key; writes to an existing shipment require its quoted revision in If-Match.",
     "title": "Shipments API",
-    "version": "0.4.0"
+    "version": "0.5.0"
   },
   "openapi": "3.0.3",
   "paths": {
@@ -1263,6 +1410,125 @@
         "summary": "List EasyPost's canonical tracking carriers. Omit carrier when automatic detection is preferred.",
         "tags": [
           "shipments"
+        ]
+      }
+    },
+    "/v1/delivery-estimates": {
+      "get": {
+        "operationId": "delivery_estimates",
+        "parameters": [
+          {
+            "description": "Maximum number of items returned by a single call",
+            "in": "query",
+            "name": "limit",
+            "schema": {
+              "format": "uint32",
+              "minimum": 1,
+              "nullable": true,
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Token returned by previous call to retrieve the subsequent page",
+            "in": "query",
+            "name": "page_token",
+            "schema": {
+              "nullable": true,
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeliveryEstimateResultsPage"
+                }
+              }
+            },
+            "description": "successful operation",
+            "headers": {
+              "cache-control": {
+                "required": true,
+                "schema": {
+                  "type": "string"
+                },
+                "style": "simple"
+              }
+            }
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Active inbound carrier estimates for native Home Assistant calendars.",
+        "tags": [
+          "system"
+        ],
+        "x-dropshot-pagination": {
+          "required": []
+        }
+      }
+    },
+    "/v1/events": {
+      "get": {
+        "description": "the current tail; subsequent requests use the returned next_after cursor.",
+        "operationId": "state_events",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "after",
+            "schema": {
+              "format": "int64",
+              "nullable": true,
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "schema": {
+              "format": "uint32",
+              "minimum": 0,
+              "nullable": true,
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StateEventPage"
+                }
+              }
+            },
+            "description": "successful operation",
+            "headers": {
+              "cache-control": {
+                "required": true,
+                "schema": {
+                  "type": "string"
+                },
+                "style": "simple"
+              }
+            }
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Consume persisted state transitions. Omit after on first setup to start at",
+        "tags": [
+          "system"
         ]
       }
     },

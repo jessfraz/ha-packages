@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.5.0
+
+- Keep combined and per-direction count entity IDs, add measurement statistics
+  and distinct status icons, and label the expected/unknown/pre-transit count
+  **Awaiting pickup** without claiming unknown tracking has a known label.
+- Add native delivery-exception and synchronization-problem entities, an
+  inbound ETA calendar, and durable out-for-delivery, delivered, and exception
+  events. Resume from a saved checkpoint after restart, skip initial history,
+  and expose stable event IDs for deduplicating at-least-once delivery.
+- Open the supervised dashboard at `/shipments` for ordinary Home Assistant
+  users while enforcing administrator access from authenticated integration
+  heartbeats. Standalone device links use the configured backend URL.
+- Warn when the app and HACS integration versions differ. Update both parts
+  and restart Home Assistant after installing the integration update.
+- Require a separate integration credential for standalone Home Assistant
+  pairing and reauthentication; keep the owner credential for direct access.
+
 ## 0.4.0
 
 - Preserve EasyPost carrier-credential errors, including native

@@ -1,0 +1,52 @@
+{
+  "entity": {
+    "sensor": {
+      "active": {
+        "default": "mdi:package-variant"
+      },
+      "expected": {
+        "default": "mdi:package-variant-closed"
+      },
+      "in_transit": {
+        "default": "mdi:truck-fast-outline"
+      },
+      "out_for_delivery": {
+        "default": "mdi:truck-delivery"
+      },
+      "delivered": {
+        "default": "mdi:package-variant-closed-check"
+      },
+      "exceptions": {
+        "default": "mdi:package-variant-remove"
+      },
+      "sync_errors": {
+        "default": "mdi:cloud-alert"
+      },
+      "inbound_active": {
+        "default": "mdi:package-down"
+      },
+      "inbound_out_for_delivery": {
+        "default": "mdi:truck-delivery"
+      },
+      "inbound_exceptions": {
+        "default": "mdi:package-variant-remove"
+      },
+      "outbound_active": {
+        "default": "mdi:package-up"
+      },
+      "outbound_exceptions": {
+        "default": "mdi:package-variant-remove"
+      }
+    },
+    "calendar": {
+      "inbound_deliveries": {
+        "default": "mdi:calendar-truck"
+      }
+    },
+    "event": {
+      "status_events": {
+        "default": "mdi:package-variant"
+      }
+    }
+  }
+}

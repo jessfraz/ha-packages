@@ -16,7 +16,7 @@ pub struct Config {
     pub database: PathBuf,
     #[arg(long, env = "SHIPMENTS_API_TOKEN", hide_env_values = true)]
     pub api_token: Option<String>,
-    #[arg(skip)]
+    #[arg(long, env = "SHIPMENTS_INTEGRATION_TOKEN", hide_env_values = true)]
     pub integration_token: Option<String>,
     #[arg(long, env = "EASYPOST_API_KEY", hide_env_values = true)]
     pub easypost_api_key: Option<String>,
@@ -60,6 +60,14 @@ impl Config {
             ensure!(
                 token.len() >= 32,
                 "API token must be at least 32 characters"
+            );
+            ensure!(
+                config
+                    .integration_token
+                    .as_ref()
+                    .is_none_or(|token| (32..=256).contains(&token.len())
+                        && token.bytes().all(|byte| byte.is_ascii_graphic())),
+                "integration credential must contain 32..256 printable ASCII characters"
             );
             ensure!(
                 config.integration_token.as_ref() != config.api_token.as_ref(),
