@@ -14,9 +14,9 @@ Add `https://github.com/jessfraz/ha-packages` in **Settings → Apps → App sto
 Repositories**, then install **Shipments**. On older Home Assistant versions,
 these settings are named **Add-ons**.
 
-Set `easypost_api_key` if you want carrier tracking, then start the app. Manual
-shipment records work without EasyPost. The app creates and saves its own
-credentials automatically.
+Set `easypost_api_key`, then start the app. Adding a shipment or changing its
+tracking identity requires EasyPost verification. The app creates and saves
+its own credentials automatically.
 
 Open the web UI from the app page, or enable **Show in sidebar**. Home
 Assistant authenticates the dashboard through ingress. Server credentials
@@ -64,8 +64,9 @@ If either needs attention, finish the HACS installation, restart Home
 Assistant, and confirm the connection in **Devices & services**. If already
 paired, check the integration for a connection or authentication error.
 
-EasyPost is optional. **Run checks** makes a read-only request when a key is
-configured; results are cached for up to a minute.
+**Run checks** makes a read-only EasyPost request when a key is configured;
+results are cached for up to a minute. A key is required to add shipments or
+change their tracking details.
 
 The backup check shows the recorded backup time. It requires a backup made
 after pairing. An older, app-only, or missing backup needs attention; an
@@ -74,11 +75,30 @@ unavailable backup inventory is reported as
 creating a backup in **Settings → System → Backups**. The check confirms backup
 inventory and coverage; restore testing is a separate step.
 
-## Optional settings
+## Settings
 
 | Option | Purpose |
 | --- | --- |
-| `easypost_api_key` | Enables carrier tracking through EasyPost. |
+| `easypost_api_key` | Required to verify new shipments and changed tracking identities. |
+
+## Add or edit a shipment
+
+Every shipment needs a tracking number. Leave **Carrier** blank for automatic
+detection, or supply a carrier when EasyPost cannot identify one unambiguously.
+Select **Save shipment** and wait while the app verifies tracking. A newly
+created label can be saved before its first carrier scan; unknown and
+pre-transit tracking states are accepted.
+
+An invalid number, unsupported carrier, or ambiguous detection must be fixed
+before saving. If EasyPost is unavailable or its key is missing, the change
+is not saved. Your draft stays in the form so you can retry. Existing records
+can still be read, corrected, and edited without changing tracking. A tracking
+number cannot be removed from an existing shipment.
+
+The list shows each carrier and tracking number. Open a shipment to see its
+carrier status, last successful check, next scheduled check, and EasyPost
+health before its sources. Manual corrections are shown separately. Tracking
+links open the supported carrier's site or the EasyPost page when available.
 
 ## Agent access
 
@@ -92,6 +112,9 @@ An agent can read, add, and edit shipments, attach evidence, and request
 tracking updates. It cannot make manual status corrections, archive records,
 run installation checks, or manage credentials. Credential hashes are saved
 in SQLite and survive restarts.
+
+Ingestion clients can use the [API error codes and retry guidance](../README.md#agents-and-human-corrections)
+to distinguish invalid input from a provider or configuration failure.
 
 For clients on another machine, enable the app's optional `8080/tcp` network
 port and use the Home Assistant host address. All requests to that port
@@ -111,6 +134,7 @@ action: shipments.add
 data:
   title: Workshop supplies
   merchant: Example shop
+  tracking_number: YOUR_TRACKING_NUMBER
 response_variable: parcel
 ```
 
@@ -126,22 +150,24 @@ decisions; unattended ingestion should use the restricted agent API token.
 
 ## Standalone Docker
 
-The same image runs without Home Assistant. Docker is required. Create a token
-and start it with a persistent volume:
+The same image runs without Home Assistant. Docker is required. Create an
+owner token, set your EasyPost key, and start it with a persistent volume:
 
 ```sh
 export SHIPMENTS_API_TOKEN="$(openssl rand -hex 32)"
+export EASYPOST_API_KEY="your-easypost-api-key"
 docker run --detach --name shipments --restart unless-stopped \
   --publish 127.0.0.1:8080:8080 \
   --mount type=volume,source=shipments-data,target=/data \
   --env SHIPMENTS_API_TOKEN \
-  ghcr.io/jessfraz/ha-packages:0.2.2
+  --env EASYPOST_API_KEY \
+  ghcr.io/jessfraz/ha-packages:0.3.0
 ```
 
 Open `http://127.0.0.1:8080` and enter the token. Save it in your password
-manager before closing the shell. To enable tracking, also pass
-`--env EASYPOST_API_KEY` with a key set in your shell. The image supports amd64
-and arm64 and runs the service as an unprivileged user.
+manager before closing the shell. Tracker registration can incur EasyPost
+charges. The image supports amd64 and arm64 and runs the service as an
+unprivileged user.
 
 To use the integration with a standalone server, install it through HACS and
 restart Home Assistant. Then choose **Settings → Devices & services → Add
@@ -166,3 +192,8 @@ The app version selects a matching prebuilt container image. Release tags
 publish images for amd64 and aarch64. Update the app through the App Store and
 the integration through HACS. Restart Home Assistant after integration updates.
 Back up both parts before upgrading.
+
+The 0.3.0 upgrade permanently deletes legacy shipments without a tracking
+number, including their sources, history, and saved idempotency responses.
+Tracked records and their existing history are preserved. Make a backup
+before upgrading if you need to keep the removed data.

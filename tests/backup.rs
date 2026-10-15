@@ -22,14 +22,17 @@ async fn cold_backup_restores_records_history_and_replay_without_wal() {
         title: "Backup parcel".into(),
         merchant: None,
         order_reference: Some("TEST-123".into()),
-        tracking: None,
+        tracking: Tracking {
+            carrier: Some("usps".into()),
+            number: "BACKUP123".into(),
+        },
         source: Some(Source {
             namespace: "test".into(),
             key: "message".into(),
         }),
     };
     let original = store
-        .create(input.clone(), "owner", "durable-key")
+        .create(input.clone(), "owner", "durable-key", None)
         .await
         .unwrap();
     let changed = store
@@ -70,7 +73,7 @@ async fn cold_backup_restores_records_history_and_replay_without_wal() {
     );
     assert_eq!(
         restored
-            .create(input, "owner", "durable-key")
+            .create(input, "owner", "durable-key", None)
             .await
             .unwrap()
             .revision,

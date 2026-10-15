@@ -32,12 +32,56 @@ pub enum SyncError {
         status: u16,
         retry_after: Option<i64>,
     },
+    #[error(transparent)]
+    Rejected(#[from] TrackerRejection),
     #[error("EasyPost response exceeded the size limit")]
     ResponseTooLarge,
     #[error("EasyPost returned an invalid tracker")]
     InvalidResponse,
     #[error("EasyPost returned an invalid connection-check response")]
     InvalidConnectionResponse,
+}
+
+/// Documented tracker creation failures. Provider free text and nested errors
+/// are intentionally ignored so rejected input cannot leak private data.
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, thiserror::Error)]
+pub enum TrackerRejection {
+    #[serde(rename = "TRACKER.NO_CARRIER_FOR_CODE")]
+    #[error(
+        "EasyPost could not identify a supported carrier. Check the tracking number or specify its carrier."
+    )]
+    NoCarrierForCode,
+    #[serde(rename = "TRACKER.CARRIER_CODE_MISMATCH")]
+    #[error(
+        "The tracking number does not match the selected carrier. Check the number and carrier."
+    )]
+    CarrierCodeMismatch,
+    #[serde(rename = "TRACKER.MULTIPLE_CARRIERS_FOR_CODE")]
+    #[error("The tracking number matches multiple carriers. Specify its carrier.")]
+    MultipleCarriersForCode,
+    #[serde(rename = "TRACKER.INVALID_PARAMS")]
+    #[error("EasyPost could not accept this tracking number and carrier. Check both values.")]
+    InvalidParams,
+    #[serde(rename = "TRACKER.INVALID_TEST_CODE")]
+    #[error(
+        "This EasyPost test key accepts only EasyPost test tracking numbers. Use a production key for real shipments."
+    )]
+    InvalidTestCode,
+    #[serde(rename = "TRACKER.NO_CARRIER_ACCOUNT")]
+    #[error(
+        "The EasyPost account needs a carrier account for this carrier. Configure it in EasyPost and try again."
+    )]
+    NoCarrierAccount,
+}
+
+#[derive(Deserialize)]
+struct TrackerError {
+    error: TrackerErrorCode,
+}
+
+#[derive(Deserialize)]
+struct TrackerErrorCode {
+    code: TrackerRejection,
 }
 
 #[derive(Clone)]
@@ -53,7 +97,10 @@ pub struct EasyPostClient {
 pub struct Tracker {
     pub id: String,
     pub tracking_code: String,
+    pub carrier: String,
     pub status: Status,
+    #[serde(default)]
+    pub public_url: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -169,7 +216,11 @@ impl EasyPostClient {
             .send()
             .await
             .map_err(redact_request_error)?;
-        Self::read_tracker(response, tracking_code).await
+        let tracker = Self::read_tracker(response, tracking_code).await?;
+        if carrier.is_some_and(|carrier| !carrier.eq_ignore_ascii_case(&tracker.carrier)) {
+            return Err(TrackerRejection::CarrierCodeMismatch.into());
+        }
+        Ok(tracker)
     }
 
     pub async fn retrieve(
@@ -203,19 +254,25 @@ impl EasyPostClient {
     }
 
     async fn read_tracker(response: Response, tracking_code: &str) -> Result<Tracker, SyncError> {
-        let tracker: Tracker = serde_json::from_slice(&Self::read_body(response).await?)
+        let mut tracker: Tracker = serde_json::from_slice(&Self::read_body(response).await?)
             .map_err(|_| SyncError::InvalidResponse)?;
         if !valid_tracker_id(&tracker.id)
             || tracker.tracking_code != tracking_code
+            || tracker.carrier.trim().is_empty()
+            || tracker.carrier.len() > 100
+            || tracker.carrier.chars().any(char::is_control)
             || tracker.status == Status::Expected
         {
             return Err(SyncError::InvalidResponse);
         }
+        tracker.carrier = tracker.carrier.trim().to_ascii_lowercase();
+        tracker.public_url = tracker.public_url.and_then(safe_tracking_url);
         Ok(tracker)
     }
 
     async fn read_body(mut response: Response) -> Result<Vec<u8>, SyncError> {
-        if !response.status().is_success() {
+        let status = response.status();
+        let http_error = if !status.is_success() {
             // Accept bounded delta-seconds. Ignore unparseable, zero, or
             // excessive advice; none of the raw header or body is persisted.
             let retry_after = response
@@ -224,11 +281,17 @@ impl EasyPostClient {
                 .and_then(|value| value.to_str().ok())
                 .and_then(|value| value.parse::<i64>().ok())
                 .filter(|seconds| (1..=MAX_RETRY_SECONDS).contains(seconds));
-            return Err(SyncError::Http {
-                status: response.status().as_u16(),
+            let error = SyncError::Http {
+                status: status.as_u16(),
                 retry_after,
-            });
-        }
+            };
+            if !matches!(status.as_u16(), 400 | 422) {
+                return Err(error);
+            }
+            Some(error)
+        } else {
+            None
+        };
         if response
             .content_length()
             .is_some_and(|length| length > MAX_BODY_BYTES as u64)
@@ -242,8 +305,28 @@ impl EasyPostClient {
             }
             body.extend_from_slice(&chunk);
         }
+        if let Some(error) = http_error {
+            return Err(serde_json::from_slice::<TrackerError>(&body)
+                .map(|error| SyncError::Rejected(error.error.code))
+                .unwrap_or(error));
+        }
         Ok(body)
     }
+}
+
+fn safe_tracking_url(value: String) -> Option<String> {
+    if value.len() > 2048 {
+        return None;
+    }
+    let url = Url::parse(&value).ok()?;
+    let normalized = url.to_string();
+    (url.scheme() == "https"
+        && url.host_str() == Some("track.easypost.com")
+        && url.username().is_empty()
+        && url.password().is_none()
+        && url.port().is_none()
+        && normalized.len() <= 2048)
+        .then_some(normalized)
 }
 
 fn valid_tracker_id(id: &str) -> bool {
@@ -263,6 +346,16 @@ fn redact_request_error(error: reqwest::Error) -> SyncError {
     }
 }
 
+pub(crate) fn poll_delay(status: Status) -> Option<i64> {
+    if status.is_terminal() {
+        None
+    } else if status == Status::OutForDelivery {
+        Some(5 * 60)
+    } else {
+        Some(30 * 60)
+    }
+}
+
 #[derive(FromRow)]
 struct Claim {
     id: String,
@@ -276,6 +369,7 @@ struct Claim {
 #[derive(FromRow)]
 struct CurrentSync {
     carrier_status: Option<String>,
+    tracking_carrier: Option<String>,
     override_status: Option<String>,
     attempts: i64,
 }
@@ -336,7 +430,7 @@ impl SyncWorker {
             "UPDATE shipments SET lease_until = lease_until
              WHERE id = ? AND tracking_generation = ? AND lease_token = ?
                AND lease_until > unixepoch() AND archived = 0
-             RETURNING carrier_status, override_status, attempts",
+             RETURNING carrier_status, tracking_carrier, override_status, attempts",
         )
         .bind(&claim.id)
         .bind(claim.tracking_generation)
@@ -361,16 +455,19 @@ impl SyncWorker {
         match observation {
             Ok(tracker) => {
                 let status = serde_json::to_string(&tracker.status)?;
-                let changed = current.carrier_status.as_deref() != Some(&status);
-                let next_delay = if override_terminal || tracker.status.is_terminal() {
+                let carrier_changed =
+                    current.tracking_carrier.as_deref() != Some(tracker.carrier.as_str());
+                // Carrier is part of the tracking identity. A canonical carrier
+                // change must invalidate edits that read the earlier identity.
+                let changed = current.carrier_status.as_deref() != Some(&status) || carrier_changed;
+                let next_delay = if override_terminal {
                     None
-                } else if tracker.status == Status::OutForDelivery {
-                    Some(5 * 60)
                 } else {
-                    Some(30 * 60)
+                    poll_delay(tracker.status)
                 };
                 sqlx::query(
                     "UPDATE shipments SET tracker_id = ?, carrier_status = ?,
+                         tracking_carrier = ?, tracking_url = ?,
                          revision = revision + ?,
                          updated_at = CASE WHEN ? THEN strftime('%Y-%m-%dT%H:%M:%fZ', 'now') ELSE updated_at END,
                          last_success_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
@@ -380,6 +477,8 @@ impl SyncWorker {
                 )
                 .bind(&tracker.id)
                 .bind(&status)
+                .bind(&tracker.carrier)
+                .bind(&tracker.public_url)
                 .bind(i64::from(changed))
                 .bind(changed)
                 .bind(next_delay)
@@ -390,13 +489,21 @@ impl SyncWorker {
                     let id = Uuid::parse_str(&claim.id)
                         .map_err(|error| Error::Database(sqlx::Error::Decode(Box::new(error))))?;
                     let snapshot = crate::store::Store::get_in(&mut transaction, id).await?;
+                    let previous_status =
+                        serde_json::to_string(&previous_status.unwrap_or_default())?;
+                    let detail = if carrier_changed {
+                        format!(
+                            "Carrier tracking information updated: carrier {} -> {}; status {previous_status} -> {status}",
+                            current.tracking_carrier.as_deref().unwrap_or("unspecified"),
+                            tracker.carrier,
+                        )
+                    } else {
+                        format!("Carrier status: {previous_status} -> {status}")
+                    };
                     sqlx::query("INSERT INTO events (shipment_id, kind, actor_id, detail, snapshot) VALUES (?, ?, 'easypost', ?, ?)")
                         .bind(&claim.id)
                         .bind(serde_json::to_string(&EventKind::CarrierUpdated)?)
-                        .bind(format!(
-                            "Carrier status: {} -> {status}",
-                            serde_json::to_string(&previous_status.unwrap_or_default())?
-                        ))
+                        .bind(detail)
                         .bind(serde_json::to_string(&snapshot)?)
                         .execute(&mut *transaction)
                         .await?;

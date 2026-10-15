@@ -31,6 +31,7 @@ let appliedSearch = "";
 let listController = null;
 let refreshTimer = null;
 let showInstallation = false;
+let providerEnabled = false;
 let installationInitialized = false;
 let agentCredentials = [];
 let agentBusy = false;
@@ -96,6 +97,7 @@ function guarded(action) {
 
 async function connect() {
   const system = await api("v1/system");
+  providerEnabled = system.provider_enabled;
   byId("login").hidden = true;
   byId("dashboard").hidden = false;
   byId("add").hidden = false;
@@ -114,7 +116,7 @@ async function connect() {
   else if (byId("agent-access").open) loadAgents();
   byId("health").textContent = system.provider_enabled
     ? `${system.pending_syncs} tracking checks scheduled · ${system.sync_errors} sync errors`
-    : "Carrier tracking is off. Local records and manual controls are available.";
+    : "Set the EasyPost API key before adding a shipment or changing its tracking details.";
   try {
     await load();
   } finally {
@@ -159,10 +161,11 @@ async function load(append = false) {
     // A search or archive-filter change owns its whole result, including any
     // pagination requests already in flight for the previous list.
     if (generation !== listGeneration) return;
+    providerEnabled = system.provider_enabled;
     if (installation) renderInstallation(installation);
     byId("health").textContent = system.provider_enabled
       ? `${system.pending_syncs} tracking checks scheduled · ${system.sync_errors} sync errors`
-      : "Carrier tracking is off. Local records and manual controls are available.";
+      : "Set the EasyPost API key before adding a shipment or changing its tracking details.";
     byId("health").append(
       ` Last checked ${new Date().toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}.`,
     );
@@ -191,10 +194,9 @@ async function load(append = false) {
       ]
         .filter(Boolean)
         .join(" · ");
-      copy.append(
-        element("h2", shipment.title),
-        element("p", description || "Manual shipment"),
-      );
+      copy.append(element("h2", shipment.title));
+      if (description) copy.append(element("p", description));
+      copy.append(element("p", `${shipment.tracking.carrier || "Carrier not identified"} · ${shipment.tracking.number}`, "shipment-tracking"));
       const warning = ["failure", "error", "return_to_sender"].includes(
         shipment.status,
       );
@@ -223,7 +225,7 @@ async function load(append = false) {
         ],
         all: [
           "No shipments yet.",
-          "Use Add shipment to track an expected delivery, with or without a tracking number.",
+          "Use Add shipment when you have a tracking number. New labels do not need a carrier scan.",
         ],
         archived: [
           "No archived shipments.",
@@ -560,7 +562,7 @@ function closeEditor() {
   editorGeneration += 1;
   editing = null;
   createKey = null;
-  savingEditor = false;
+  setEditorSaving(false);
   if (byId("editor").open) byId("editor").close();
 }
 
@@ -569,8 +571,7 @@ function openEditor(shipment = null) {
   editorGeneration += 1;
   editing = shipment;
   createKey = shipment ? null : crypto.randomUUID();
-  savingEditor = false;
-  byId("save").disabled = false;
+  setEditorSaving(false);
   const form = byId("edit-form");
   form.reset();
   byId("edit-error").textContent = "";
@@ -589,12 +590,51 @@ function openEditor(shipment = null) {
   byId("editor").showModal();
 }
 
+function setEditorSaving(saving, verifying = false) {
+  savingEditor = saving;
+  byId("shipment-fields").disabled = saving;
+  byId("save").disabled = saving;
+  byId("save").textContent = saving
+    ? verifying ? "Verifying tracking…" : "Saving…"
+    : "Save shipment";
+  byId("edit-status").textContent = saving && verifying
+    ? "Checking this tracking number with EasyPost. This may take a moment."
+    : "";
+}
+
 function currentDetail(id, generation) {
   return (
     generation === detailGeneration &&
     selected?.id === id &&
     byId("detail").open
   );
+}
+
+function carrierTrackingUrl(tracking) {
+  const carriers = new Map([
+    ["usps", ["https://tools.usps.com/go/TrackConfirmAction", "tLabels"]],
+    ["ups", ["https://www.ups.com/track", "tracknum"]],
+    ["fedex", ["https://www.fedex.com/fedextrack/", "trknbr"]],
+    ["dhl", ["https://www.dhl.com/us-en/home/tracking.html", "tracking-id"]],
+    ["dhlexpress", ["https://www.dhl.com/us-en/home/tracking.html", "tracking-id"]],
+  ]);
+  const template = carriers.get(tracking.carrier?.toLowerCase());
+  if (!template) return null;
+  const url = new URL(template[0]);
+  url.searchParams.set(template[1], tracking.number);
+  return url;
+}
+
+function easyPostTrackingUrl(value) {
+  if (!value) return null;
+  try {
+    const url = new URL(value);
+    if (url.protocol === "https:" && url.host === "track.easypost.com" &&
+        !url.username && !url.password) return url;
+  } catch {
+    // An absent or invalid public tracking URL does not block shipment details.
+  }
+  return null;
 }
 
 async function show(id) {
@@ -612,32 +652,51 @@ async function show(id) {
   byId("detail-title").textContent = shipment.title;
   const content = byId("detail-content");
   content.replaceChildren();
-  const detail = (text) => content.append(element("p", text, "detail-item"));
-  detail(
-    `Status: ${labels[shipment.status]}${shipment.status_override ? " · manual correction" : ""}`,
-  );
+  const fields = element("dl", undefined, "shipment-details");
+  const detail = (label, value) => fields.append(element("dt", label), element("dd", value));
+  detail("Tracking number", shipment.tracking.number);
+  detail("Carrier", shipment.tracking.carrier || "Not identified");
+  detail("Carrier status", labels[shipment.carrier_status] || "Not reported");
+  detail("Record status", labels[shipment.status]);
+  detail("Provider", "EasyPost");
+  detail("Provider health", !providerEnabled ? "EasyPost API key is not configured" :
+    shipment.sync.last_error ? "Last check failed" :
+    shipment.sync.last_success_at ? "Last check succeeded" : "Not checked");
+  detail("Last successful check", shipment.sync.last_success_at
+    ? new Date(shipment.sync.last_success_at).toLocaleString() : "Not checked");
+  detail("Next check", shipment.sync.next_attempt_at == null
+    ? "Not scheduled" : new Date(shipment.sync.next_attempt_at * 1000).toLocaleString());
+  if (shipment.sync.last_error) detail("Tracking error", shipment.sync.last_error);
+  if (shipment.sync.tracker_id) detail("EasyPost tracker", shipment.sync.tracker_id);
+  if (shipment.merchant) detail("Merchant", shipment.merchant);
+  if (shipment.order_reference) detail("Order reference", shipment.order_reference);
+  content.append(fields);
+
+  const links = element("p", undefined, "tracking-links");
+  for (const [label, url] of [
+    [`Track with ${shipment.tracking.carrier}`, carrierTrackingUrl(shipment.tracking)],
+    ["Track with EasyPost", easyPostTrackingUrl(shipment.sync.tracking_url)],
+  ]) {
+    if (!url) continue;
+    const link = element("a", `${label} ↗`);
+    link.href = url.href;
+    link.target = "_blank";
+    link.rel = "noopener noreferrer";
+    links.append(link);
+  }
+  if (links.children.length) content.append(links);
   if (shipment.status_override) {
-    detail(
-      `${shipment.status_override.reason} (${shipment.status_override.actor_id})`,
+    content.append(
+      element("h3", "Manual correction"),
+      element("p", `${labels[shipment.status_override.status]} · ${shipment.status_override.reason}`, "detail-item"),
+      element("p", `${shipment.status_override.actor_id} · ${new Date(shipment.status_override.set_at).toLocaleString()}`, "muted"),
     );
   }
-  if (shipment.carrier_status)
-    detail(`Carrier reports: ${labels[shipment.carrier_status]}`);
-  if (shipment.tracking) {
-    detail(
-      `${shipment.tracking.carrier || "Auto-detect carrier"} · ${shipment.tracking.number}`,
-    );
+  if (shipment.sources.length) {
+    content.append(element("h3", "Sources"));
+    for (const source of shipment.sources)
+      content.append(element("p", `${source.namespace} / ${source.key}`, "detail-item"));
   }
-  if (shipment.merchant) detail(`Merchant: ${shipment.merchant}`);
-  if (shipment.order_reference) detail(`Order: ${shipment.order_reference}`);
-  if (shipment.sync.last_success_at) {
-    detail(
-      `Last carrier update: ${new Date(shipment.sync.last_success_at).toLocaleString()}`,
-    );
-  }
-  if (shipment.sync.last_error) detail(`Tracking: ${shipment.sync.last_error}`);
-  for (const source of shipment.sources)
-    detail(`Source: ${source.namespace} / ${source.key}`);
 
   const actions = byId("actions");
   actions.replaceChildren();
@@ -827,19 +886,22 @@ byId("edit-form").addEventListener("submit", async (event) => {
   const generation = editorGeneration;
   const shipment = editing;
   const key = createKey;
-  savingEditor = true;
   const form = event.target;
-  const save = byId("save");
-  save.disabled = true;
   const values = Object.fromEntries(new FormData(form));
   const input = {
     title: values.title,
     merchant: values.merchant || null,
     order_reference: values.order_reference || null,
-    tracking: values.number
-      ? { carrier: values.carrier || null, number: values.number }
-      : null,
+    tracking: {
+      carrier: values.carrier.trim() || null,
+      number: values.number.trim(),
+    },
   };
+  const verifying = !shipment ||
+    input.tracking.number !== shipment.tracking.number ||
+    input.tracking.carrier !== shipment.tracking.carrier;
+  byId("edit-error").textContent = "";
+  setEditorSaving(true, verifying);
   try {
     const headers = shipment
       ? { "If-Match": `"${shipment.revision}"` }
@@ -858,8 +920,7 @@ byId("edit-form").addEventListener("submit", async (event) => {
       byId("edit-error").textContent = editError(error);
   } finally {
     if (generation === editorGeneration) {
-      savingEditor = false;
-      save.disabled = false;
+      setEditorSaving(false);
     }
   }
 });

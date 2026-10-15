@@ -1,8 +1,8 @@
 use crate::{
     installation::{Installation, InstallationReport, IntegrationPresence, valid_presence},
     models::*,
-    store::Store,
-    sync::EasyPostClient,
+    store::{Store, validate_create, validate_update},
+    sync::{EasyPostClient, SyncError, Tracker, TrackerRejection},
 };
 use anyhow::{Context as _, Result, anyhow};
 use dropshot::ClientErrorStatusCode as StatusCode;
@@ -270,7 +270,7 @@ async fn shipments_list(
     Ok(HttpResponseOk(page))
 }
 
-/// Create a durable local record; provider registration happens asynchronously.
+/// Verify tracking with EasyPost before creating a durable local record.
 #[endpoint {method=POST,path="/v1/shipments",tags=["shipments"]}]
 async fn shipments_create(
     request: RequestContext<Arc<Context>>,
@@ -279,11 +279,17 @@ async fn shipments_create(
     let principal = authenticate(&request, false).await?;
     let key = header(&request, "idempotency-key")
         .ok_or_else(|| client_error(StatusCode::BAD_REQUEST, "Idempotency-Key is required"))?;
-    let shipment = request
-        .context()
-        .store
-        .create(body.into_inner(), &principal.actor, key)
-        .await?;
+    let mut input = body.into_inner();
+    validate_create(&mut input, key)?;
+    let store = &request.context().store;
+    let shipment = if let Some(saved) = store.replay_create(&input, &principal.actor, key).await? {
+        saved
+    } else {
+        let tracker = verify_tracking(&request, &input.tracking).await?;
+        store
+            .create(input, &principal.actor, key, Some(&tracker))
+            .await?
+    };
     let headers = VersionHeaders {
         etag: format!("\"{}\"", shipment.revision),
     };
@@ -311,18 +317,87 @@ async fn shipment_update(
     body: TypedBody<UpdateShipment>,
 ) -> Result<ShipmentResponse, HttpError> {
     let principal = authenticate(&request, false).await?;
+    let id = path.into_inner().id;
+    let expected_revision = revision(&request)?;
+    let mut input = body.into_inner();
+    validate_update(&mut input)?;
+    let verified = if let Some(value) = &mut input.tracking.value {
+        let tracking = value
+            .as_mut()
+            .ok_or(crate::error::Error::TrackingRequired)?;
+        let current = request.context().store.get(id).await?;
+        if current.revision != expected_revision {
+            return Err(crate::error::Error::Precondition.into());
+        }
+        if *tracking != current.tracking {
+            Some(verify_tracking(&request, tracking).await?)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
     Ok(shipment_response(
         request
             .context()
             .store
             .update(
-                path.into_inner().id,
-                revision(&request)?,
-                body.into_inner(),
+                id,
+                expected_revision,
+                input,
                 &principal.actor,
+                verified.as_ref(),
             )
             .await?,
     ))
+}
+
+fn tracking_error(code: &str, status: dropshot::ErrorStatusCode, message: &str) -> HttpError {
+    HttpError {
+        status_code: status,
+        error_code: Some(code.into()),
+        external_message: message.into(),
+        internal_message: message.into(),
+        headers: None,
+    }
+}
+
+async fn verify_tracking(
+    request: &RequestContext<Arc<Context>>,
+    tracking: &Tracking,
+) -> Result<Tracker, HttpError> {
+    let provider = request.context().provider.as_ref().ok_or_else(|| tracking_error(
+        "tracking_provider_unconfigured", dropshot::ErrorStatusCode::SERVICE_UNAVAILABLE,
+        "Configure the EasyPost API key before adding shipments or changing tracking numbers. No changes were saved.",
+    ))?;
+    provider.register(&tracking.number, tracking.carrier.as_deref()).await.map_err(|error| {
+        let unavailable = dropshot::ErrorStatusCode::SERVICE_UNAVAILABLE;
+        match error {
+            SyncError::Rejected(rejection) => {
+                let code = match rejection {
+                    TrackerRejection::NoCarrierForCode => "tracking_unsupported",
+                    TrackerRejection::CarrierCodeMismatch => "tracking_carrier_mismatch",
+                    TrackerRejection::MultipleCarriersForCode => "tracking_carrier_ambiguous",
+                    TrackerRejection::InvalidParams => "tracking_invalid",
+                    TrackerRejection::InvalidTestCode => "tracking_test_key",
+                    TrackerRejection::NoCarrierAccount => "tracking_carrier_account_required",
+                };
+                let status = if rejection == TrackerRejection::NoCarrierAccount { unavailable } else { dropshot::ErrorStatusCode::BAD_REQUEST };
+                tracking_error(code, status, &rejection.to_string())
+            }
+            SyncError::Http { status: 401 | 403, .. } => tracking_error("tracking_provider_credentials", unavailable, "EasyPost rejected the configured API key. Check the key in app settings; no changes were saved."),
+            SyncError::Http { status: 429, retry_after } => {
+                let mut error = tracking_error("tracking_verification_rate_limited", unavailable, "EasyPost is rate limiting tracking verification. Wait and retry; no changes were saved.");
+                if let Some(seconds) = retry_after.and_then(|seconds| HeaderValue::from_str(&seconds.to_string()).ok()) {
+                    let mut headers = http::HeaderMap::new();
+                    headers.insert(http::header::RETRY_AFTER, seconds);
+                    error.headers = Some(Box::new(headers));
+                }
+                error
+            }
+            _ => tracking_error("tracking_verification_unavailable", unavailable, "EasyPost could not verify tracking right now. Retry shortly; no changes were saved. This does not mean the tracking number is invalid."),
+        }
+    })
 }
 
 #[endpoint {method=POST,path="/v1/shipments/{id}/sources",tags=["shipments"]}]

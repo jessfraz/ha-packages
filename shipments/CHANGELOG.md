@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.3.0
+
+- Require a tracking number and EasyPost acceptance before creating a shipment
+  or changing its tracking identity. Carrier detection remains optional, and
+  unknown or pre-transit labels do not need a first carrier scan.
+- Keep unsaved drafts when verification fails and show verification progress
+  while saving. Provider failures leave the registry unchanged.
+- Show carrier and tracking details in the list, with provider health and
+  trusted carrier and EasyPost tracking links in shipment details.
+- Permanently remove legacy shipments without tracking numbers during the
+  upgrade, including their sources, history, and idempotency responses.
+  Tracked shipments and their history are preserved. Back up before upgrading.
+
 ## 0.2.2
 
 - Remove the manual agent token from app settings and environment options.

@@ -15,10 +15,14 @@ struct App {
     url: String,
     agent: String,
     agent_id: uuid::Uuid,
+    provider_fixture: Option<ProviderFixture>,
 }
 impl App {
     async fn new(ingress_peer: Option<std::net::IpAddr>) -> Self {
-        Self::with_provider(ingress_peer, None).await
+        let fixture = ProviderFixture::new();
+        let mut app = Self::with_provider(ingress_peer, Some(fixture.client.clone())).await;
+        app.provider_fixture = Some(fixture);
+        app
     }
     async fn with_provider(
         ingress_peer: Option<std::net::IpAddr>,
@@ -58,6 +62,7 @@ impl App {
         };
         let url = format!("http://{}", server.local_addr());
         Self {
+            provider_fixture: None,
             agent: created.token,
             agent_id: created.credential.id,
             _dir: dir,
@@ -73,9 +78,18 @@ impl App {
             .bearer_auth(OWNER)
     }
     async fn create(&self, title: &str, key: &str) -> Response {
+        let mut body = input(title);
+        body.tracking.number = format!(
+            "TEST{}",
+            key.bytes()
+                .filter(u8::is_ascii_alphanumeric)
+                .map(char::from)
+                .collect::<String>()
+                .to_uppercase()
+        );
         self.request(Method::POST, "/v1/shipments")
             .header("Idempotency-Key", key)
-            .json(&input(title))
+            .json(&body)
             .send()
             .await
             .unwrap()
@@ -90,7 +104,15 @@ fn input(title: &str) -> CreateShipment {
         title: title.into(),
         merchant: None,
         order_reference: None,
-        tracking: None,
+        tracking: Tracking {
+            carrier: Some("usps".into()),
+            number: title
+                .bytes()
+                .filter(u8::is_ascii_alphanumeric)
+                .map(char::from)
+                .collect::<String>()
+                .to_uppercase(),
+        },
         source: None,
     }
 }
@@ -154,10 +176,10 @@ async fn optimistic_updates_and_null_patch_preserve_newer_state() {
     let app = App::new(None).await;
     let mut request = input("Parcel");
     request.merchant = Some("Shop".into());
-    request.tracking = Some(Tracking {
+    request.tracking = Tracking {
         carrier: Some("UPS".into()),
         number: "1Z ABC".into(),
-    });
+    };
     let created: Shipment = app
         .request(Method::POST, "/v1/shipments")
         .header("Idempotency-Key", "new")
@@ -192,7 +214,7 @@ async fn optimistic_updates_and_null_patch_preserve_newer_state() {
     assert_eq!(response.status(), StatusCode::OK);
     let edited: Shipment = response.json().await.unwrap();
     assert!(edited.merchant.is_none());
-    assert_eq!(edited.tracking.unwrap().number, "1ZABC");
+    assert_eq!(edited.tracking.number, "1ZABC");
     assert_eq!(
         app.request(Method::PATCH, &path)
             .header("If-Match", "\"1\"")
@@ -316,10 +338,10 @@ async fn owner_actions_are_separate_from_ingestion_identity() {
 async fn duplicate_sources_tracking_archive_and_pagination_use_real_http() {
     let app = App::new(None).await;
     let mut body = input("First");
-    body.tracking = Some(Tracking {
+    body.tracking = Tracking {
         carrier: Some("UPS".into()),
         number: "TEST001".into(),
-    });
+    };
     body.source = Some(Source {
         namespace: "test".into(),
         key: "message1".into(),
@@ -339,10 +361,10 @@ async fn duplicate_sources_tracking_archive_and_pagination_use_real_http() {
     assert_eq!(responses[1].status(), StatusCode::CONFLICT);
     let created: Shipment = responses.remove(0).json().await.unwrap();
     let mut ambiguous = input("Carrier not known yet");
-    ambiguous.tracking = Some(Tracking {
+    ambiguous.tracking = Tracking {
         carrier: None,
         number: "TEST001".into(),
-    });
+    };
     assert_eq!(
         app.request(Method::POST, "/v1/shipments")
             .header("Idempotency-Key", "unknown-carrier")
@@ -353,7 +375,7 @@ async fn duplicate_sources_tracking_archive_and_pagination_use_real_http() {
             .status(),
         StatusCode::CONFLICT
     );
-    body.tracking = None;
+    body.tracking = input("Other tracking").tracking;
     assert_eq!(
         app.request(Method::POST, "/v1/shipments")
             .header("Idempotency-Key", "c")
@@ -412,7 +434,7 @@ async fn duplicate_sources_tracking_archive_and_pagination_use_real_http() {
         .await
         .unwrap();
     assert!(archived.archived);
-    assert_eq!(archived.status, Status::Expected);
+    assert_eq!(archived.status, Status::Unknown);
     let restored: Shipment = app
         .request(Method::DELETE, &archive_path)
         .header("If-Match", "\"2\"")
@@ -620,7 +642,7 @@ async fn integration_credential_is_scoped_and_installation_requires_a_real_check
     assert_eq!(initial.integration.status, CheckStatus::Attention);
     assert_eq!(initial.authentication.status, CheckStatus::Attention);
     assert_eq!(initial.backup.status, CheckStatus::Unavailable);
-    assert_eq!(initial.easypost.status, CheckStatus::NotApplicable);
+    assert_eq!(initial.easypost.status, CheckStatus::Attention);
     for credential in [INTEGRATION, &app.agent] {
         for (method, path) in [
             (Method::GET, "/v1/installation"),
@@ -1095,6 +1117,440 @@ async fn ingress_agent_management_requires_the_real_peer_user_and_browser_header
         .unwrap()
         .status(),
         StatusCode::NO_CONTENT
+    );
+    app.close().await;
+}
+
+#[derive(serde::Deserialize)]
+struct RegisterRequest {
+    tracker: RegisterInput,
+}
+#[derive(Clone, serde::Deserialize)]
+struct RegisterInput {
+    tracking_code: String,
+    carrier: Option<String>,
+}
+#[derive(serde::Serialize)]
+struct RegisteredTracker {
+    id: String,
+    tracking_code: String,
+    carrier: String,
+    status: Status,
+    public_url: String,
+}
+struct ProviderFixture {
+    client: shipments::sync::EasyPostClient,
+    state: Arc<std::sync::Mutex<ProviderState>>,
+    stop: Arc<std::sync::atomic::AtomicBool>,
+    thread: Option<std::thread::JoinHandle<()>>,
+    address: std::net::SocketAddr,
+}
+#[derive(Default)]
+struct ProviderState {
+    requests: Vec<RegisterInput>,
+    replies: std::collections::VecDeque<(u16, String)>,
+}
+impl ProviderFixture {
+    fn new() -> Self {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let state = Arc::new(std::sync::Mutex::new(ProviderState::default()));
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let thread_state = state.clone();
+        let thread_stop = stop.clone();
+        let thread = std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let mut stream = stream.unwrap();
+                if thread_stop.load(std::sync::atomic::Ordering::Acquire) {
+                    break;
+                }
+                stream
+                    .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                    .unwrap();
+                let mut bytes = Vec::new();
+                while !bytes.ends_with(b"\r\n\r\n") {
+                    let mut byte = [0];
+                    stream.read_exact(&mut byte).unwrap();
+                    bytes.push(byte[0]);
+                }
+                let headers = String::from_utf8(bytes).unwrap();
+                assert!(headers.starts_with("POST /trackers "));
+                let length: usize = headers
+                    .lines()
+                    .find_map(|line| {
+                        line.to_ascii_lowercase()
+                            .strip_prefix("content-length: ")
+                            .map(str::to_owned)
+                    })
+                    .unwrap()
+                    .parse()
+                    .unwrap();
+                let mut bytes = vec![0; length];
+                stream.read_exact(&mut bytes).unwrap();
+                let request: RegisterRequest = serde_json::from_slice(&bytes).unwrap();
+                let mut state = thread_state.lock().unwrap();
+                state.requests.push(request.tracker.clone());
+                let (status, body) = state.replies.pop_front().unwrap_or_else(|| {
+                    (
+                        200,
+                        serde_json::to_string(&RegisteredTracker {
+                            id: format!("trk_{}", request.tracker.tracking_code),
+                            tracking_code: request.tracker.tracking_code,
+                            carrier: request.tracker.carrier.unwrap_or_else(|| "UPS".into()),
+                            status: Status::Unknown,
+                            public_url: "https://track.easypost.com/test-parcel".into(),
+                        })
+                        .unwrap(),
+                    )
+                });
+                drop(state);
+                write!(stream, "HTTP/1.1 {status} response\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+            }
+        });
+        Self {
+            client: shipments::sync::EasyPostClient::for_loopback(
+                "disposable-test-key",
+                &format!("http://{address}/"),
+            )
+            .unwrap(),
+            state,
+            stop,
+            thread: Some(thread),
+            address,
+        }
+    }
+    fn calls(&self) -> usize {
+        self.state.lock().unwrap().requests.len()
+    }
+    fn reply(&self, status: u16, body: impl Into<String>) {
+        self.state
+            .lock()
+            .unwrap()
+            .replies
+            .push_back((status, body.into()));
+    }
+}
+impl Drop for ProviderFixture {
+    fn drop(&mut self) {
+        self.stop.store(true, std::sync::atomic::Ordering::Release);
+        let _ = std::net::TcpStream::connect(self.address);
+        if let Some(thread) = self.thread.take() {
+            thread.join().unwrap();
+        }
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct ApiFailure {
+    error_code: Option<String>,
+    message: String,
+}
+
+#[tokio::test]
+async fn every_api_role_requires_tracking_and_cannot_save_provider_rejections() {
+    let app = App::new(None).await;
+    let provider = app.provider_fixture.as_ref().unwrap();
+    for credential in [OWNER, &app.agent, INTEGRATION] {
+        for body in [
+            r#"{"title":"Parcel"}"#,
+            r#"{"title":"Parcel","tracking":null}"#,
+            r#"{"title":"Parcel","tracking":{"number":"  "}}"#,
+        ] {
+            let response = app
+                .client
+                .post(format!("{}/v1/shipments", app.url))
+                .bearer_auth(credential)
+                .header("X-Shipments-Actor", "ha:test")
+                .header("Idempotency-Key", "missing-number")
+                .header("Content-Type", "application/json")
+                .body(body)
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            let error: ApiFailure = response.json().await.unwrap();
+            assert_eq!(error.error_code.as_deref(), Some("tracking_required"));
+            assert!(error.message.contains("tracking number is required"));
+        }
+        provider.reply(422, r#"{"error":{"code":"TRACKER.NO_CARRIER_FOR_CODE","message":"private-provider-detail"}}"#);
+        let response = app
+            .client
+            .post(format!("{}/v1/shipments", app.url))
+            .bearer_auth(credential)
+            .header("X-Shipments-Actor", "ha:test")
+            .header("Idempotency-Key", "unsupported-number")
+            .json(&input("BOGUS"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let error: ApiFailure = response.json().await.unwrap();
+        assert_eq!(error.error_code.as_deref(), Some("tracking_unsupported"));
+        assert!(error.message.contains("Check the tracking number"));
+        assert!(!error.message.contains("private-provider-detail"));
+    }
+    assert_eq!(provider.calls(), 3);
+    let summary: Summary = app
+        .request(Method::GET, "/v1/summary")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(summary.active, 0);
+    let persisted: i64 = sqlx::query_scalar("SELECT count(*) FROM idempotency")
+        .fetch_one(app.store.pool())
+        .await
+        .unwrap();
+    assert_eq!(persisted, 0);
+    app.close().await;
+}
+
+#[tokio::test]
+async fn unscanned_tracking_is_accepted_and_replays_do_not_register_it_again() {
+    let app = App::new(None).await;
+    let provider = app.provider_fixture.as_ref().unwrap();
+    for (index, status) in [Status::Unknown, Status::PreTransit]
+        .into_iter()
+        .enumerate()
+    {
+        let mut body = input(&format!("PENDING{index}"));
+        body.tracking.carrier = None;
+        provider.reply(
+            200,
+            serde_json::to_string(&RegisteredTracker {
+                id: format!("trk_PENDING{index}"),
+                tracking_code: body.tracking.number.clone(),
+                carrier: "USPS".into(),
+                status,
+                public_url: format!("https://track.easypost.com/pending-{index}"),
+            })
+            .unwrap(),
+        );
+        let key = format!("unscanned-{index}");
+        let created = app
+            .request(Method::POST, "/v1/shipments")
+            .header("Idempotency-Key", &key)
+            .json(&body)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(created.status(), StatusCode::CREATED);
+        let created: Shipment = created.json().await.unwrap();
+        assert_eq!(created.status, status);
+        assert_eq!(created.tracking.carrier.as_deref(), Some("usps"));
+        assert_eq!(
+            created.sync.tracking_url.as_deref(),
+            Some(format!("https://track.easypost.com/pending-{index}").as_str())
+        );
+        assert!(created.sync.last_success_at.is_some());
+        let replay = app
+            .request(Method::POST, "/v1/shipments")
+            .header("Idempotency-Key", &key)
+            .json(&body)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(replay.status(), StatusCode::CREATED);
+        let replay: Shipment = replay.json().await.unwrap();
+        assert_eq!(replay.id, created.id);
+        assert_eq!(provider.calls(), index + 1);
+        let edit = app
+            .request(Method::PATCH, &format!("/v1/shipments/{}", created.id))
+            .header("If-Match", "\"1\"")
+            .json(&UpdateShipment {
+                title: Some("Metadata edit".into()),
+                tracking: Patch {
+                    value: Some(Some(created.tracking.clone())),
+                },
+                ..Default::default()
+            })
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(edit.status(), StatusCode::OK);
+        assert_eq!(provider.calls(), index + 1);
+    }
+    let worker =
+        shipments::sync::SyncWorker::new(app.store.pool().clone(), provider.client.clone());
+    assert!(!worker.tick().await.unwrap());
+    assert_eq!(provider.calls(), 2);
+    app.close().await;
+}
+
+#[tokio::test]
+async fn tracking_changes_are_verified_and_failed_changes_preserve_the_record() {
+    let app = App::new(None).await;
+    let provider = app.provider_fixture.as_ref().unwrap();
+    let created: Shipment = app
+        .create("Parcel", "identity-change")
+        .await
+        .json()
+        .await
+        .unwrap();
+    let path = format!("/v1/shipments/{}", created.id);
+    let cleared = app
+        .request(Method::PATCH, &path)
+        .header("If-Match", "\"1\"")
+        .json(&UpdateShipment {
+            tracking: Patch { value: Some(None) },
+            ..Default::default()
+        })
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(cleared.status(), StatusCode::BAD_REQUEST);
+    let error: ApiFailure = cleared.json().await.unwrap();
+    assert_eq!(error.error_code.as_deref(), Some("tracking_required"));
+    assert_eq!(provider.calls(), 1);
+    provider.reply(
+        422,
+        r#"{"error":{"code":"TRACKER.CARRIER_CODE_MISMATCH","message":"private-provider-detail"}}"#,
+    );
+    let changed = UpdateShipment {
+        tracking: Patch {
+            value: Some(Some(Tracking {
+                carrier: Some("ups".into()),
+                number: "NEWNUMBER".into(),
+            })),
+        },
+        ..Default::default()
+    };
+    let rejected = app
+        .request(Method::PATCH, &path)
+        .header("If-Match", "\"1\"")
+        .json(&changed)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(rejected.status(), StatusCode::BAD_REQUEST);
+    let error: ApiFailure = rejected.json().await.unwrap();
+    assert_eq!(
+        error.error_code.as_deref(),
+        Some("tracking_carrier_mismatch")
+    );
+    let record: Shipment = app
+        .request(Method::GET, &path)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(record.tracking, created.tracking);
+    assert_eq!(record.revision, 1);
+    let accepted = app
+        .request(Method::PATCH, &path)
+        .header("If-Match", "\"1\"")
+        .json(&changed)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(accepted.status(), StatusCode::OK);
+    let accepted: Shipment = accepted.json().await.unwrap();
+    assert_eq!(accepted.tracking.number, "NEWNUMBER");
+    assert_eq!(accepted.sync.tracker_id.as_deref(), Some("trk_NEWNUMBER"));
+    assert_eq!(accepted.status, Status::Unknown);
+    assert_eq!(accepted.revision, 2);
+    assert_eq!(provider.calls(), 3);
+    let stale = app
+        .request(Method::PATCH, &path)
+        .header("If-Match", "\"1\"")
+        .json(&changed)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(stale.status(), StatusCode::PRECONDITION_FAILED);
+    assert_eq!(provider.calls(), 3);
+    app.close().await;
+}
+
+#[tokio::test]
+async fn provider_failures_have_actionable_codes_and_never_save_unverified_records() {
+    let unconfigured = App::with_provider(None, None).await;
+    let response = unconfigured.create("Parcel", "unconfigured").await;
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let error: ApiFailure = response.json().await.unwrap();
+    assert_eq!(
+        error.error_code.as_deref(),
+        Some("tracking_provider_unconfigured")
+    );
+    assert!(error.message.contains("Configure the EasyPost API key"));
+    unconfigured.close().await;
+    let app = App::new(None).await;
+    let provider = app.provider_fixture.as_ref().unwrap();
+    for (status, body, code, expected_status) in [
+        (
+            422,
+            r#"{"error":{"code":"TRACKER.MULTIPLE_CARRIERS_FOR_CODE"}}"#,
+            "tracking_carrier_ambiguous",
+            StatusCode::BAD_REQUEST,
+        ),
+        (
+            422,
+            r#"{"error":{"code":"TRACKER.INVALID_PARAMS"}}"#,
+            "tracking_invalid",
+            StatusCode::BAD_REQUEST,
+        ),
+        (
+            422,
+            r#"{"error":{"code":"TRACKER.INVALID_TEST_CODE"}}"#,
+            "tracking_test_key",
+            StatusCode::BAD_REQUEST,
+        ),
+        (
+            422,
+            r#"{"error":{"code":"TRACKER.NO_CARRIER_ACCOUNT"}}"#,
+            "tracking_carrier_account_required",
+            StatusCode::SERVICE_UNAVAILABLE,
+        ),
+        (
+            401,
+            "private-provider-detail",
+            "tracking_provider_credentials",
+            StatusCode::SERVICE_UNAVAILABLE,
+        ),
+        (
+            429,
+            "private-provider-detail",
+            "tracking_verification_rate_limited",
+            StatusCode::SERVICE_UNAVAILABLE,
+        ),
+        (
+            503,
+            "private-provider-detail",
+            "tracking_verification_unavailable",
+            StatusCode::SERVICE_UNAVAILABLE,
+        ),
+        (
+            200,
+            "malformed-provider-response",
+            "tracking_verification_unavailable",
+            StatusCode::SERVICE_UNAVAILABLE,
+        ),
+    ] {
+        provider.reply(status, body);
+        let response = app.create("Parcel", "retryable-input").await;
+        assert_eq!(response.status(), expected_status);
+        let error: ApiFailure = response.json().await.unwrap();
+        assert_eq!(error.error_code.as_deref(), Some(code));
+        assert!(!error.message.contains("private-provider-detail"));
+    }
+    let summary: Summary = app
+        .request(Method::GET, "/v1/summary")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(summary.active, 0);
+    // The same key remains usable after validation or provider failure.
+    assert_eq!(
+        app.create("Parcel", "retryable-input").await.status(),
+        StatusCode::CREATED
     );
     app.close().await;
 }

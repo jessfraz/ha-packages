@@ -11,7 +11,7 @@ use shipments::models::{
     CreateShipment, EventKind, Patch, SetOverride, Shipment, Status, Tracking, UpdateShipment,
 };
 use shipments::store::Store;
-use shipments::sync::{EasyPostClient, SyncError, SyncWorker};
+use shipments::sync::{EasyPostClient, SyncError, SyncWorker, TrackerRejection};
 use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
 
 struct Fixture {
@@ -39,14 +39,15 @@ impl Fixture {
                     title: "Replacement cable".into(),
                     merchant: None,
                     order_reference: None,
-                    tracking: Some(Tracking {
+                    tracking: Tracking {
                         carrier: Some("USPS".into()),
                         number: number.into(),
-                    }),
+                    },
                     source: None,
                 },
                 "test",
                 number,
+                None,
             )
             .await
             .unwrap()
@@ -81,7 +82,10 @@ struct Reply {
 struct TrackerReply<'a> {
     id: &'a str,
     tracking_code: &'a str,
+    carrier: &'a str,
     status: Status,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    public_url: Option<&'a str>,
 }
 
 impl Reply {
@@ -92,7 +96,9 @@ impl Reply {
             body: serde_json::to_string(&TrackerReply {
                 id: "trk_test",
                 tracking_code: number,
+                carrier: "USPS",
                 status,
+                public_url: None,
             })
             .unwrap(),
         }
@@ -351,6 +357,169 @@ async fn registers_retrieves_and_only_revises_changed_observations() {
 }
 
 #[tokio::test]
+async fn worker_persists_canonical_carrier_and_safe_url_without_revising_identical_status() {
+    let fixture = Fixture::new().await;
+    let shipment = fixture.shipment("TRACK-URL").await;
+    let mut provider = Provider::start();
+    let worker = provider.worker(&fixture.store);
+    let task = start_tick(&worker);
+    provider.request().await.reply(Reply {
+        status: 200,
+        headers: Vec::new(),
+        body: serde_json::to_string(&TrackerReply {
+            id: "trk_test",
+            tracking_code: "TRACK-URL",
+            carrier: "uSpS",
+            status: Status::Unknown,
+            public_url: Some("https://track.easypost.com/public-tracker"),
+        })
+        .unwrap(),
+    });
+    assert!(task.await.unwrap().unwrap());
+    let first = fixture.store.get(shipment.id).await.unwrap();
+    assert_eq!(first.tracking.carrier.as_deref(), Some("usps"));
+    assert_eq!(
+        first.sync.tracking_url.as_deref(),
+        Some("https://track.easypost.com/public-tracker")
+    );
+    due(&fixture.store, shipment.id).await;
+    let task = start_tick(&worker);
+    provider.request().await.reply(Reply {
+        status: 200,
+        headers: Vec::new(),
+        body: serde_json::to_string(&TrackerReply {
+            id: "trk_test",
+            tracking_code: "TRACK-URL",
+            carrier: "USPS",
+            status: Status::Unknown,
+            public_url: Some("https://private-data.example.invalid/tracker"),
+        })
+        .unwrap(),
+    });
+    assert!(task.await.unwrap().unwrap());
+    let refreshed = fixture.store.get(shipment.id).await.unwrap();
+    assert!(refreshed.sync.tracking_url.is_none());
+    assert_eq!(refreshed.revision, first.revision);
+    assert_eq!(refreshed.updated_at, first.updated_at);
+}
+
+#[tokio::test]
+async fn verified_creates_preserve_poll_cadence_and_retrieve_without_registering_again() {
+    let fixture = Fixture::new().await;
+    let mut provider = Provider::start();
+    for (number, status, interval) in [
+        ("VERIFIED-UNKNOWN", Status::Unknown, 1800),
+        ("VERIFIED-OUT-FOR-DELIVERY", Status::OutForDelivery, 300),
+    ] {
+        let client = provider.client();
+        let task = tokio::spawn(async move { client.register(number, None).await });
+        let registration = provider.request().await;
+        assert_eq!(registration.method, "POST");
+        registration.tracker(number, status);
+        let tracker = task.await.unwrap().unwrap();
+        let shipment = fixture
+            .store
+            .create(
+                CreateShipment {
+                    title: "Verified shipment".into(),
+                    merchant: None,
+                    order_reference: None,
+                    tracking: Tracking {
+                        number: number.into(),
+                        carrier: None,
+                    },
+                    source: None,
+                },
+                "test",
+                number,
+                Some(&tracker),
+            )
+            .await
+            .unwrap();
+        assert_eq!(shipment.tracking.carrier.as_deref(), Some("usps"));
+        assert_eq!(shipment.sync.tracker_id.as_deref(), Some("trk_test"));
+        assert_eq!(shipment.status, status);
+        let remaining = delay(&fixture.store, shipment.id).await.unwrap();
+        assert!(
+            (interval - 1..=interval).contains(&remaining),
+            "{status:?}: next poll in {remaining}s, expected {interval}s"
+        );
+        let worker = provider.worker(&fixture.store);
+        assert!(!worker.tick().await.unwrap());
+        due(&fixture.store, shipment.id).await;
+        let request = observe(&mut provider, &worker, number, status).await;
+        assert_eq!(request.method, "GET");
+        assert_eq!(request.path, "/v2/trackers/trk_test");
+        assert_eq!(
+            fixture.store.get(shipment.id).await.unwrap().revision,
+            shipment.revision
+        );
+        assert!(provider.incoming.try_recv().is_err());
+    }
+}
+
+#[tokio::test]
+async fn carrier_autofill_invalidates_stale_tracking_edits_and_preserves_verification() {
+    let fixture = Fixture::new().await;
+    let shipment = fixture.shipment("LEGACY-CARRIER").await;
+    // Before carrier autofill, a valid registered tracker could have a known
+    // status and tracker ID while its optional input carrier remained NULL.
+    sqlx::query("UPDATE shipments SET tracking_carrier=NULL,carrier_status=?,tracker_id='trk_test' WHERE id=?")
+        .bind(serde_json::to_string(&Status::Unknown).unwrap())
+        .bind(shipment.id.to_string())
+        .execute(fixture.store.pool())
+        .await
+        .unwrap();
+    let stale = fixture.store.get(shipment.id).await.unwrap();
+    let generation: i64 =
+        sqlx::query_scalar("SELECT tracking_generation FROM shipments WHERE id=?")
+            .bind(shipment.id.to_string())
+            .fetch_one(fixture.store.pool())
+            .await
+            .unwrap();
+    let mut provider = Provider::start();
+    let worker = provider.worker(&fixture.store);
+    let request = observe(&mut provider, &worker, "LEGACY-CARRIER", Status::Unknown).await;
+    assert_eq!(request.method, "GET");
+    let error = fixture
+        .store
+        .update(
+            shipment.id,
+            stale.revision,
+            UpdateShipment {
+                tracking: Patch {
+                    value: Some(Some(stale.tracking)),
+                },
+                ..Default::default()
+            },
+            "owner",
+            None,
+        )
+        .await
+        .expect_err("the observed carrier must invalidate the earlier tracking edit");
+    assert!(matches!(error, shipments::error::Error::Precondition));
+    let current = fixture.store.get(shipment.id).await.unwrap();
+    assert_eq!(current.revision, stale.revision + 1);
+    assert_eq!(current.tracking.carrier.as_deref(), Some("usps"));
+    assert_eq!(current.sync.tracker_id.as_deref(), Some("trk_test"));
+    let current_generation: i64 =
+        sqlx::query_scalar("SELECT tracking_generation FROM shipments WHERE id=?")
+            .bind(shipment.id.to_string())
+            .fetch_one(fixture.store.pool())
+            .await
+            .unwrap();
+    assert_eq!(current_generation, generation);
+    let events = fixture.store.events(shipment.id, 0, 100).await.unwrap();
+    assert!(
+        events
+            .last()
+            .unwrap()
+            .detail
+            .starts_with("Carrier tracking information updated")
+    );
+}
+
+#[tokio::test]
 async fn preserves_a_manual_terminal_override_set_during_network_io() {
     let fixture = Fixture::new().await;
     let shipment = fixture.shipment("TRACK2").await;
@@ -458,13 +627,14 @@ async fn a_response_from_a_replaced_tracking_identity_is_discarded() {
             UpdateShipment {
                 tracking: Patch {
                     value: Some(Some(Tracking {
-                        carrier: Some("UPS".into()),
+                        carrier: Some("USPS".into()),
                         number: "NEWTRACK".into(),
                     })),
                 },
                 ..Default::default()
             },
             "owner",
+            None,
         )
         .await
         .unwrap();
@@ -696,6 +866,273 @@ async fn provider_client_bounds_responses_rejects_redirects_and_redacts_parse_er
         task.await.unwrap(),
         Err(SyncError::InvalidResponse)
     ));
+}
+
+#[tokio::test]
+async fn registration_accepts_unscanned_trackers_and_checks_the_returned_carrier() {
+    let mut provider = Provider::start();
+    let client = provider.client();
+    for (status, requested_carrier) in [
+        (Status::Unknown, None),
+        (Status::PreTransit, Some("uSpS")),
+        (Status::Error, Some("USPS")),
+    ] {
+        let client = client.clone();
+        let task =
+            tokio::spawn(async move { client.register("TRACK-NO-SCANS", requested_carrier).await });
+        provider.request().await.tracker("TRACK-NO-SCANS", status);
+        let tracker = task.await.unwrap().unwrap();
+        assert_eq!(tracker.status, status);
+        assert_eq!(tracker.carrier, "usps");
+        assert!(tracker.public_url.is_none());
+    }
+
+    let task = tokio::spawn(async move { client.register("TRACK-NO-SCANS", Some("UPS")).await });
+    provider
+        .request()
+        .await
+        .tracker("TRACK-NO-SCANS", Status::Unknown);
+    assert!(matches!(
+        task.await.unwrap(),
+        Err(SyncError::Rejected(TrackerRejection::CarrierCodeMismatch))
+    ));
+}
+
+#[tokio::test]
+async fn registration_retains_only_bounded_https_easypost_public_urls() {
+    let mut provider = Provider::start();
+    for (url, expected) in [
+        (
+            "https://track.easypost.com/public-tracker".into(),
+            Some("https://track.easypost.com/public-tracker"),
+        ),
+        (
+            "https://TRACK.EASYPOST.COM:443/public-tracker".into(),
+            Some("https://track.easypost.com/public-tracker"),
+        ),
+        ("http://track.easypost.com/public-tracker".into(), None),
+        (
+            "https://track.easypost.com.example.invalid/tracker".into(),
+            None,
+        ),
+        ("https://sub.track.easypost.com/tracker".into(), None),
+        (
+            "https://owner:private@track.easypost.com/tracker".into(),
+            None,
+        ),
+        ("https://track.easypost.com:444/tracker".into(), None),
+        ("javascript:private-data".into(), None),
+        ("/relative-tracker".into(), None),
+        (
+            format!("https://track.easypost.com/{}", "x".repeat(2048)),
+            None,
+        ),
+        (
+            format!("https://track.easypost.com/{}", "🦆".repeat(200)),
+            None,
+        ),
+    ] {
+        let client = provider.client();
+        let task = tokio::spawn(async move { client.register("TRACK-URL", None).await });
+        provider.request().await.reply(Reply {
+            status: 200,
+            headers: Vec::new(),
+            body: serde_json::to_string(&TrackerReply {
+                id: "trk_test",
+                tracking_code: "TRACK-URL",
+                carrier: "USPS",
+                status: Status::PreTransit,
+                public_url: Some(&url),
+            })
+            .unwrap(),
+        });
+        let tracker = task.await.unwrap().unwrap();
+        assert_eq!(tracker.public_url.as_deref(), expected);
+        assert_eq!(tracker.status, Status::PreTransit);
+    }
+}
+
+#[tokio::test]
+async fn registration_requires_a_valid_carrier_and_tracker_contract() {
+    let mut provider = Provider::start();
+    for body in [
+        r#"{"id":"trk_test","tracking_code":"TRACK","status":"unknown"}"#.into(),
+        r#"{"id":"trk_test","tracking_code":"TRACK","status":"unknown","carrier":null}"#.into(),
+        r#"{"id":"trk_test","tracking_code":"TRACK","status":"unknown","carrier":"   "}"#.into(),
+        r#"{"id":"trk_test","tracking_code":"TRACK","status":"unknown","carrier":"USPS\nprivate"}"#
+            .into(),
+        serde_json::to_string(&TrackerReply {
+            id: "trk_test",
+            tracking_code: "TRACK",
+            carrier: &"x".repeat(101),
+            status: Status::Unknown,
+            public_url: None,
+        })
+        .unwrap(),
+        serde_json::to_string(&TrackerReply {
+            id: "trk_test",
+            tracking_code: "TRACK",
+            carrier: "USPS",
+            status: Status::Expected,
+            public_url: None,
+        })
+        .unwrap(),
+        serde_json::to_string(&TrackerReply {
+            id: "trk_test",
+            tracking_code: "DIFFERENT",
+            carrier: "USPS",
+            status: Status::Unknown,
+            public_url: None,
+        })
+        .unwrap(),
+    ] {
+        let client = provider.client();
+        let task = tokio::spawn(async move { client.register("TRACK", None).await });
+        provider.request().await.reply(Reply {
+            status: 200,
+            headers: Vec::new(),
+            body,
+        });
+        assert!(matches!(
+            task.await.unwrap(),
+            Err(SyncError::InvalidResponse)
+        ));
+    }
+}
+
+#[derive(Serialize)]
+struct TrackerErrorReply<'a> {
+    error: TrackerErrorDetail<'a>,
+}
+
+#[derive(Serialize)]
+struct TrackerErrorDetail<'a> {
+    code: &'a str,
+    message: &'a str,
+    errors: [&'a str; 1],
+}
+
+fn tracker_error_body(code: &str) -> String {
+    serde_json::to_string(&TrackerErrorReply {
+        error: TrackerErrorDetail {
+            code,
+            message: "test-secret and private tracking data",
+            errors: ["more private request data"],
+        },
+    })
+    .unwrap()
+}
+
+#[tokio::test]
+async fn documented_tracker_rejections_are_typed_and_redact_provider_details() {
+    let mut provider = Provider::start();
+    for (index, (code, expected)) in [
+        (
+            "TRACKER.NO_CARRIER_FOR_CODE",
+            TrackerRejection::NoCarrierForCode,
+        ),
+        (
+            "TRACKER.CARRIER_CODE_MISMATCH",
+            TrackerRejection::CarrierCodeMismatch,
+        ),
+        (
+            "TRACKER.MULTIPLE_CARRIERS_FOR_CODE",
+            TrackerRejection::MultipleCarriersForCode,
+        ),
+        ("TRACKER.INVALID_PARAMS", TrackerRejection::InvalidParams),
+        (
+            "TRACKER.INVALID_TEST_CODE",
+            TrackerRejection::InvalidTestCode,
+        ),
+        (
+            "TRACKER.NO_CARRIER_ACCOUNT",
+            TrackerRejection::NoCarrierAccount,
+        ),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let client = provider.client();
+        let task = tokio::spawn(async move { client.register("TRACK", None).await });
+        provider.request().await.reply(Reply {
+            status: if index % 2 == 0 { 400 } else { 422 },
+            headers: Vec::new(),
+            body: tracker_error_body(code),
+        });
+        let error = task.await.unwrap().unwrap_err();
+        assert!(matches!(error, SyncError::Rejected(actual) if actual == expected));
+        for text in [error.to_string(), format!("{error:?}")] {
+            assert!(!text.contains("test-secret"));
+            assert!(!text.contains("private"));
+            assert!(!text.contains(code));
+        }
+    }
+}
+
+#[tokio::test]
+async fn unknown_authentication_and_outage_errors_remain_generic_and_bounded() {
+    let mut provider = Provider::start();
+    for body in [
+        tracker_error_body("TRACKER.RUN.ERROR"),
+        tracker_error_body("private-provider-code"),
+        "private malformed response".into(),
+        r#"{"error":"private-data"}"#.into(),
+    ] {
+        let client = provider.client();
+        let task = tokio::spawn(async move { client.register("TRACK", None).await });
+        provider.request().await.reply(Reply {
+            status: 422,
+            headers: Vec::new(),
+            body,
+        });
+        let error = task.await.unwrap().unwrap_err();
+        assert!(matches!(
+            error,
+            SyncError::Http {
+                status: 422,
+                retry_after: None
+            }
+        ));
+        assert_eq!(error.to_string(), "EasyPost returned HTTP 422");
+        assert!(!format!("{error:?}").contains("private"));
+    }
+    for status in [401, 403, 429, 503] {
+        let client = provider.client();
+        let task = tokio::spawn(async move { client.register("TRACK", None).await });
+        provider.request().await.reply(Reply {
+            status,
+            headers: vec![("Retry-After".into(), "600".into())],
+            body: tracker_error_body("TRACKER.NO_CARRIER_FOR_CODE"),
+        });
+        let error = task.await.unwrap().unwrap_err();
+        assert!(
+            matches!(error, SyncError::Http { status: actual, retry_after: Some(600) } if actual == status)
+        );
+        assert_eq!(
+            error.to_string(),
+            format!("EasyPost returned HTTP {status}")
+        );
+    }
+    for headers in [
+        Vec::new(),
+        vec![("Transfer-Encoding".into(), "chunked".into())],
+    ] {
+        let client = provider.client();
+        let task = tokio::spawn(async move { client.register("TRACK", None).await });
+        provider.request().await.reply(Reply {
+            status: 422,
+            headers,
+            body: format!(
+                "{}{}",
+                tracker_error_body("TRACKER.NO_CARRIER_FOR_CODE"),
+                " ".repeat(256 * 1024)
+            ),
+        });
+        assert!(matches!(
+            task.await.unwrap(),
+            Err(SyncError::ResponseTooLarge)
+        ));
+    }
 }
 
 #[tokio::test]

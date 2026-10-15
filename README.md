@@ -5,8 +5,9 @@ the API, let EasyPost check its progress, and correct the status when you know
 better. Carrier updates never undo a manual correction.
 
 One Rust process, a SQLite database, and a small Home Assistant adapter. Records
-and history stay local. EasyPost is optional; adding and editing shipments
-works when it is disabled or unavailable.
+and history stay local. Every shipment needs a tracking number, verified by
+EasyPost before saving. Carrier detection is automatic when left blank. New
+labels can be saved before the carrier's first scan.
 
 ## Install on Home Assistant
 
@@ -18,7 +19,7 @@ services** to enable sensors and native actions. The app manages credentials
 automatically.
 
 See [installation and configuration](shipments/DOCS.md) for both installation
-steps, optional EasyPost tracking, and standalone Docker instructions. The app
+steps, EasyPost configuration, and standalone Docker instructions. The app
 dashboard's **Installation → Run checks** verifies the service, Home Assistant
 connection, authentication, read-only EasyPost access, and backup coverage.
 
@@ -27,6 +28,7 @@ connection, authentication, read-only EasyPost access, and backup coverage.
 ```sh
 nix develop
 export SHIPMENTS_API_TOKEN="$(openssl rand -hex 32)"
+export EASYPOST_API_KEY="your-easypost-api-key"
 cargo run
 ```
 
@@ -34,10 +36,11 @@ Open `http://127.0.0.1:8080` and enter the token. The browser keeps it in memory
 for that tab. The default database is `shipments.sqlite3` in the working
 directory. Set `SHIPMENTS_DATABASE` to change it.
 
-Set `EASYPOST_API_KEY` to enable tracking. Standalone tracker registration can
-incur EasyPost charges, and some carriers require their own credentials. The
-service makes no carrier requests until tracking is configured and a shipment
-has a tracking number. The provider key belongs to the server alone.
+`EASYPOST_API_KEY` is required to add a shipment or change its tracking identity.
+Existing records can still be read, corrected, or edited without changing
+tracking when EasyPost is unavailable. Tracker registration can incur EasyPost
+charges, and some carriers require their own credentials. The provider key
+belongs to the server alone.
 
 ## API
 
@@ -50,12 +53,20 @@ curl --fail-with-body http://127.0.0.1:8080/v1/shipments \
   -H "Authorization: Bearer $SHIPMENTS_API_TOKEN" \
   -H 'Content-Type: application/json' \
   -H 'Idempotency-Key: example-delivery-1' \
-  -d '{"title":"New desk","merchant":"Example shop"}'
+  -d '{"title":"New desk","tracking":{"number":"YOUR_TRACKING_NUMBER"}}'
 ```
 
-Each record represents one parcel or expected delivery. Several parcels can
-share an order reference. Tracking, merchant, order reference, and source are
-optional. There is no hard-delete endpoint; archive unwanted records.
+Replace `YOUR_TRACKING_NUMBER` with the carrier's tracking number. Each record
+represents one parcel or expected delivery. Several parcels can share an order
+reference. A tracking number is required; merchant, order reference, source,
+and carrier are optional. There is no hard-delete endpoint; archive unwanted
+records.
+
+EasyPost must accept the tracking identity before a create or tracking change
+is saved. Unknown and pre-transit states are accepted without a carrier scan.
+Explicitly invalid numbers, unsupported carriers, and ambiguous carrier
+detection are rejected. Choose a carrier if detection is ambiguous. A provider
+outage or missing key returns `503` with no saved change; retry when available.
 
 | Method | Path | Operation |
 | --- | --- | --- |
@@ -82,7 +93,7 @@ Reads and writes return an `ETag` containing the shipment revision. Every write
 to an existing shipment requires that value in `If-Match`. A stale edit returns
 `412`; a missing condition returns `428`. For `PATCH`, omitted fields stay as
 they are and `null` clears optional fields. Carrier state and audit identity
-cannot be written in request bodies.
+cannot be written in request bodies. Tracking cannot be removed.
 
 List filters include `tracking_number`, `carrier`, `order_reference`,
 `source_namespace` with `source_key`, `status`, `active`, `search`, and `archived`.
@@ -109,6 +120,23 @@ An ingestion agent should look up a tracking or source reference, create or
 patch the record, and attach new evidence. The app handles tracking afterward.
 An email claiming delivery is evidence, not a human confirmation.
 
+Tracking verification errors include an `error_code` and readable `message`.
+Use the code to distinguish bad input from a failure worth retrying:
+
+| HTTP | `error_code` | Action |
+| --- | --- | --- |
+| 400 | `tracking_required` | Supply a tracking number; tracking cannot be cleared. |
+| 400 | `tracking_unsupported`, `tracking_invalid` | Check the number and supported carrier. |
+| 400 | `tracking_carrier_mismatch`, `tracking_carrier_ambiguous` | Specify the correct carrier. |
+| 400 | `tracking_test_key` | Use a production EasyPost key for real shipments. |
+| 503 | `tracking_provider_unconfigured`, `tracking_provider_credentials` | Configure or fix the EasyPost key before retrying. |
+| 503 | `tracking_carrier_account_required` | Configure the carrier account in EasyPost before retrying. |
+| 503 | `tracking_verification_rate_limited` | Wait before retrying; honor `Retry-After` when present. |
+| 503 | `tracking_verification_unavailable` | Retry with backoff; the number has not been rejected as invalid. |
+
+These failures leave the registry unchanged. Retry a create with its original
+idempotency key after fixing configuration or waiting for provider recovery.
+
 Home Assistant tokens grant access beyond this integration. Give agents the
 restricted shipment credential through a constrained tool boundary rather than
 giving them broad Home Assistant credentials. Use HTTPS or a trusted local
@@ -134,6 +162,11 @@ directory is copied. For standalone operation, stop the service before copying
 the database, or use SQLite's online backup facility. Do not copy only the main
 database file while a writer is running in WAL mode. Backups preserve saved
 agent access and revocations at the time of the backup.
+
+Upgrading to 0.3.0 permanently removes legacy shipments without a tracking
+number, including their sources, history, and saved idempotency responses.
+Tracked records and their existing history are preserved. Back up before
+upgrading.
 
 ## Development
 
