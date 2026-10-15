@@ -163,10 +163,11 @@ pub async fn bind_request(
     key: &str,
     input: &impl Serialize,
 ) -> Result<(), HttpError> {
-    let fingerprint = format!(
-        "{:x}",
+    let fingerprint: String =
         Sha256::digest(serde_json::to_vec(input).map_err(crate::error::Error::from)?)
-    );
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
     let saved: String = sqlx::query_scalar(
         "INSERT INTO admission_requests (actor_id,operation_key,fingerprint) VALUES (?,?,?) ON CONFLICT (actor_id,operation_key) DO UPDATE SET operation_key=excluded.operation_key RETURNING fingerprint",
     ).bind(actor).bind(key).bind(&fingerprint).fetch_one(store.pool()).await.map_err(crate::error::Error::from)?;

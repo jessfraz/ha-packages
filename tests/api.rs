@@ -1723,6 +1723,18 @@ async fn uncertain_admission_survives_restart_and_recovers_before_another_regist
         .await
         .unwrap();
     assert_eq!(count, 0);
+    let fingerprint: String = sqlx::query_scalar(
+        "SELECT fingerprint FROM admission_requests WHERE actor_id=? AND operation_key=?",
+    )
+    .bind("owner")
+    .bind("create:pending503")
+    .fetch_one(app.store.pool())
+    .await
+    .unwrap();
+    assert_eq!(
+        fingerprint,
+        "567649d9b47a147865dfa10d7701dd87959d1f4262263ac8953e375ab07b2198"
+    );
     assert_eq!(provider.calls(), 2);
     assert_eq!(
         app.create("Parcel503", "pending503").await.status(),

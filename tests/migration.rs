@@ -553,13 +553,10 @@ async fn required_tracking_migration_preserves_valid_records_and_historical_snap
         tracking: valid.tracking.clone().unwrap(),
         source: Some(valid.sources[0].clone()),
     };
-    let fingerprint = format!(
-        "{:x}",
-        // Exact 0.3.1 CreateShipment serialization: lowercase carrier and no
-        // signature field. New API models must still replay this old record.
-        Sha256::digest(br#"{"title":"Migration test parcel","merchant":null,"order_reference":null,"tracking":{"carrier":"usps","number":"VALID123"},"source":{"namespace":"migration-test","key":"valid-source"}}"#)
-    );
-    seed_legacy_record(&legacy, &valid, &valid, "valid-create", &fingerprint).await;
+    // SHA-256 of the 0.3.1 CreateShipment: lowercase carrier and no signature
+    // field. New API models must still replay this old record.
+    let fingerprint = "b856d5d7b7113242a09bcef1afac65d647582fbb3755e04adfb7c2696dd48ebb";
+    seed_legacy_record(&legacy, &valid, &valid, "valid-create", fingerprint).await;
 
     let now_tracked = legacy_shipment(Some(tracking("NOWTRACKED123")), false);
     let mut originally_missing = now_tracked.clone();
