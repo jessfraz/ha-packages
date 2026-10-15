@@ -13,6 +13,40 @@
       }
     },
     "schemas": {
+      "AgentCredential": {
+        "properties": {
+          "created_at": {
+            "type": "string"
+          },
+          "id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "created_at",
+          "id",
+          "name"
+        ],
+        "type": "object"
+      },
+      "AgentCredentials": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/AgentCredential"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "items"
+        ],
+        "type": "object"
+      },
       "BackupReport": {
         "additionalProperties": false,
         "properties": {
@@ -65,6 +99,18 @@
         ],
         "type": "string"
       },
+      "CreateAgent": {
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "type": "object"
+      },
       "CreateShipment": {
         "additionalProperties": false,
         "properties": {
@@ -98,6 +144,22 @@
         },
         "required": [
           "title"
+        ],
+        "type": "object"
+      },
+      "CreatedAgentCredential": {
+        "description": "The plaintext credential is returned only by creation, never by listing.",
+        "properties": {
+          "credential": {
+            "$ref": "#/components/schemas/AgentCredential"
+          },
+          "token": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "credential",
+          "token"
         ],
         "type": "object"
       },
@@ -563,7 +625,7 @@
   "info": {
     "description": "Persistent local shipment records, manual corrections, and carrier synchronization. Use a Bearer owner or ingestion token. Creates require Idempotency-Key; writes to an existing shipment require its quoted revision in If-Match.",
     "title": "Shipments API",
-    "version": "0.2.1"
+    "version": "0.2.2"
   },
   "openapi": "3.0.3",
   "paths": {
@@ -642,6 +704,117 @@
         },
         "tags": [
           "web"
+        ]
+      }
+    },
+    "/v1/agents": {
+      "get": {
+        "operationId": "agents_list",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentCredentials"
+                }
+              }
+            },
+            "description": "successful operation",
+            "headers": {
+              "cache-control": {
+                "required": true,
+                "schema": {
+                  "type": "string"
+                },
+                "style": "simple"
+              }
+            }
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "List active agents without exposing their credentials or credential hashes.",
+        "tags": [
+          "agents"
+        ]
+      },
+      "post": {
+        "operationId": "agents_create",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateAgent"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CreatedAgentCredential"
+                }
+              }
+            },
+            "description": "successful creation",
+            "headers": {
+              "cache-control": {
+                "required": true,
+                "schema": {
+                  "type": "string"
+                },
+                "style": "simple"
+              }
+            }
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Generate a separate ingestion credential. The token is returned only once.",
+        "tags": [
+          "agents"
+        ]
+      }
+    },
+    "/v1/agents/{id}": {
+      "delete": {
+        "operationId": "agent_revoke",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "resource updated"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Revoke one agent. Subsequent authentications consult the database directly.",
+        "tags": [
+          "agents"
         ]
       }
     },
@@ -1403,6 +1576,9 @@
     }
   },
   "tags": [
+    {
+      "name": "agents"
+    },
     {
       "name": "shipments"
     },

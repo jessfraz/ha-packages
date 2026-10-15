@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.2.2
+
+- Remove the manual agent token from app settings and environment options.
+- Create named agent credentials from the dashboard, with one-time token
+  display and individual revocation. Credential hashes persist in SQLite.
+- Keep agent access separate from Home Assistant pairing and attribute imports
+  to the individual agent. Revocation applies without restarting the app.
+
 ## 0.2.1
 
 - Load Supervisor support only when Home Assistant manages apps, so the

@@ -59,7 +59,10 @@ request() {
         --write-out '%{http_code}' "$base_url$path" "$@")
     if [[ $actual != "$expected" ]]; then
         echo "$method $path: expected HTTP $expected, got $actual" >&2
-        cat "$scratch/response.json" >&2
+        # Creation can contain a token even if the response status is wrong.
+        if [[ $method != POST || $path != /v1/agents ]]; then
+            cat "$scratch/response.json" >&2
+        fi
         return 1
     fi
 }
@@ -167,6 +170,54 @@ jq --exit-status \
     "$scratch/response.json" >/dev/null
 check_shipment
 
+request POST /v1/agents 201 \
+    --header "Authorization: Bearer $token" \
+    --header 'Content-Type: application/json' \
+    --data '{"name":"Container ingestion"}'
+jq --exit-status \
+    '.credential.name == "Container ingestion" and (.token | test("^shp_[0-9a-f]{64}$"))' \
+    "$scratch/response.json" >/dev/null
+agent_id=$(jq --exit-status --raw-output '.credential.id' "$scratch/response.json")
+agent_token=$(jq --exit-status --raw-output '.token' "$scratch/response.json")
+request GET /v1/agents 200 --header "Authorization: Bearer $token"
+jq --exit-status --arg id "$agent_id" \
+    '.items | length == 1 and .[0].id == $id and .[0].name == "Container ingestion" and
+     (.[0] | keys == ["created_at", "id", "name"])' "$scratch/response.json" >/dev/null
+request GET /v1/agents 403 --header "Authorization: Bearer $integration_token"
+request GET /v1/system 200 --header "Authorization: Bearer $agent_token"
+jq --exit-status '.credential_role == "agent"' "$scratch/response.json" >/dev/null
+request POST /v1/shipments 201 \
+    --header "Authorization: Bearer $agent_token" \
+    --header 'Content-Type: application/json' \
+    --header 'Idempotency-Key: container-agent-check' \
+    --data '{"title":"Agent shipment"}'
+agent_shipment_id=$(jq --exit-status --raw-output '.id' "$scratch/response.json")
+agent_revision=$(jq --exit-status --raw-output '.revision' "$scratch/response.json")
+request PATCH "/v1/shipments/$agent_shipment_id" 200 \
+    --header "Authorization: Bearer $agent_token" \
+    --header 'Content-Type: application/json' \
+    --header "If-Match: \"$agent_revision\"" \
+    --data '{"order_reference":"container-agent-order"}'
+agent_revision=$(jq --exit-status --raw-output '.revision' "$scratch/response.json")
+request POST "/v1/shipments/$agent_shipment_id/sources" 200 \
+    --header "Authorization: Bearer $agent_token" \
+    --header 'Content-Type: application/json' \
+    --header "If-Match: \"$agent_revision\"" \
+    --data '{"namespace":"container-smoke","key":"agent-evidence"}'
+agent_revision=$(jq --exit-status --raw-output '.revision' "$scratch/response.json")
+request DELETE "/v1/shipments/$agent_shipment_id/status-override" 403 \
+    --header "Authorization: Bearer $agent_token" \
+    --header "If-Match: \"$agent_revision\""
+request PUT "/v1/shipments/$agent_shipment_id/archive" 403 \
+    --header "Authorization: Bearer $agent_token" \
+    --header "If-Match: \"$agent_revision\""
+request GET /v1/installation 403 --header "Authorization: Bearer $agent_token"
+request GET /v1/agents 403 --header "Authorization: Bearer $agent_token"
+request POST /v1/agents 403 \
+    --header "Authorization: Bearer $agent_token" \
+    --header 'Content-Type: application/json' --data '{"name":"Forbidden agent"}'
+request DELETE "/v1/agents/$agent_id" 403 --header "Authorization: Bearer $agent_token"
+
 stop_container
 docker start "$container" >/dev/null
 base_url="http://$(docker port "$container" 8080/tcp)"
@@ -180,6 +231,21 @@ fi
 request GET /v1/system 200 --header "Authorization: Bearer $integration_token"
 jq --exit-status '.credential_role == "integration"' "$scratch/response.json" >/dev/null
 check_shipment
+request GET "/v1/shipments/$agent_shipment_id" 200 --header "Authorization: Bearer $agent_token"
+jq --exit-status --arg id "$agent_shipment_id" \
+    '.id == $id and .title == "Agent shipment" and .order_reference == "container-agent-order" and
+     (.sources | any(.namespace == "container-smoke" and .key == "agent-evidence")) and
+     .status_override == null and .archived == false' "$scratch/response.json" >/dev/null
+request DELETE "/v1/agents/$agent_id" 204 --header "Authorization: Bearer $token"
+request GET /v1/system 401 --header "Authorization: Bearer $agent_token"
+stop_container
+docker start "$container" >/dev/null
+base_url="http://$(docker port "$container" 8080/tcp)"
+wait_for_api
+request GET /v1/system 401 --header "Authorization: Bearer $agent_token"
+request GET /v1/agents 200 --header "Authorization: Bearer $token"
+jq --exit-status '.items == []' "$scratch/response.json" >/dev/null
+check_shipment
 stop_container
 
-echo "Container smoke passed ($expected_arch): uid10001, standalone/app authentication, private credentials, installation checks, and durable credentials/shipments after clean restart."
+echo "Container smoke passed ($expected_arch): uid10001, standalone/app/agent access, private credentials, installation checks, and durable shipments/credentials/revocations after clean restart."

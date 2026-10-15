@@ -24,13 +24,7 @@ async fn main() -> Result<()> {
         .easypost_api_key
         .map(EasyPostClient::new)
         .transpose()?;
-    let mut context = api::Context::new(
-        store.clone(),
-        token,
-        config.agent_token.as_deref(),
-        None,
-        provider.clone(),
-    );
+    let mut context = api::Context::new(store.clone(), token, None, provider.clone());
     if let Some(token) = &config.integration_token {
         context = context.with_integration(token);
     }

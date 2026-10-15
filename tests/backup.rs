@@ -1,3 +1,4 @@
+use sha2::{Digest, Sha256};
 use shipments::{models::*, store::Store};
 
 #[tokio::test]
@@ -6,6 +7,17 @@ async fn cold_backup_restores_records_history_and_replay_without_wal() {
     let path = dir.path().join("live.sqlite3");
     let backup = dir.path().join("restored.sqlite3");
     let store = Store::open(&path).await.unwrap();
+    let active_digest: [u8; 32] = Sha256::digest("active-disposable-test-credential").into();
+    let revoked_digest: [u8; 32] = Sha256::digest("revoked-disposable-test-credential").into();
+    let active = store
+        .create_agent("Importer", &active_digest)
+        .await
+        .unwrap();
+    let revoked = store
+        .create_agent("Retired importer", &revoked_digest)
+        .await
+        .unwrap();
+    assert!(store.revoke_agent(revoked.id).await.unwrap());
     let input = CreateShipment {
         title: "Backup parcel".into(),
         merchant: None,
@@ -35,6 +47,17 @@ async fn cold_backup_restores_records_history_and_replay_without_wal() {
     store.close().await.unwrap();
     std::fs::copy(&path, &backup).unwrap();
     let restored = Store::open(&backup).await.unwrap();
+    assert_eq!(
+        restored.agent_identity(&active_digest).await.unwrap(),
+        Some(active.id)
+    );
+    assert_eq!(
+        restored.agent_identity(&revoked_digest).await.unwrap(),
+        None
+    );
+    let agents = restored.agents().await.unwrap();
+    assert_eq!(agents.items.len(), 1);
+    assert_eq!(agents.items[0].name, "Importer");
     let record = restored.get(original.id).await.unwrap();
     assert_eq!(record.revision, changed.revision);
     assert_eq!(record.status, Status::Delivered);

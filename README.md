@@ -70,9 +70,11 @@ optional. There is no hard-delete endpoint; archive unwanted records.
 | GET | `/v1/system` | Read synchronization health |
 | GET | `/v1/installation` | Read installation status with an owner credential |
 | POST | `/v1/installation/check` | Run the read-only provider check with an owner credential |
+| GET / POST | `/v1/agents` | List or create ingestion credentials with owner access |
+| DELETE | `/v1/agents/{id}` | Revoke an ingestion credential with owner access |
 
-Creates require `Idempotency-Key`. The committed response survives restarts;
-retrying the same request returns it. A different input with the same key
+Shipment creates require `Idempotency-Key`. The committed response survives
+restarts; retrying the same request returns it. A different input with the same key
 returns `409`. An active tracking identity or source cannot belong to a second
 record. Archive an old shipment before reusing its tracking number.
 
@@ -92,10 +94,14 @@ to continue, with an optional `limit` of up to 200.
 
 ## Agents and human corrections
 
-For standalone ingestion, set a separate `SHIPMENTS_AGENT_TOKEN`. In the Home
-Assistant app, use the optional `agent_token` setting. This credential can
-read, add, edit, attach evidence, and request tracking updates. Manual
-corrections, archiving, and installation checks require an owner credential.
+Open **Agent access** in the owner dashboard to create a named ingestion
+credential. Copy the token when it appears and save it in your password
+manager; it is shown only once. Each credential can be revoked individually.
+The service stores its hash in SQLite, and access survives restarts.
+
+Agents can read, add, edit, attach evidence, and request tracking updates.
+Manual corrections, archiving, installation checks, and credential management
+require owner access.
 Home Assistant status corrections and archiving require an authenticated
 administrator. The adapter derives the actor from Home Assistant authentication.
 
@@ -126,7 +132,8 @@ pending error backoff.
 Home Assistant uses cold backups: the app stops while its persistent `/data`
 directory is copied. For standalone operation, stop the service before copying
 the database, or use SQLite's online backup facility. Do not copy only the main
-database file while a writer is running in WAL mode.
+database file while a writer is running in WAL mode. Backups preserve saved
+agent access and revocations at the time of the backup.
 
 ## Development
 

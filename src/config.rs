@@ -18,8 +18,6 @@ pub struct Config {
     pub api_token: Option<String>,
     #[arg(skip)]
     pub integration_token: Option<String>,
-    #[arg(long, env = "SHIPMENTS_AGENT_TOKEN", hide_env_values = true)]
-    pub agent_token: Option<String>,
     #[arg(long, env = "EASYPOST_API_KEY", hide_env_values = true)]
     pub easypost_api_key: Option<String>,
     #[arg(long, env = "SHIPMENTS_INGRESS_BIND")]
@@ -36,7 +34,6 @@ pub struct Config {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Options {
-    agent_token: Option<String>,
     easypost_api_key: Option<String>,
 }
 
@@ -51,9 +48,6 @@ impl Config {
                 Credentials::load_or_create(&path.with_file_name("credentials.json"))?;
             config.api_token = Some(credentials.owner);
             config.integration_token = Some(credentials.integration);
-            config.agent_token = config
-                .agent_token
-                .or(options.agent_token.filter(|value| !value.is_empty()));
             config.easypost_api_key = config
                 .easypost_api_key
                 .or(options.easypost_api_key.filter(|value| !value.is_empty()));
@@ -67,24 +61,10 @@ impl Config {
                 token.len() >= 32,
                 "API token must be at least 32 characters"
             );
-            if let Some(agent) = &config.agent_token {
-                ensure!(
-                    agent.len() >= 32 && agent != token,
-                    "agent token must be distinct and at least 32 characters"
-                );
-            }
             ensure!(
                 config.integration_token.as_ref() != config.api_token.as_ref(),
                 "integration and owner credentials must be distinct"
             );
-            if let (Some(agent), Some(integration)) =
-                (&config.agent_token, &config.integration_token)
-            {
-                ensure!(
-                    agent != integration,
-                    "integration and agent credentials must be distinct"
-                );
-            }
         }
         Ok(config)
     }
@@ -153,7 +133,7 @@ impl Credentials {
     }
 }
 
-fn random_token() -> Result<String> {
+pub(crate) fn random_token() -> Result<String> {
     let mut bytes = [0_u8; 32];
     getrandom::fill(&mut bytes).map_err(|_| anyhow::anyhow!("generate private credential"))?;
     Ok(bytes.iter().map(|byte| format!("{byte:02x}")).collect())

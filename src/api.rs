@@ -27,7 +27,6 @@ use uuid::Uuid;
 pub struct Context {
     pub store: Store,
     owner_digest: [u8; 32],
-    agent_digest: Option<[u8; 32]>,
     integration_digest: Option<[u8; 32]>,
     ingress_peer: Option<IpAddr>,
     provider: Option<EasyPostClient>,
@@ -38,14 +37,12 @@ impl Context {
     pub fn new(
         store: Store,
         owner: &str,
-        agent: Option<&str>,
         ingress_peer: Option<IpAddr>,
         provider: Option<EasyPostClient>,
     ) -> Self {
         Self {
             store,
             owner_digest: Sha256::digest(owner).into(),
-            agent_digest: agent.map(|value| Sha256::digest(value).into()),
             integration_digest: None,
             ingress_peer,
             provider,
@@ -95,7 +92,7 @@ fn ingress_access(request: &RequestContext<Arc<Context>>) -> Result<(), HttpErro
     Ok(())
 }
 
-fn authenticate(
+async fn authenticate(
     request: &RequestContext<Arc<Context>>,
     human_only: bool,
 ) -> Result<Principal, HttpError> {
@@ -162,13 +159,9 @@ fn authenticate(
                 owner: false,
                 integration: true,
             }
-        } else if context
-            .agent_digest
-            .as_ref()
-            .is_some_and(|expected| bool::from(digest.ct_eq(expected)))
-        {
+        } else if let Some(id) = context.store.agent_identity(&digest).await? {
             Principal {
-                actor: "agent".into(),
+                actor: format!("agent:{id}"),
                 owner: false,
                 integration: false,
             }
@@ -211,6 +204,18 @@ struct VersionHeaders {
     etag: String,
 }
 
+#[derive(Serialize, JsonSchema)]
+struct PrivateHeaders {
+    #[serde(rename = "cache-control")]
+    cache_control: String,
+}
+
+fn private_headers() -> PrivateHeaders {
+    PrivateHeaders {
+        cache_control: "no-store".into(),
+    }
+}
+
 type ShipmentResponse = HttpResponseHeaders<HttpResponseOk<Shipment>, VersionHeaders>;
 fn shipment_response(shipment: Shipment) -> ShipmentResponse {
     let headers = VersionHeaders {
@@ -241,7 +246,7 @@ async fn shipments_list(
     request: RequestContext<Arc<Context>>,
     query: Query<PaginationParams<Filters, ShipmentCursor>>,
 ) -> Result<HttpResponseOk<ResultsPage<Shipment>>, HttpError> {
-    authenticate(&request, false)?;
+    authenticate(&request, false).await?;
     let params = query.into_inner();
     let limit = request.page_limit(&params)?.get().min(200);
     let (filters, after) = match &params.page {
@@ -271,7 +276,7 @@ async fn shipments_create(
     request: RequestContext<Arc<Context>>,
     body: TypedBody<CreateShipment>,
 ) -> Result<HttpResponseHeaders<HttpResponseCreated<Shipment>, VersionHeaders>, HttpError> {
-    let principal = authenticate(&request, false)?;
+    let principal = authenticate(&request, false).await?;
     let key = header(&request, "idempotency-key")
         .ok_or_else(|| client_error(StatusCode::BAD_REQUEST, "Idempotency-Key is required"))?;
     let shipment = request
@@ -293,7 +298,7 @@ async fn shipment_get(
     request: RequestContext<Arc<Context>>,
     path: Path<ShipmentPath>,
 ) -> Result<ShipmentResponse, HttpError> {
-    authenticate(&request, false)?;
+    authenticate(&request, false).await?;
     Ok(shipment_response(
         request.context().store.get(path.into_inner().id).await?,
     ))
@@ -305,7 +310,7 @@ async fn shipment_update(
     path: Path<ShipmentPath>,
     body: TypedBody<UpdateShipment>,
 ) -> Result<ShipmentResponse, HttpError> {
-    let principal = authenticate(&request, false)?;
+    let principal = authenticate(&request, false).await?;
     Ok(shipment_response(
         request
             .context()
@@ -326,7 +331,7 @@ async fn shipment_source(
     path: Path<ShipmentPath>,
     body: TypedBody<Source>,
 ) -> Result<ShipmentResponse, HttpError> {
-    let principal = authenticate(&request, false)?;
+    let principal = authenticate(&request, false).await?;
     Ok(shipment_response(
         request
             .context()
@@ -347,7 +352,7 @@ async fn override_set(
     path: Path<ShipmentPath>,
     body: TypedBody<SetOverride>,
 ) -> Result<ShipmentResponse, HttpError> {
-    let principal = authenticate(&request, true)?;
+    let principal = authenticate(&request, true).await?;
     Ok(shipment_response(
         request
             .context()
@@ -367,7 +372,7 @@ async fn override_clear(
     request: RequestContext<Arc<Context>>,
     path: Path<ShipmentPath>,
 ) -> Result<ShipmentResponse, HttpError> {
-    let principal = authenticate(&request, true)?;
+    let principal = authenticate(&request, true).await?;
     Ok(shipment_response(
         request
             .context()
@@ -387,7 +392,7 @@ async fn shipment_archive(
     request: RequestContext<Arc<Context>>,
     path: Path<ShipmentPath>,
 ) -> Result<ShipmentResponse, HttpError> {
-    let principal = authenticate(&request, true)?;
+    let principal = authenticate(&request, true).await?;
     Ok(shipment_response(
         request
             .context()
@@ -407,7 +412,7 @@ async fn shipment_restore(
     request: RequestContext<Arc<Context>>,
     path: Path<ShipmentPath>,
 ) -> Result<ShipmentResponse, HttpError> {
-    let principal = authenticate(&request, true)?;
+    let principal = authenticate(&request, true).await?;
     Ok(shipment_response(
         request
             .context()
@@ -427,7 +432,7 @@ async fn shipment_refresh(
     request: RequestContext<Arc<Context>>,
     path: Path<ShipmentPath>,
 ) -> Result<ShipmentResponse, HttpError> {
-    let principal = authenticate(&request, false)?;
+    let principal = authenticate(&request, false).await?;
     Ok(shipment_response(
         request
             .context()
@@ -451,7 +456,7 @@ async fn shipment_events(
     path: Path<ShipmentPath>,
     query: Query<PaginationParams<EventFilters, EventCursor>>,
 ) -> Result<HttpResponseOk<ResultsPage<Event>>, HttpError> {
-    authenticate(&request, false)?;
+    authenticate(&request, false).await?;
     let params = query.into_inner();
     let limit = request.page_limit(&params)?.get().min(200);
     let id = path.into_inner().id;
@@ -484,7 +489,7 @@ async fn shipment_events(
 async fn summary(
     request: RequestContext<Arc<Context>>,
 ) -> Result<HttpResponseOk<Summary>, HttpError> {
-    authenticate(&request, false)?;
+    authenticate(&request, false).await?;
     Ok(HttpResponseOk(request.context().store.summary().await?))
 }
 
@@ -492,7 +497,7 @@ async fn summary(
 async fn system(
     request: RequestContext<Arc<Context>>,
 ) -> Result<HttpResponseOk<System>, HttpError> {
-    let principal = authenticate(&request, false)?;
+    let principal = authenticate(&request, false).await?;
     let mut system = request
         .context()
         .store
@@ -514,7 +519,7 @@ async fn system(
 async fn installation(
     request: RequestContext<Arc<Context>>,
 ) -> Result<HttpResponseOk<InstallationReport>, HttpError> {
-    require_owner(&request)?;
+    require_owner(&request).await?;
     installation_report(&request).await.map(HttpResponseOk)
 }
 
@@ -523,7 +528,7 @@ async fn installation(
 async fn installation_check(
     request: RequestContext<Arc<Context>>,
 ) -> Result<HttpResponseOk<InstallationReport>, HttpError> {
-    require_owner(&request)?;
+    require_owner(&request).await?;
     let context = request.context();
     context
         .installation
@@ -538,7 +543,7 @@ async fn integration_presence(
     request: RequestContext<Arc<Context>>,
     body: TypedBody<IntegrationPresence>,
 ) -> Result<HttpResponseUpdatedNoContent, HttpError> {
-    let principal = authenticate(&request, false)?;
+    let principal = authenticate(&request, false).await?;
     if !principal.integration {
         return Err(client_error(
             StatusCode::FORBIDDEN,
@@ -556,14 +561,71 @@ async fn integration_presence(
     Ok(HttpResponseUpdatedNoContent())
 }
 
-fn require_owner(request: &RequestContext<Arc<Context>>) -> Result<(), HttpError> {
-    if !authenticate(request, false)?.owner {
+async fn require_owner(request: &RequestContext<Arc<Context>>) -> Result<(), HttpError> {
+    if !authenticate(request, false).await?.owner {
         return Err(client_error(
             StatusCode::FORBIDDEN,
-            "owner credential required for installation checks",
+            "owner credential required",
         ));
     }
     Ok(())
+}
+
+/// List active agents without exposing their credentials or credential hashes.
+#[endpoint {method=GET,path="/v1/agents",tags=["agents"]}]
+async fn agents_list(
+    request: RequestContext<Arc<Context>>,
+) -> Result<HttpResponseHeaders<HttpResponseOk<AgentCredentials>, PrivateHeaders>, HttpError> {
+    require_owner(&request).await?;
+    Ok(HttpResponseHeaders::new(
+        HttpResponseOk(request.context().store.agents().await?),
+        private_headers(),
+    ))
+}
+
+/// Generate a separate ingestion credential. The token is returned only once.
+#[endpoint {method=POST,path="/v1/agents",tags=["agents"]}]
+async fn agents_create(
+    request: RequestContext<Arc<Context>>,
+    body: TypedBody<CreateAgent>,
+) -> Result<
+    HttpResponseHeaders<HttpResponseCreated<CreatedAgentCredential>, PrivateHeaders>,
+    HttpError,
+> {
+    require_owner(&request).await?;
+    let token = format!(
+        "shp_{}",
+        crate::config::random_token()
+            .map_err(|_| { HttpError::for_internal_error("generate agent credential".into()) })?
+    );
+    let digest: [u8; 32] = Sha256::digest(&token).into();
+    let credential = request
+        .context()
+        .store
+        .create_agent(&body.into_inner().name, &digest)
+        .await?;
+    Ok(HttpResponseHeaders::new(
+        HttpResponseCreated(CreatedAgentCredential { credential, token }),
+        private_headers(),
+    ))
+}
+
+/// Revoke one agent. Subsequent authentications consult the database directly.
+#[endpoint {method=DELETE,path="/v1/agents/{id}",tags=["agents"]}]
+async fn agent_revoke(
+    request: RequestContext<Arc<Context>>,
+    path: Path<ShipmentPath>,
+) -> Result<HttpResponseUpdatedNoContent, HttpError> {
+    require_owner(&request).await?;
+    if !request
+        .context()
+        .store
+        .revoke_agent(path.into_inner().id)
+        .await?
+    {
+        return Err(client_error(StatusCode::NOT_FOUND, "agent not found"));
+    }
+    Ok(HttpResponseUpdatedNoContent())
 }
 
 async fn installation_report(
@@ -624,7 +686,7 @@ async fn style(request: RequestContext<Arc<Context>>) -> Result<Response<Body>, 
 
 pub fn description() -> Result<ApiDescription<Arc<Context>>> {
     let mut api = ApiDescription::new();
-    let endpoints: [dropshot::ApiEndpoint<Arc<Context>>; 20] = [
+    let endpoints: [dropshot::ApiEndpoint<Arc<Context>>; 23] = [
         shipments_list.into(),
         shipments_create.into(),
         shipment_get.into(),
@@ -641,6 +703,9 @@ pub fn description() -> Result<ApiDescription<Arc<Context>>> {
         installation.into(),
         installation_check.into(),
         integration_presence.into(),
+        agents_list.into(),
+        agents_create.into(),
+        agent_revoke.into(),
         schema.into(),
         index.into(),
         script.into(),

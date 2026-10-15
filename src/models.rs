@@ -202,3 +202,28 @@ pub struct System {
     pub sync_errors: i64,
     pub credential_role: String,
 }
+
+#[derive(Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CreateAgent {
+    pub name: String,
+}
+
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct AgentCredential {
+    pub id: Uuid,
+    pub name: String,
+    pub created_at: String,
+}
+
+#[derive(Deserialize, Serialize, JsonSchema)]
+pub struct AgentCredentials {
+    pub items: Vec<AgentCredential>,
+}
+
+/// The plaintext credential is returned only by creation, never by listing.
+#[derive(Deserialize, Serialize, JsonSchema)]
+pub struct CreatedAgentCredential {
+    pub credential: AgentCredential,
+    pub token: String,
+}
