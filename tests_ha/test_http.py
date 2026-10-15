@@ -24,7 +24,7 @@ async def test_proxy_identity_headers_and_error_status(
     client = await hass_client()
     response = await client.patch(
         f"{PREFIX}/shipments/{SHIPMENT_ID}",
-        json={"title": "Office supplies"},
+        json={"title": "Office supplies", "tracking": {"number": "TEST123"}},
         headers={
             "If-Match": '"7"',
             "Idempotency-Key": "retry-123",
@@ -42,7 +42,10 @@ async def test_proxy_identity_headers_and_error_status(
     assert forwarded.headers["If-Match"] == '"7"'
     assert forwarded.headers["Idempotency-Key"] == "retry-123"
     assert "X-Caller-Secret" not in forwarded.headers
-    assert json.loads(forwarded.body) == {"title": "Office supplies"}
+    assert json.loads(forwarded.body) == {
+        "title": "Office supplies",
+        "tracking": {"number": "TEST123"},
+    }
 
 
 async def test_proxy_requires_ha_authentication(hass_client_no_auth, entry) -> None:
@@ -71,7 +74,7 @@ async def test_non_admin_can_add_and_read(
     client = await hass_client(hass_user_token)
     response = await client.post(
         f"{PREFIX}/shipments",
-        json={"title": "Office supplies"},
+        json={"title": "Office supplies", "tracking": {"number": "TEST123"}},
         headers={"Idempotency-Key": "create-123"},
     )
     assert response.status == 200

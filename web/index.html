@@ -108,26 +108,31 @@
             ×
           </button>
         </div>
-        <label>Title<input name="title" required maxlength="500"></label>
-        <div class="columns">
-          <label>Merchant<input name="merchant" maxlength="500"></label
-          ><label
-            >Order reference<input
-              name="order_reference"
-              maxlength="500"
-            ></label
-          >
-        </div>
-        <div class="columns">
-          <label
-            >Carrier<input
+        <fieldset id="shipment-fields">
+          <label>Title<input name="title" required maxlength="500"></label>
+          <div class="columns">
+            <label>Merchant<input name="merchant" maxlength="500"></label>
+            <label>Order reference<input name="order_reference" maxlength="500"></label>
+          </div>
+          <div class="columns">
+            <label>Carrier (optional)<input
               name="carrier"
-              placeholder="UPS, USPS, FedEx…"
+              placeholder="Leave blank to detect"
               maxlength="100"
-            ></label
-          ><label>Tracking number<input name="number" maxlength="200"></label>
-        </div>
-        <p class="muted">No tracking number yet? You can add it later.</p>
+            ></label>
+            <label>Tracking number<input
+              name="number"
+              required
+              maxlength="200"
+              aria-describedby="tracking-help"
+            ></label>
+          </div>
+          <p id="tracking-help" class="muted">
+            A tracking number is required. EasyPost verifies it before saving;
+            new labels do not need a carrier scan.
+          </p>
+        </fieldset>
+        <p id="edit-status" class="muted" role="status"></p>
         <p id="edit-error" role="alert"></p>
         <button id="save">Save shipment</button>
       </form>

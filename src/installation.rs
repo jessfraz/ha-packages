@@ -135,8 +135,8 @@ impl Installation {
         };
         let easypost = if !provider_enabled {
             Check {
-                status: CheckStatus::NotApplicable,
-                message: "EasyPost is not configured. Manual shipment records still work.".into(),
+                status: CheckStatus::Attention,
+                message: "Configure the EasyPost API key before adding shipments or changing tracking numbers. Existing records remain available.".into(),
             }
         } else {
             let provider = self.provider.lock().await;

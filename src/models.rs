@@ -27,10 +27,12 @@ impl Status {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct Tracking {
     pub carrier: Option<String>,
+    #[serde(default)]
+    #[schemars(required)]
     pub number: String,
 }
 
@@ -47,8 +49,18 @@ pub struct CreateShipment {
     pub title: String,
     pub merchant: Option<String>,
     pub order_reference: Option<String>,
-    pub tracking: Option<Tracking>,
+    // Route missing/null values through the API's actionable tracking_required
+    // error. The OpenAPI contract still declares tracking as required.
+    #[serde(default, deserialize_with = "required_tracking")]
+    #[schemars(required)]
+    pub tracking: Tracking,
     pub source: Option<Source>,
+}
+
+fn required_tracking<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Tracking, D::Error> {
+    Ok(Option::<Tracking>::deserialize(deserializer)?.unwrap_or_default())
 }
 
 // Missing fields preserve their value; explicit null clears optional fields.
@@ -98,7 +110,7 @@ pub struct UpdateShipment {
     #[schemars(with = "Option<String>")]
     pub order_reference: Patch<String>,
     #[serde(default, skip_serializing_if = "Patch::is_missing")]
-    #[schemars(with = "Option<Tracking>")]
+    #[schemars(with = "Tracking")]
     pub tracking: Patch<Tracking>,
 }
 
@@ -120,6 +132,7 @@ pub struct StatusOverride {
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
 pub struct SyncState {
     pub tracker_id: Option<String>,
+    pub tracking_url: Option<String>,
     pub last_success_at: Option<String>,
     pub last_error: Option<String>,
     pub next_attempt_at: Option<i64>,
@@ -127,13 +140,13 @@ pub struct SyncState {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
-pub struct Shipment {
+pub struct Shipment<T = Tracking> {
     pub id: Uuid,
     pub revision: i64,
     pub title: String,
     pub merchant: Option<String>,
     pub order_reference: Option<String>,
-    pub tracking: Option<Tracking>,
+    pub tracking: T,
     pub status: Status,
     pub carrier_status: Option<Status>,
     pub status_override: Option<StatusOverride>,
@@ -166,7 +179,8 @@ pub struct Event {
     pub actor_id: String,
     pub at: String,
     pub detail: String,
-    pub snapshot: Option<Shipment>,
+    // Historical snapshots can predate the requirement for tracking numbers.
+    pub snapshot: Option<Shipment<Option<Tracking>>>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema)]

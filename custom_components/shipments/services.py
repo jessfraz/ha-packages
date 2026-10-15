@@ -14,7 +14,7 @@ from homeassistant.exceptions import (
 )
 
 from .client import BackendResponse, ResponseTooLarge
-from .const import DOMAIN, MAX_REQUEST_BYTES
+from .const import CONF_TOKEN, DOMAIN, MAX_REQUEST_BYTES
 from .http import loaded_coordinator
 
 SERVICE_ACTIONS = {
@@ -35,16 +35,41 @@ class ShipmentActionResponse(TypedDict):
     status: str
 
 
-def _check_response(response: BackendResponse) -> None:
+def _check_response(response: BackendResponse, *, credential: str) -> None:
+    if 200 <= response.status < 300:
+        return
     if response.status == 412:
-        raise HomeAssistantError(
+        description = (
             "The shipment changed before this action could be saved (HTTP 412). "
             "Review the current shipment before trying again."
         )
-    if not 200 <= response.status < 300:
-        raise HomeAssistantError(
+    else:
+        description = (
             f"The Shipments backend rejected the action (HTTP {response.status})"
         )
+    try:
+        data = response.json()
+    except ValueError:
+        data = None
+    if isinstance(data, dict):
+        code = data.get("error_code")
+        message = data.get("message")
+        if (
+            isinstance(code, str)
+            and 0 < len(code) <= 100
+            and code.isascii()
+            and all(character.isalnum() or character in "_.-" for character in code)
+            and (not credential or credential not in code)
+        ):
+            description += f" [{code}]"
+        if (
+            isinstance(message, str)
+            and 0 < len(message.strip()) <= 500
+            and message.isprintable()
+            and (not credential or credential not in message)
+        ):
+            description += f": {message.strip()}"
+    raise HomeAssistantError(description)
 
 
 def _response_data(response: BackendResponse) -> ShipmentActionResponse:
@@ -75,6 +100,11 @@ def async_register_services(hass: HomeAssistant) -> None:
         if coordinator is None:
             raise ServiceValidationError("Shipments is not loaded")
         actor = f"ha:{user.id}"
+        credential = (
+            coordinator.config_entry.data.get(CONF_TOKEN, "")
+            if coordinator.config_entry
+            else ""
+        )
         shipment_path = None
         if call.service != "add":
             try:
@@ -86,17 +116,14 @@ def async_register_services(hass: HomeAssistant) -> None:
 
         payload: dict[str, object] | None = None
         if call.service == "add":
-            tracking = None
-            if call.data.get("tracking_number") or call.data.get("carrier"):
-                tracking = {
-                    "number": call.data.get("tracking_number", ""),
-                    "carrier": call.data.get("carrier") or None,
-                }
             payload = {
                 "title": call.data["title"],
                 "merchant": call.data.get("merchant") or None,
                 "order_reference": call.data.get("order_reference") or None,
-                "tracking": tracking,
+                "tracking": {
+                    "number": call.data["tracking_number"],
+                    "carrier": call.data.get("carrier") or None,
+                },
             }
         elif call.service == "set_override":
             payload = {"status": call.data["status"], "reason": call.data["reason"]}
@@ -118,7 +145,7 @@ def async_register_services(hass: HomeAssistant) -> None:
                 current = await coordinator.client.request(
                     "GET", shipment_path, actor=actor
                 )
-                _check_response(current)
+                _check_response(current, credential=credential)
                 if not (etag := current.headers.get("ETag")):
                     raise HomeAssistantError("The backend omitted the shipment version")
                 headers["If-Match"] = etag
@@ -128,7 +155,7 @@ def async_register_services(hass: HomeAssistant) -> None:
             )
         except ClientError, TimeoutError, ResponseTooLarge:
             raise HomeAssistantError("Cannot contact the Shipments backend") from None
-        _check_response(response)
+        _check_response(response, credential=credential)
         await coordinator.async_request_refresh()
         return _response_data(response) if call.return_response else None
 
@@ -138,7 +165,9 @@ def async_register_services(hass: HomeAssistant) -> None:
                 vol.Required("title"): str,
                 vol.Optional("merchant"): str,
                 vol.Optional("order_reference"): str,
-                vol.Optional("tracking_number"): str,
+                vol.Required("tracking_number"): vol.All(
+                    str, str.strip, vol.Length(min=1)
+                ),
                 vol.Optional("carrier"): str,
                 vol.Optional("idempotency_key"): str,
             }

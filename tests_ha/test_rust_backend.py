@@ -3,7 +3,9 @@
 import asyncio
 import json
 import os
+import sqlite3
 from collections.abc import AsyncIterator
+from contextlib import closing
 from dataclasses import dataclass, field
 from datetime import timedelta
 from pathlib import Path
@@ -13,6 +15,7 @@ from aiohttp import ClientError, ClientTimeout
 from homeassistant.config_entries import SOURCE_HASSIO, SOURCE_USER, ConfigEntryState
 from homeassistant.core import Context, HomeAssistant
 from homeassistant.data_entry_flow import FlowResultType
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.service_info.hassio import HassioServiceInfo
 from homeassistant.util import dt as dt_util
@@ -26,6 +29,8 @@ from custom_components.shipments.const import (
     SUMMARY_KEYS,
 )
 
+from .conftest import SHIPMENT_ID
+
 OWNER_TOKEN = "test-owner-credential-at-least-32-characters"
 PREFIX = "/api/shipments/v1"
 
@@ -35,6 +40,7 @@ class RustBackend:
     """A disposable real service with credentials excluded from test output."""
 
     origin: str
+    database: Path
     owner_token: str = field(repr=False)
     integration_token: str | None = field(default=None, repr=False)
 
@@ -57,11 +63,12 @@ async def rust_backend(
         if not key.startswith(("SHIPMENTS_", "SUPERVISOR"))
         and key != "EASYPOST_API_KEY"
     }
+    database = tmp_path / "shipments.sqlite3"
     arguments = [
         "--bind",
         f"127.0.0.1:{unused_tcp_port}",
         "--database",
-        str(tmp_path / "shipments.sqlite3"),
+        str(database),
     ]
     app_mode = getattr(request, "param", False)
     owner_token = None if app_mode else OWNER_TOKEN
@@ -108,7 +115,7 @@ async def rust_backend(
                 except ClientError, TimeoutError:
                     pass
                 await asyncio.sleep(0.01)
-        yield RustBackend(origin, owner_token, integration_token)
+        yield RustBackend(origin, database, owner_token, integration_token)
     finally:
         if process.returncode is None:
             process.terminate()
@@ -120,6 +127,23 @@ async def rust_backend(
                 await process.wait()
 
 
+def seed_tracked_shipment(database: Path) -> None:
+    """Arrange a previously accepted parcel without calling a live provider."""
+    with closing(sqlite3.connect(database)) as connection, connection:
+        connection.execute(
+            "INSERT INTO shipments "
+            "(id, title, tracking_number, tracking_carrier, carrier_status) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (
+                SHIPMENT_ID,
+                "Office supplies",
+                "TEST123",
+                "usps",
+                json.dumps("pre_transit"),
+            ),
+        )
+
+
 async def test_ha_to_rust_contract(
     hass: HomeAssistant,
     hass_client,
@@ -128,7 +152,7 @@ async def test_ha_to_rust_contract(
     hass_user_token: str,
     rust_backend: RustBackend,
 ) -> None:
-    """Create, confirm, audit, and count a shipment across the actual boundary."""
+    """Validate create gates, then edit and confirm a previously tracked parcel."""
     configured = await hass.config_entries.flow.async_init(
         DOMAIN,
         context={"source": SOURCE_USER},
@@ -149,12 +173,43 @@ async def test_ha_to_rust_contract(
         json={"title": "Office supplies", "source": {"namespace": "test", "key": "1"}},
         headers={"Idempotency-Key": "cross-language-create"},
     )
-    assert response.status == 201
+    assert response.status == 400
+    response = await user.post(
+        f"{PREFIX}/shipments",
+        json={"title": "Office supplies", "tracking": {"number": "TEST123"}},
+        headers={"Idempotency-Key": "tracked-create-without-provider"},
+    )
+    assert response.status == 503
+    with pytest.raises(HomeAssistantError, match="HTTP 503"):
+        await hass.services.async_call(
+            DOMAIN,
+            "add",
+            {"title": "Second parcel", "tracking_number": "TEST456"},
+            context=Context(user_id=hass_user.id),
+            blocking=True,
+            return_response=True,
+        )
+    assert (await (await user.get(f"{PREFIX}/shipments")).json())["items"] == []
+
+    # Creation requires provider preflight. A valid durable fixture lets this
+    # provider-free binary test continue through real HA edits and corrections.
+    await asyncio.to_thread(seed_tracked_shipment, rust_backend.database)
+    response = await user.get(f"{PREFIX}/shipments/{SHIPMENT_ID}")
+    assert response.status == 200
+    shipment = await response.json()
+    assert shipment["status"] == "pre_transit"
+    assert shipment["tracking"] == {"number": "TEST123", "carrier": "usps"}
+    response = await user.patch(
+        f"{PREFIX}/shipments/{SHIPMENT_ID}",
+        json={"title": "Updated office supplies"},
+        headers={"If-Match": response.headers["ETag"]},
+    )
+    assert response.status == 200
     shipment = await response.json()
     shipment_id = shipment["id"]
     etag = response.headers["ETag"]
-    assert shipment["status"] == "expected"
-    assert shipment["revision"] == 1
+    assert shipment["status"] == "pre_transit"
+    assert shipment["revision"] == 2
     await hass.async_block_till_done()
     assert hass.states.get("sensor.shipments_expected").state == "1"
 
@@ -179,7 +234,7 @@ async def test_ha_to_rust_contract(
         blocking=True,
         return_response=True,
     )
-    assert action_result == {"id": shipment_id, "revision": 2, "status": "delivered"}
+    assert action_result == {"id": shipment_id, "revision": 3, "status": "delivered"}
     response = await admin.get(f"{PREFIX}/shipments/{shipment_id}")
     assert response.status == 200
     shipment = await response.json()
@@ -204,20 +259,6 @@ async def test_ha_to_rust_contract(
         f"ha:{hass_user.id}",
         f"ha:{hass_admin_user.id}",
     ]
-    created = await hass.services.async_call(
-        DOMAIN,
-        "add",
-        {"title": "Second parcel", "merchant": "Example shop"},
-        context=Context(user_id=hass_user.id),
-        blocking=True,
-        return_response=True,
-    )
-    assert created["id"] != shipment_id
-    assert created["revision"] == 1
-    assert created["status"] == "expected"
-    saved = await (await admin.get(f"{PREFIX}/shipments/{created['id']}")).json()
-    assert saved["title"] == "Second parcel"
-    assert saved["merchant"] == "Example shop"
 
 
 @pytest.mark.parametrize("rust_backend", [True], indirect=True, ids=["app"])

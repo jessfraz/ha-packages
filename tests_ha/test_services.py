@@ -3,6 +3,7 @@
 import json
 from uuid import UUID
 
+import probatio as vol
 import pytest
 from homeassistant.core import Context, HomeAssistant
 from homeassistant.exceptions import (
@@ -56,19 +57,104 @@ async def test_add_action_fields_and_response(
     assert result == {"id": SHIPMENT_ID, "revision": 7, "status": "expected"}
 
 
-async def test_add_manual_shipment_without_requesting_response(
+@pytest.mark.parametrize("tracking_number", [None, "", " \t\r\n", "\u00a0\u2003\u202f"])
+async def test_add_requires_nonblank_tracking_before_transport(
+    hass: HomeAssistant,
+    hass_user,
+    entry,
+    backend: Backend,
+    tracking_number: str | None,
+) -> None:
+    fields = {"title": "Expected parcel"}
+    if tracking_number is not None:
+        fields["tracking_number"] = tracking_number
+    count = len(backend.requests)
+    with pytest.raises(vol.Invalid):
+        await hass.services.async_call(
+            DOMAIN,
+            "add",
+            fields,
+            context=Context(user_id=hass_user.id),
+            blocking=True,
+        )
+    assert len(backend.requests) == count
+
+
+async def test_add_tracked_shipment_without_requesting_response(
     hass: HomeAssistant, hass_user, entry, backend: Backend
 ) -> None:
     result = await hass.services.async_call(
         DOMAIN,
         "add",
-        {"title": "Expected parcel"},
+        {"title": "Expected parcel", "tracking_number": " \u2003TEST123\u00a0 "},
         context=Context(user_id=hass_user.id),
         blocking=True,
     )
     request = next(request for request in backend.requests if request.method == "POST")
-    assert json.loads(request.body)["tracking"] is None
+    assert json.loads(request.body)["tracking"] == {
+        "number": "TEST123",
+        "carrier": None,
+    }
     assert result is None
+
+
+async def test_action_reports_public_backend_error(
+    hass: HomeAssistant, hass_user, entry, backend: Backend
+) -> None:
+    backend.responses[("POST", "/v1/shipments")] = (
+        422,
+        json.dumps(
+            {
+                "message": (
+                    "EasyPost does not support this carrier. "
+                    "Check the tracking number and carrier."
+                ),
+                "error_code": "tracking_unsupported",
+                "private_details": "private-provider-credential",
+            }
+        ).encode(),
+        {"Content-Type": "application/json"},
+    )
+    with pytest.raises(HomeAssistantError) as caught:
+        await hass.services.async_call(
+            DOMAIN,
+            "add",
+            {"title": "Expected parcel", "tracking_number": "TEST123"},
+            context=Context(user_id=hass_user.id),
+            blocking=True,
+        )
+    assert "HTTP 422" in str(caught.value)
+    assert "tracking_unsupported" in str(caught.value)
+    assert "Check the tracking number and carrier." in str(caught.value)
+    assert "private-provider-credential" not in str(caught.value)
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        b"not a JSON response",
+        b'["not", "an", "error"]',
+        b'{"message": {"nested": "private-provider-credential"}}',
+        json.dumps({"message": "x" * 501}).encode(),
+        json.dumps({"message": "private-provider-credential\nlog line"}).encode(),
+        json.dumps(
+            {"message": "Bearer test-owner-token", "error_code": "test-owner-token"}
+        ).encode(),
+    ],
+)
+async def test_action_error_falls_back_without_reflecting_private_data(
+    hass: HomeAssistant, hass_user, entry, backend: Backend, body: bytes
+) -> None:
+    backend.responses[("POST", "/v1/shipments")] = (503, body, {})
+    with pytest.raises(HomeAssistantError) as caught:
+        await hass.services.async_call(
+            DOMAIN,
+            "add",
+            {"title": "Expected parcel", "tracking_number": "TEST123"},
+            context=Context(user_id=hass_user.id),
+            blocking=True,
+        )
+    assert str(caught.value) == "The Shipments backend rejected the action (HTTP 503)"
 
 
 @pytest.mark.parametrize("with_user", [False, True])
@@ -146,13 +232,16 @@ async def test_conflicting_action_is_never_retried(
 ) -> None:
     backend.responses[("PUT", f"/v1/shipments/{SHIPMENT_ID}/archive")] = (
         412,
-        b"{}",
+        (
+            b'{"message":"Review the latest shipment revision.",'
+            b'"error_code":"revision_conflict"}'
+        ),
         {},
     )
     fields = {"shipment_id": SHIPMENT_ID}
     if explicit_version:
         fields["if_match"] = '"3"'
-    with pytest.raises(HomeAssistantError, match="HTTP 412"):
+    with pytest.raises(HomeAssistantError, match="HTTP 412") as caught:
         await hass.services.async_call(
             DOMAIN,
             "archive",
@@ -160,6 +249,8 @@ async def test_conflicting_action_is_never_retried(
             context=Context(user_id=hass_admin_user.id),
             blocking=True,
         )
+    assert "revision_conflict" in str(caught.value)
+    assert "Review the latest shipment revision." in str(caught.value)
     requests = [request for request in backend.requests if SHIPMENT_ID in request.path]
     assert [request.method for request in requests] == (
         ["PUT"] if explicit_version else ["GET", "PUT"]
@@ -196,7 +287,7 @@ async def test_actions_exist_without_a_loaded_entry(
         await hass.services.async_call(
             DOMAIN,
             "add",
-            {"title": "Office supplies"},
+            {"title": "Office supplies", "tracking_number": "TEST123"},
             context=Context(user_id=hass_user.id),
             blocking=True,
         )
@@ -213,7 +304,7 @@ async def test_actions_remain_available_after_unload(
         await hass.services.async_call(
             DOMAIN,
             "add",
-            {"title": "Office supplies"},
+            {"title": "Office supplies", "tracking_number": "TEST123"},
             context=Context(user_id=hass_user.id),
             blocking=True,
         )
