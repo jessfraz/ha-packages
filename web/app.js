@@ -245,6 +245,23 @@ function guarded(action) {
   };
 }
 
+function renderServiceStatus(system, checked) {
+  byId("health").hidden = system.provider_enabled;
+  byId("health").textContent = system.provider_enabled
+    ? ""
+    : "Set the EasyPost API key before adding shipments or changing tracking. Existing records remain available.";
+  const status = [
+    system.provider_enabled
+      ? `${system.pending_syncs} tracking checks scheduled · ${system.sync_errors} tracking issues`
+      : "Tracking provider not configured",
+  ];
+  if (checked)
+    status.push(`Last checked ${new Date().toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}`);
+  byId("app-version").textContent = system.version;
+  byId("service-status").textContent = status.join(" · ");
+  byId("app-footer").hidden = false;
+}
+
 async function connect() {
   const [system, carriers] = await Promise.all([api("v1/system"), api("v1/carriers")]);
   const carrierField = byId("edit-form").elements.namedItem("carrier");
@@ -266,9 +283,7 @@ async function connect() {
   byId("dashboard").hidden = false;
   byId("add").hidden = false;
   setOwnerAccess(system.credential_role === "owner", true);
-  byId("health").textContent = system.provider_enabled
-    ? `${system.pending_syncs} tracking checks scheduled · ${system.sync_errors} tracking issues`
-    : "Set the EasyPost API key before adding shipments or changing tracking. Existing records remain available.";
+  renderServiceStatus(system, false);
   connected = true;
   try {
     await applyRoute(true);
@@ -393,23 +408,18 @@ async function load(append = false) {
       : "";
     providerEnabled = system.provider_enabled;
     if (showInstallation) refreshInstallation(generation, controller.signal);
-    byId("health").textContent = system.provider_enabled
-      ? `${system.pending_syncs} tracking checks scheduled · ${system.sync_errors} tracking issues`
-      : "Set the EasyPost API key before adding shipments or changing tracking. Existing records remain available.";
-    byId("health").append(
-      ` Last checked ${new Date().toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}.`,
-    );
+    renderServiceStatus(system, true);
     for (const button of byId("directions").querySelectorAll("button"))
       button.setAttribute("aria-pressed", String(button.dataset.direction === activeDirection));
     const stats = byId("summary");
     const focusedStat = document.activeElement?.dataset?.stat;
     stats.replaceChildren();
     for (const [key, label] of [
-      ["active", "ACTIVE"],
-      ["out_for_delivery", "OUT FOR DELIVERY"],
-      ["delivered", "DELIVERED"],
-      ["exceptions", "EXCEPTIONS"],
-      ["tracking_issues", "TRACKING ISSUES"],
+      ["active", "Active"],
+      ["out_for_delivery", "Out for delivery"],
+      ["delivered", "Delivered"],
+      ["exceptions", "Exceptions"],
+      ["tracking_issues", "Tracking issues"],
     ]) {
       const count = key === "tracking_issues" ? system.sync_errors : summary[key];
       const card = element("button", undefined, `stat stat-${key}${key === "tracking_issues" && count > 0 ? " has-issues" : ""}`);
