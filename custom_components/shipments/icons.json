@@ -40,7 +40,7 @@
     },
     "calendar": {
       "inbound_deliveries": {
-        "default": "mdi:calendar-truck"
+        "default": "mdi:truck-delivery"
       }
     },
     "event": {
