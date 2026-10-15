@@ -5,7 +5,7 @@ import json
 import logging
 from collections.abc import Callable
 from datetime import timedelta
-from typing import Literal, TypedDict
+from typing import Literal, NotRequired, TypedDict
 from urllib.parse import urlencode
 from uuid import UUID
 
@@ -49,7 +49,7 @@ class PresenceReport(TypedDict):
     version: str
     backup: BackupReport
     administrator_ids: list[str]
-    delivery_day: DeliveryDayReport
+    delivery_day: NotRequired[DeliveryDayReport]
 
 
 class EventCheckpoint(TypedDict):
@@ -94,14 +94,16 @@ class ShipmentsCoordinator(DataUpdateCoordinator[dict[str, int]]):
         self.event_available = False
         try:
             # Diagnose a release mismatch before reading newer API projections.
-            await self._async_check_version()
+            versions_match = await self._async_check_version()
             summary = await self._async_summary()
             for direction, keys in DIRECTION_SUMMARY_KEYS.items():
                 counts = await self._async_summary(direction)
                 summary.update({f"{direction}_{key}": counts[key] for key in keys})
-            day = DeliveryDay.at(dt_util.utcnow(), self.hass.config.time_zone)
-            delivered = await self._async_summary(Direction.INBOUND, day)
-            summary["inbound_delivered_today"] = delivered["delivered"]
+            day = None
+            if versions_match:
+                day = DeliveryDay.at(dt_util.utcnow(), self.hass.config.time_zone)
+                delivered = await self._async_summary(Direction.INBOUND, day)
+                summary["inbound_delivered_today"] = delivered["delivered"]
             estimates = await self._async_estimates()
             await self._async_report_presence(day)
         except (ClientError, TimeoutError, ResponseTooLarge, ValueError) as err:
@@ -143,7 +145,7 @@ class ShipmentsCoordinator(DataUpdateCoordinator[dict[str, int]]):
 
         return unsubscribe
 
-    async def _async_check_version(self) -> None:
+    async def _async_check_version(self) -> bool:
         response = await self.client.request("GET", "/v1/system")
         if response.status in {401, 403}:
             raise ConfigEntryAuthFailed("The backend rejected its credential")
@@ -166,8 +168,9 @@ class ShipmentsCoordinator(DataUpdateCoordinator[dict[str, int]]):
                     "integration_version": self._version,
                 },
             )
-        else:
-            ir.async_delete_issue(self.hass, DOMAIN, "version_mismatch")
+            return False
+        ir.async_delete_issue(self.hass, DOMAIN, "version_mismatch")
+        return True
 
     async def _async_estimates(self) -> tuple[DeliveryEstimate, ...]:
         estimates: list[DeliveryEstimate] = []
@@ -318,7 +321,7 @@ class ShipmentsCoordinator(DataUpdateCoordinator[dict[str, int]]):
             raise UpdateFailed(f"The backend returned an invalid {label}")
         return {key: data[key] for key in SUMMARY_KEYS}
 
-    async def _async_report_presence(self, day: DeliveryDay) -> None:
+    async def _async_report_presence(self, day: DeliveryDay | None) -> None:
         """Check in only after summary authentication and complete entry setup."""
         if self._entry.state is not ConfigEntryState.LOADED or not self._entry.data.get(
             CONF_ADDON_SLUG
@@ -334,11 +337,12 @@ class ShipmentsCoordinator(DataUpdateCoordinator[dict[str, int]]):
         report: PresenceReport = {
             "version": self._version,
             "backup": backup,
-            "delivery_day": day.presence(),
             "administrator_ids": [
                 user.id for user in users if user.is_active and user.is_admin
             ],
         }
+        if day is not None:
+            report["delivery_day"] = day.presence()
         try:
             response = await self.client.request(
                 "POST",
