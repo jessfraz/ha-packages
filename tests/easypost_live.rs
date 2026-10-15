@@ -70,6 +70,7 @@ fn input(number: &str, carrier: Option<Carrier>) -> CreateShipment {
         order_reference: None,
         signature_required: None,
         tracking: InputTracking {
+            recipient_url: None,
             number: number.into(),
             carrier,
         },

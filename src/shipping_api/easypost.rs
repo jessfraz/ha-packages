@@ -129,6 +129,7 @@ impl From<ProviderTracker> for Tracker {
         carrier_tracking.merge(&incoming);
         Self {
             id: raw.id,
+            provider: ProviderId::EasyPost,
             tracking_code: raw.tracking_code,
             carrier: raw.carrier,
             status: raw.status,

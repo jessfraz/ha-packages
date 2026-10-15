@@ -14,6 +14,7 @@ const labels = {
   cancelled: "Cancelled",
   error: "Tracking error",
 };
+const providerNames = { easypost: "EasyPost", aftership: "AfterShip", doordash: "DoorDash" };
 
 let token = "";
 let selected = null;
@@ -39,7 +40,7 @@ let homeAssistantPath = null;
 let listController = null;
 let refreshTimer = null;
 let showInstallation = false;
-let providerEnabled = false;
+let enabledProviders = new Set();
 let installationInitialized = false;
 let installationNeedsAttention = false;
 let agentCredentials = [];
@@ -101,7 +102,7 @@ function shipmentBadges(shipment, className) {
   badges.append(statusBadge(shipment.status));
   if (shipment.sync.last_error) {
     const configuration = configurationIssue(shipment.sync);
-    const retrying = !configuration && providerEnabled && shipment.sync.next_attempt_at != null;
+    const retrying = !configuration && shipment.sync.next_attempt_at != null;
     const issue = element("span", configuration?.label || (retrying ? "Tracking retry scheduled" : "Tracking needs attention"), `badge tracking-issue${retrying ? " retrying" : ""}`);
     issue.title = shipment.sync.last_error;
     badges.append(issue);
@@ -249,7 +250,7 @@ function renderServiceStatus(system, checked) {
   byId("health").hidden = system.provider_enabled;
   byId("health").textContent = system.provider_enabled
     ? ""
-    : "Set the EasyPost API key before adding shipments or changing tracking. Existing records remain available.";
+    : "Configure a tracking provider before adding shipments or changing tracking. Existing records remain available.";
   const status = [
     system.provider_enabled
       ? `${system.pending_syncs} tracking checks scheduled · ${system.sync_errors} tracking issues`
@@ -272,13 +273,16 @@ async function connect() {
     FedExDefault: "FedEx Default (EasyPost account)",
     DHLExpress: "DHL Express (your carrier account)",
     DHLExpressDefault: "DHL Express Default (EasyPost account)",
+    SpeedX: "SpeedX (AfterShip)",
+    Sway: "Sway / Returnmates (AfterShip)",
+    DoorDash: "DoorDash (original tracking link)",
   };
   for (const carrier of carriers) {
     const option = element("option", carrierLabels[carrier] || carrier);
     option.value = carrier;
     carrierField.append(option);
   }
-  providerEnabled = system.provider_enabled;
+  enabledProviders = new Set(system.enabled_providers);
   byId("login").hidden = true;
   byId("dashboard").hidden = false;
   byId("add").hidden = false;
@@ -406,7 +410,7 @@ async function load(append = false) {
     byId("view-note").textContent = deliveryDay
       ? `Delivered today, ${new Date(`${deliveryDay.date}T12:00:00Z`).toLocaleDateString([], { timeZone: "UTC", month: "short", day: "numeric", year: "numeric" })} · ${deliveryDay.time_zone}`
       : "";
-    providerEnabled = system.provider_enabled;
+    enabledProviders = new Set(system.enabled_providers);
     if (showInstallation) refreshInstallation(generation, controller.signal);
     renderServiceStatus(system, true);
     for (const button of byId("directions").querySelectorAll("button"))
@@ -890,12 +894,23 @@ function openEditor(shipment = null) {
       order_reference: shipment.order_reference,
       carrier: shipment.tracking?.carrier,
       number: shipment.tracking?.number,
+      recipient_url: shipment.tracking?.recipient_url,
       signature_required: shipment.signature_required == null ? "" : String(shipment.signature_required),
     })) {
       form.elements.namedItem(key).value = value || "";
     }
   }
+  updateRecipientField();
   byId("editor").showModal();
+}
+
+function updateRecipientField() {
+  const form = byId("edit-form");
+  const required = form.elements.namedItem("carrier").value === "DoorDash";
+  const field = form.elements.namedItem("recipient_url");
+  byId("recipient-url-field").hidden = !required;
+  field.required = required;
+  field.disabled = !required;
 }
 
 function setEditorSaving(saving) {
@@ -915,6 +930,7 @@ function currentDetail(id, generation) {
 }
 
 function carrierTrackingUrl(tracking) {
+  if (tracking.carrier === "DoorDash") return recipientTrackingUrl(tracking.recipient_url);
   const carriers = new Map([
     ["usps", ["https://tools.usps.com/go/TrackConfirmAction", "tLabels"]],
     ["ups", ["https://www.ups.com/track", "tracknum"]],
@@ -932,11 +948,29 @@ function carrierTrackingUrl(tracking) {
   return url;
 }
 
-function easyPostTrackingUrl(value) {
+function recipientTrackingUrl(value) {
   if (!value) return null;
   try {
     const url = new URL(value);
-    if (url.protocol === "https:" && url.host === "track.easypost.com" &&
+    const codes = url.searchParams.getAll("urlCode");
+    if (url.protocol === "https:" && url.host === "www.doordash.com" &&
+        url.pathname === "/orders/drive" && !url.username && !url.password && !url.hash &&
+        [...url.searchParams].length === 1 && codes.length === 1 && /^[A-Za-z0-9_-]{1,128}$/.test(codes[0]))
+      return url;
+  } catch {
+    // Server validation owns admission; unsafe links are never rendered.
+  }
+  return null;
+}
+
+function providerTrackingUrl(provider, value) {
+  if (!value) return null;
+  if (provider === "doordash") return recipientTrackingUrl(value);
+  const hosts = provider === "easypost" ? ["track.easypost.com"]
+    : provider === "aftership" ? ["www.aftership.com", "track.aftership.com"] : [];
+  try {
+    const url = new URL(value);
+    if (url.protocol === "https:" && hosts.includes(url.host) &&
         !url.username && !url.password) return url;
   } catch {
     // An absent or invalid public tracking URL does not block shipment details.
@@ -966,14 +1000,16 @@ function calendarDate(value) {
     ...(date.getFullYear() !== today.getFullYear() ? { year: "numeric" } : {}) });
 }
 
-function renderCarrierHistory(tracking) {
+function renderCarrierHistory(tracking, provider) {
   const list = byId("carrier-events");
   list.replaceChildren();
   const events = [...(tracking?.events || [])].sort((left, right) =>
     (Date.parse(right.datetime) || 0) - (Date.parse(left.datetime) || 0));
   byId("carrier-history-note").textContent = tracking?.events_truncated
     ? "Showing the most recent 512 carrier events. Earlier events exceeded the history limit."
-    : events.length ? "" : "The carrier has not reported any scan events yet.";
+    : events.length ? "" : provider === "doordash"
+      ? "DoorDash recipient tracking provides status and delivery dates here; scan history is unavailable."
+      : "The carrier has not reported any scan events yet.";
   for (const event of events) {
     const item = element("li", undefined, `carrier-event status-${event.status || "unknown"}`);
     const heading = element("div", undefined, "event-heading");
@@ -1035,11 +1071,13 @@ async function show(id, preserveView = false, section = route().get("section")) 
     element("span", shipment.tracking.number));
   hero.append(tracking);
   const links = element("div", undefined, "tracking-links");
+  const linked = new Set();
   for (const [label, url] of [
-    ["Carrier tracking", carrierTrackingUrl(shipment.tracking)],
-    ["EasyPost tracking", easyPostTrackingUrl(shipment.sync.tracking_url)],
+    [shipment.sync.provider === "doordash" ? "DoorDash recipient tracking" : "Carrier tracking", carrierTrackingUrl(shipment.tracking)],
+    [`${providerNames[shipment.sync.provider] || "Provider"} tracking`, providerTrackingUrl(shipment.sync.provider, shipment.sync.tracking_url)],
   ]) {
-    if (!url) continue;
+    if (!url || linked.has(url.href)) continue;
+    linked.add(url.href);
     const link = element("a", `${label} ↗`);
     link.href = url.href;
     link.target = "_blank";
@@ -1075,9 +1113,10 @@ async function show(id, preserveView = false, section = route().get("section")) 
   const provider = element("details", undefined, "detail-disclosure");
   provider.id = "connection";
   const configuration = configurationIssue(shipment.sync);
-  const retrying = !configuration && providerEnabled && shipment.sync.last_error && shipment.sync.next_attempt_at != null;
+  const configured = enabledProviders.has(shipment.sync.provider);
+  const retrying = !configuration && shipment.sync.last_error && shipment.sync.next_attempt_at != null;
   const providerState = configuration?.label || (shipment.sync.last_error ? retrying ? "Retry scheduled" : "Needs attention"
-    : !providerEnabled ? "Not configured" : shipment.sync.last_success_at ? "Connected" : "Waiting for first check");
+    : !configured ? "Not configured" : shipment.sync.last_success_at ? "Connected" : "Waiting for first check");
   provider.append(element("summary", `Tracking connection · ${providerState}`));
   if (shipment.sync.last_error) {
     const issue = element("div", undefined, `tracking-problem${retrying ? " retrying" : ""}`);
@@ -1086,7 +1125,7 @@ async function show(id, preserveView = false, section = route().get("section")) 
     const next = shipment.sync.next_attempt_at;
     issue.append(element("p", configuration
       ? configuration.instruction
-      : !providerEnabled
+      : !configured
       ? "Your shipment is saved. Configure the tracking provider to resume updates."
       : retrying
         ? next * 1000 > Date.now() ? `Your shipment is saved. Next retry ${dateLabel(next * 1000)}.`
@@ -1096,7 +1135,7 @@ async function show(id, preserveView = false, section = route().get("section")) 
   }
   const fields = element("dl", undefined, "shipment-details");
   const detail = (label, value) => fields.append(element("dt", label), element("dd", value));
-  detail("Provider", shipment.sync.provider === "easypost" ? "EasyPost" : "Tracking provider");
+  detail("Provider", providerNames[shipment.sync.provider] || "Tracking provider");
   detail("Registration", shipment.sync.registration_state === "registered" ? "Registered" : shipment.sync.registration_state === "configuration_required" ? "Configuration required; saved locally" : shipment.sync.registration_state === "rejected" ? "Needs attention; review provider error" : "Pending registration; saved locally");
   if (shipment.sync.error_code) detail("Error code", shipment.sync.error_code);
   if (shipment.sync.provider_error_code) detail("Provider error code", shipment.sync.provider_error_code);
@@ -1120,7 +1159,7 @@ async function show(id, preserveView = false, section = route().get("section")) 
     byId("sources").append(sources);
     linkDisclosure(sources);
   }
-  renderCarrierHistory(shipment.carrier_tracking);
+  renderCarrierHistory(shipment.carrier_tracking, shipment.sync.provider);
 
   const actions = byId("actions");
   actions.replaceChildren();
@@ -1285,6 +1324,7 @@ byId("more").addEventListener(
   guarded(() => load(true)),
 );
 byId("more-events").addEventListener("click", guarded(loadEvents));
+byId("edit-form").elements.namedItem("carrier").addEventListener("change", updateRecipientField);
 byId("login").addEventListener(
   "submit",
   guarded(async () => {
@@ -1337,6 +1377,7 @@ byId("edit-form").addEventListener("submit", async (event) => {
     tracking: {
       carrier: values.carrier.trim() || null,
       number: values.number.trim(),
+      recipient_url: values.carrier === "DoorDash" ? values.recipient_url.trim() || null : null,
     },
   };
   const payload = JSON.stringify(input);

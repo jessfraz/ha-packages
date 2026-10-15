@@ -72,7 +72,7 @@ async def test_add_action_fields_and_response(
         "direction": direction,
         "merchant": "Example shop",
         "order_reference": "ORDER-1",
-        "tracking": {"number": "TEST123", "carrier": "USPS"},
+        "tracking": {"number": "TEST123", "carrier": "USPS", "recipient_url": None},
     }
     assert result == {"id": SHIPMENT_ID, "revision": 7, "status": "expected"}
 
@@ -109,6 +109,64 @@ async def test_add_requires_direction_before_transport(
             DOMAIN,
             "add",
             {"title": "Expected parcel", "tracking_number": "TEST123"},
+            context=Context(user_id=hass_user.id),
+            blocking=True,
+        )
+    assert len(backend.requests) == count
+
+
+async def test_add_doordash_preserves_original_recipient_link(
+    hass: HomeAssistant, hass_user, entry, backend: Backend
+) -> None:
+    recipient_url = (
+        "https://www.doordash.com/orders/drive?urlCode=synthetic-recipient-code"
+    )
+    await hass.services.async_call(
+        DOMAIN,
+        "add",
+        {
+            "title": "Office supplies",
+            "direction": "inbound",
+            "tracking_number": "DD-TEST123",
+            "carrier": "DoorDash",
+            "recipient_url": recipient_url,
+        },
+        context=Context(user_id=hass_user.id),
+        blocking=True,
+    )
+    requests = [request for request in backend.requests if request.method == "POST"]
+    assert len(requests) == 1
+    assert json.loads(requests[0].body)["tracking"] == {
+        "number": "DD-TEST123",
+        "carrier": "DoorDash",
+        "recipient_url": recipient_url,
+    }
+
+
+@pytest.mark.parametrize("recipient_url", [None, "", " \t\r\n"])
+async def test_add_doordash_requires_original_link_before_transport(
+    hass: HomeAssistant,
+    hass_user,
+    entry,
+    backend: Backend,
+    recipient_url: str | None,
+) -> None:
+    fields = {
+        "title": "Office supplies",
+        "direction": "inbound",
+        "tracking_number": "DD-TEST123",
+        "carrier": " doordash ",
+    }
+    if recipient_url is not None:
+        fields["recipient_url"] = recipient_url
+    count = len(backend.requests)
+    with pytest.raises(
+        ServiceValidationError, match="original recipient tracking link"
+    ):
+        await hass.services.async_call(
+            DOMAIN,
+            "add",
+            fields,
             context=Context(user_id=hass_user.id),
             blocking=True,
         )
@@ -157,6 +215,7 @@ async def test_add_tracked_shipment_without_requesting_response(
     assert json.loads(request.body)["tracking"] == {
         "number": "TEST123",
         "carrier": None,
+        "recipient_url": None,
     }
     assert result is None
 

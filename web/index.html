@@ -141,6 +141,17 @@
               aria-describedby="tracking-help"
             ></label>
           </div>
+          <label id="recipient-url-field" hidden>DoorDash tracking link<input
+            name="recipient_url"
+            type="url"
+            maxlength="2048"
+            autocomplete="off"
+            spellcheck="false"
+            aria-describedby="recipient-url-help"
+          ><span id="recipient-url-help" class="muted">
+            Copy the original DoorDash tracking link from the shipping email.
+            The tracking number alone cannot recreate this link.
+          </span></label>
           <label>Signature<select name="signature_required">
             <option value="">Not known</option>
             <option value="true">Signature required</option>

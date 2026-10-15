@@ -2021,7 +2021,7 @@ dependencies = [
 
 [[package]]
 name = "shipments"
-version = "0.5.4"
+version = "0.5.5"
 dependencies = [
  "anyhow",
  "clap",

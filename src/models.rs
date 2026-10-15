@@ -34,6 +34,9 @@ pub struct Tracking<C = crate::carrier::Carrier> {
     #[serde(default)]
     #[schemars(required)]
     pub number: String,
+    /// Original recipient link. Required for DoorDash; omitted for other carriers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recipient_url: Option<String>,
 }
 
 /// Carrier detection is allowed at admission. Persisted shipments always use
@@ -45,6 +48,7 @@ impl From<Tracking> for InputTracking {
         Self {
             carrier: Some(tracking.carrier),
             number: tracking.number,
+            recipient_url: tracking.recipient_url,
         }
     }
 }
@@ -287,6 +291,8 @@ impl CarrierTracking {
                 .flatten()
         }) {
             self.delivered_at = Some(delivered_at.clone());
+        } else if let Some(delivered_at) = &incoming.delivered_at {
+            self.delivered_at = Some(delivered_at.clone());
         }
         if let Some(signed_by) = &incoming.signed_by {
             self.signed_by = Some(signed_by.clone());
@@ -478,6 +484,8 @@ pub struct Summary {
 pub struct System {
     pub version: String,
     pub provider_enabled: bool,
+    #[serde(default)]
+    pub enabled_providers: Vec<crate::shipping_api::types::ProviderId>,
     pub pending_syncs: i64,
     pub sync_errors: i64,
     pub credential_role: String,

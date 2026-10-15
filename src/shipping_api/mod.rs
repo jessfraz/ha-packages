@@ -1,6 +1,8 @@
 //! Tracking backends. The worker owns persistence; implementations own wire
 //! formats, credentials, pacing and safe registration recovery.
 
+pub mod aftership;
+pub mod doordash;
 pub mod easypost;
 pub mod error;
 pub mod types;

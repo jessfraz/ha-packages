@@ -1,12 +1,12 @@
 # ha-packages
 
 A local shipment registry for Home Assistant. Add a delivery yourself or through
-the API, let EasyPost check its progress, and correct the status when you know
-better. Carrier updates never undo a manual correction.
+the API, let its tracking provider check its progress, and correct the status
+when you know better. Carrier updates never undo a manual correction.
 
 One Rust process, a SQLite database, and a small Home Assistant adapter. Records
 and history stay local. Every shipment needs a tracking number and an inbound
-or outbound direction. EasyPost must resolve a carrier and accept tracking
+or outbound direction. Its provider must resolve a carrier and accept tracking
 before a shipment is saved. New labels do not need a carrier scan.
 
 ## Install on Home Assistant
@@ -19,11 +19,11 @@ services** to enable sensors and native actions. The app manages credentials
 automatically.
 
 See [installation and configuration](shipments/DOCS.md) for both installation
-steps, EasyPost configuration, and standalone Docker instructions. The app
+steps, provider configuration, and standalone Docker instructions. The app
 dashboard's **Installation → Run checks** verifies the service, Home Assistant
 connection, app/integration version match, authentication, read-only EasyPost
 access, and backup coverage. Update both the app and HACS integration to
-**0.5.2**, then restart Home Assistant.
+**0.5.5**, then restart Home Assistant.
 
 The supervised integration adds a stable **Shipments** sidebar panel at
 `/shipments`, available to ordinary Home Assistant users. Status corrections,
@@ -93,11 +93,16 @@ The tokens must be distinct and each contain 32–256 printable ASCII characters
 without whitespace. The integration token is optional when running without
 Home Assistant.
 
-`EASYPOST_API_KEY` enables tracking verification and background updates.
+`EASYPOST_API_KEY` enables EasyPost verification and background updates.
+`AFTERSHIP_API_KEY` enables tracking for **SpeedX** and **Sway / Returnmates**
+through AfterShip. Select those carriers explicitly; they do not fall back to
+EasyPost. **DoorDash** uses its original recipient tracking link and requires
+no API key. Other carriers use EasyPost, including automatic carrier detection.
 Creates and tracking edits require successful provider verification. A missing
-key, failed detection, or provider outage saves no new shipment and leaves an
-existing tracking identity unchanged. Tracker registration can incur EasyPost
-charges, and some carriers require their own accounts and credentials. The
+key for the selected provider, failed detection, or provider outage saves no
+new shipment and leaves an existing tracking identity unchanged. Tracker
+registration can consume provider quota or incur fees, and some carriers
+require their own accounts and credentials. The
 provider key belongs to the server alone.
 
 ## API
@@ -140,7 +145,7 @@ There is no separate recovery endpoint.
 | Method | Path | Operation |
 | --- | --- | --- |
 | GET / POST | `/v1/shipments` | List or create |
-| GET | `/v1/carriers` | List supported EasyPost carrier values |
+| GET | `/v1/carriers` | List supported carrier enum values |
 | GET / PATCH | `/v1/shipments/{id}` | Read or edit |
 | GET | `/v1/shipments/{id}/events` | Read history |
 | GET | `/v1/events` | Read durable shipment status transitions |
@@ -181,6 +186,33 @@ Carrier values are a closed enum using EasyPost's canonical tracking strings,
 including `USPS`, `UPS`, and `FedEx`. `GET /v1/carriers` supplies the same catalog
 used by the add-shipment dropdown. Omit carrier for automatic detection. Older
 case-insensitive spellings remain readable; responses use canonical names.
+
+For DoorDash, select `"carrier":"DoorDash"` and supply
+`tracking.recipient_url`, the original HTTPS link from the shipping email:
+
+```json
+{
+  "title": "Example parcel",
+  "direction": "inbound",
+  "tracking": {
+    "carrier": "DoorDash",
+    "number": "YOUR_TRACKING_NUMBER",
+    "recipient_url": "https://www.doordash.com/orders/drive?urlCode=ORIGINAL_LINK_CODE"
+  }
+}
+```
+
+Copy the whole original link. Its opaque `urlCode` cannot be derived from the
+tracking number. Other hosts, paths, fragments, credentials and additional
+query parameters are rejected. The app fetches that fixed recipient route
+without authentication or JavaScript, verifies the exact tracking number and
+recognized current status, and stores the original link for refreshes. A new
+link or tracking-number edit is verified before replacing an existing one.
+DoorDash tracking makes only read requests; it creates no remote tracker.
+Current status and actual delivery time are supported when provided by the
+page. Detailed scan history is unavailable. Missing, changed or unrecognized
+page data fails verification; an estimate never becomes an actual delivery.
+Treat recipient tracking links as private shipment data.
 
 EasyPost treats `FedEx` and `FedExDefault` as separate carrier choices.
 `FedEx` requires your own configured carrier credentials; the EasyPost Wallet
@@ -257,8 +289,10 @@ the shipment with the same safe error codes:
 | HTTP 400 | `tracking_invalid` | Check the number's format; unsupported carrier values are also rejected by the enum. |
 | HTTP 400 / tracking issue | `tracking_unsupported` | The provider could not match the number to an available carrier. Select the carrier from the shipping notice and check its account setup. This does not establish that the number is invalid. |
 | HTTP 400 / tracking issue | `tracking_invalid`, `tracking_carrier_mismatch`, `tracking_carrier_ambiguous` | Correct the number or specify the right carrier. |
+| HTTP 400 | `tracking_recipient_url_required`, `tracking_recipient_url_invalid`, `tracking_recipient_url_mismatch` | Supply the original DoorDash recipient link matching this tracking number. The number alone is insufficient. |
 | HTTP 400 / setup required | `tracking_test_key`, `tracking_carrier_account_required`, `tracking_carrier_credentials_required` | Fix the EasyPost key, select the appropriate carrier choice, or configure its account. |
 | HTTP 503 / tracking issue | `provider_http`, `provider_timeout`, `provider_connection`, `provider_invalid_response` | Retry the same admission request after `Retry-After`; saved shipments retry with backoff. These errors do not establish that a number is invalid. |
+| HTTP 503 / tracking issue | `recipient_page_unavailable` | The DoorDash page could not verify a recognized current status. Retry after backoff; an access refusal is not a request for carrier credentials. |
 | Shipment sync | `registration_ambiguous`, `registration_expired` | Registration needs review; the app will not risk another paid registration automatically. |
 
 Inspect `sync.provider_status`, `sync.provider_error_code`, `sync.attempts`,
@@ -345,6 +379,9 @@ checks also respect the cooldown.
 
 Upgrades remove legacy records missing a carrier or tracking number, together
 with their sources, history and create replays. Complete records are retained.
+The DoorDash recipient-tracking migration also removes legacy DoorDash records
+without their required original recipient link. Re-add those shipments with
+the original link if needed.
 
 The app writes JSON logs to stderr, visible in the Home Assistant app log or
 container logs. Entries include UTC timestamps, request IDs, safe route
@@ -385,9 +422,14 @@ cancels it without a write. Providers must share pacing across request-scoped
 clients. Never try a different provider automatically after an uncertain
 registration outcome.
 
-EasyPost is the only implemented backend. Another backend, such as AfterShip,
-belongs in its own file beside `easypost.rs`; its carrier mapping, credentials,
-recovery guarantees and configuration must be verified before enabling it.
+`aftership.rs` owns AfterShip authentication, carrier slugs and tracker
+reconciliation for SpeedX and Sway. `doordash.rs` implements read-only
+recipient tracking, with a fixed URL allowlist, response and transport bounds,
+typed observations and no JavaScript execution. Its HTML hydration parser is
+a website adapter, not a stable public API contract; changed or ambiguous data
+must fail closed. Each provider shares pacing across its own scoped clients.
+Additional carriers require verified coverage before routing them to a
+provider. Amazon Logistics coverage remains unconfirmed.
 
 ```sh
 nix develop

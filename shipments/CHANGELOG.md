@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.5.5
+
+- Track DoorDash directly from its original recipient link. Require and verify
+  that link and tracking number before saving; keep DoorDash out of EasyPost
+  and AfterShip. Remove legacy DoorDash imports without recipient links.
+- Route SpeedX and Sway through AfterShip, adopt existing imports before new
+  registrations, and stop automatic retries for carrier connection problems.
+  Preserve prior provider ownership in history when migrating existing rows.
+- Preserve actual delivery timestamps even when a provider has no scan history.
+  Show provider-specific setup and safe native error codes without logging
+  recipient links or tracking numbers.
+
 ## 0.5.4
 
 - Add package details to inbound delivered-today and out-for-delivery sensors.

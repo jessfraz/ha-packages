@@ -47,6 +47,7 @@ struct Entry {
     timestamp: String,
     level: String,
     event: String,
+    provider: Option<String>,
     request_id: Option<Uuid>,
     route: Option<String>,
     response_code: Option<u16>,
@@ -302,4 +303,66 @@ fn application_events_only_accept_typed_safe_fields_and_fixed_messages() {
     assert!(entries[1].provider_error_code.is_none());
     assert!(entries[1].duration_ms.is_none());
     assert!(!capture.text().contains("PRIVATE_"));
+}
+
+#[test]
+fn recipient_and_aftership_failures_keep_safe_codes_without_recipient_links() {
+    let capture = Capture::default();
+    let logger = logging::with_writer(capture.clone());
+    let recipient_url = "https://www.doordash.com/orders/drive?urlCode=PRIVATE_RECIPIENT_TOKEN";
+    let request_id = Uuid::now_v7();
+    let expected = [
+        ("doordash", "tracking_recipient_url_required", None),
+        ("doordash", "tracking_recipient_url_invalid", None),
+        ("doordash", "tracking_recipient_url_mismatch", None),
+        ("doordash", "recipient_page_unavailable", None),
+        (
+            "aftership",
+            "tracking_carrier_credentials_required",
+            Some("Pending_002"),
+        ),
+        (
+            "aftership",
+            "tracking_carrier_mismatch",
+            Some("Pending_004"),
+        ),
+        ("aftership", "tracking_unsupported", Some("Pending_006")),
+        ("aftership", "tracking_unsupported", Some("4010")),
+        (
+            "aftership",
+            "tracking_carrier_credentials_required",
+            Some("4011"),
+        ),
+        ("aftership", "tracking_unsupported", Some("4012")),
+        ("aftership", "tracking_invalid", Some("4005")),
+        ("aftership", "tracking_invalid", Some("4007")),
+        ("aftership", "tracking_invalid", Some("4008")),
+        ("aftership", "tracking_invalid", Some("4009")),
+        ("aftership", "tracking_invalid", Some("4017")),
+    ];
+    for (provider, code, native_code) in expected {
+        slog::warn!(logger, "provider_request";
+            "provider" => provider, "request_id" => request_id.to_string(),
+            "operation" => "retrieve", "outcome" => "rejected", "error_code" => code,
+            "provider_status" => 400_u16, "provider_error_code" => native_code,
+            "recipient_url" => recipient_url, "url" => recipient_url,
+            "tracking_number" => "PRIVATE_TRACKING_NUMBER",
+            "provider_response" => "PRIVATE_PROVIDER_RESPONSE",
+        );
+    }
+    let entries = capture.entries();
+    assert_eq!(entries.len(), expected.len());
+    for (entry, (provider, code, native_code)) in entries.iter().zip(expected) {
+        assert_eq!(entry.provider.as_deref(), Some(provider));
+        assert_eq!(entry.request_id, Some(request_id));
+        assert_eq!(entry.operation.as_deref(), Some("retrieve"));
+        assert_eq!(entry.error_code.as_deref(), Some(code));
+        assert_eq!(entry.provider_error_code.as_deref(), native_code);
+        assert_eq!(entry.provider_status, Some(400));
+    }
+    let output = capture.text();
+    assert!(!output.contains("PRIVATE_"));
+    assert!(!output.contains("urlCode"));
+    assert!(!output.contains("doordash.com"));
+    assert!(!output.contains(recipient_url));
 }

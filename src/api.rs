@@ -1,7 +1,7 @@
 use crate::{
     installation::{Installation, InstallationReport, IntegrationPresence, valid_presence},
     models::*,
-    shipping_api::ShippingApi,
+    shipping_api::{ShippingApi, types::ProviderId},
     store::{Store, validate_create, validate_update},
 };
 use anyhow::{Context as _, Result, anyhow};
@@ -28,7 +28,7 @@ pub struct Context {
     owner_digest: [u8; 32],
     integration_digest: Option<[u8; 32]>,
     ingress_peer: Option<IpAddr>,
-    provider: Option<Arc<dyn ShippingApi>>,
+    providers: Vec<Arc<dyn ShippingApi>>,
     installation: Arc<Installation>,
 }
 
@@ -44,9 +44,33 @@ impl Context {
             owner_digest: Sha256::digest(owner).into(),
             integration_digest: None,
             ingress_peer,
-            provider,
+            providers: provider.into_iter().collect(),
             installation: Arc::new(Installation::new(false)),
         }
+    }
+
+    pub fn with_provider(mut self, provider: Arc<dyn ShippingApi>) -> Self {
+        if let Some(existing) = self
+            .providers
+            .iter_mut()
+            .find(|existing| existing.id() == provider.id())
+        {
+            *existing = provider;
+        } else {
+            self.providers.push(provider);
+        }
+        self
+    }
+
+    pub fn providers(&self) -> &[Arc<dyn ShippingApi>] {
+        &self.providers
+    }
+
+    fn provider(&self, id: ProviderId) -> Option<Arc<dyn ShippingApi>> {
+        self.providers
+            .iter()
+            .find(|provider| provider.id() == id)
+            .cloned()
     }
 
     pub fn with_integration(mut self, token: &str) -> Self {
@@ -325,7 +349,9 @@ async fn shipments_create(
             let result = async {
                 let verified = crate::admission::verify(
                     store,
-                    request.context().provider.clone(),
+                    request
+                        .context()
+                        .provider(ProviderId::for_carrier(input.tracking.carrier)),
                     &input.tracking,
                     &request.log,
                     &request.request_id,
@@ -386,6 +412,7 @@ async fn shipment_update(
         }
         if tracking.number != current.tracking.number
             || tracking.carrier != Some(current.tracking.carrier)
+            || tracking.recipient_url != current.tracking.recipient_url
         {
             validate_admission(tracking)
                 .map_err(|error| log_validation_error(&request, error, "update"))?;
@@ -397,7 +424,9 @@ async fn shipment_update(
             verified = Some(
                 crate::admission::verify(
                     &request.context().store,
-                    request.context().provider.clone(),
+                    request
+                        .context()
+                        .provider(ProviderId::for_carrier(tracking.carrier)),
                     input
                         .tracking
                         .value
@@ -730,7 +759,7 @@ async fn system(
     let mut system = request
         .context()
         .store
-        .system(request.context().provider.is_some())
+        .system(!request.context().providers.is_empty())
         .await?;
     system.credential_role = if principal.owner {
         "owner"
@@ -742,6 +771,12 @@ async fn system(
         "agent"
     }
     .into();
+    system.enabled_providers = request
+        .context()
+        .providers
+        .iter()
+        .map(|provider| provider.id())
+        .collect();
     system.delivery_day = request.context().installation.delivery_day().await;
     Ok(HttpResponseOk(system))
 }
@@ -763,8 +798,7 @@ async fn installation_check(
     require_owner(&request).await?;
     let context = request.context();
     let provider = context
-        .provider
-        .as_ref()
+        .provider(ProviderId::EasyPost)
         .map(|provider| provider.for_request(&request.request_id, None));
     context
         .installation
@@ -875,7 +909,7 @@ async fn installation_report(
     Ok(request
         .context()
         .installation
-        .report(request.context().provider.is_some())
+        .report(request.context().provider(ProviderId::EasyPost).is_some())
         .await)
 }
 

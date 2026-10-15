@@ -1,5 +1,5 @@
 name: Shipments
-version: "0.5.4"
+version: "0.5.5"
 slug: shipments
 description: A local shipment registry with a Home Assistant dashboard
 url: https://github.com/jessfraz/ha-packages
@@ -24,5 +24,6 @@ environment:
 options: {}
 schema:
   easypost_api_key: password?
+  aftership_api_key: password?
 discovery:
   - shipments

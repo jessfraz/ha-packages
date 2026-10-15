@@ -73,14 +73,15 @@ paired, check the integration for a connection or authentication error.
 
 Version mismatch is a separate warning: connectivity and authentication can
 pass while the two installed versions differ. Update both the app through the
-App Store and the integration through HACS to **0.5.2**, then restart Home
+App Store and the integration through HACS to **0.5.5**, then restart Home
 Assistant. Without a recent integration check-in, the version match is
 unverified.
 
 **Run checks** makes a read-only EasyPost request when a key is configured;
 requests are rate-limited to once per minute. A successful result stays passed
-until a later check actually fails. Without a key, new shipments and tracking
-edits cannot be verified or saved.
+until a later check actually fails. Without an EasyPost key, EasyPost carriers
+cannot be verified or saved; DoorDash and configured AfterShip carriers still
+use their own providers.
 
 The backup check shows the recorded backup time. It requires a backup made
 after pairing. An older, app-only, or missing backup needs attention; an
@@ -200,6 +201,11 @@ rename an entity in Home Assistant.
 | Option | Purpose |
 | --- | --- |
 | `easypost_api_key` | Enables tracking verification before saving and background tracking updates. |
+| `aftership_api_key` | Enables SpeedX and Sway / Returnmates tracking through AfterShip. |
+
+DoorDash requires its original recipient tracking link rather than an API key.
+Other carriers and automatic carrier detection use EasyPost. Provider keys
+stay in the app configuration; clients and agents do not receive them.
 
 ## Add or edit a shipment
 
@@ -209,11 +215,29 @@ Existing records migrate to inbound. The default list shows both directions
 together; use the optional direction filters to narrow it.
 Leave **Carrier** on **Auto-detect**, or
 choose its canonical EasyPost carrier when detection is ambiguous.
+Select **SpeedX** or **Sway / Returnmates** explicitly to use AfterShip.
+Configure the AfterShip key in the app; these carriers do not fall back to
+EasyPost if verification fails.
 For FedEx, the **FedEx Default (EasyPost account)** choice uses EasyPost's
 Wallet route. **FedEx (your carrier account)** requires separately configured
 FedEx credentials. If the provider reports `CREDENTIALS_NOT_FOUND`, correct
 that choice or configure the carrier account; retrying does not fix missing
 credentials or mean that the number is invalid.
+
+For **DoorDash**, also paste the **DoorDash tracking link** from the merchant's
+shipping email. It looks like
+`https://www.doordash.com/orders/drive?urlCode=...`. The opaque link code is
+different from the tracking number; copying the number alone is insufficient.
+The app verifies that the page matches the exact number and reports a
+recognized status before saving. The original link remains available in the
+shipment details and editor. No DoorDash account, API key, label or paid
+tracker registration is needed. Keep the link private.
+
+DoorDash supplies current status and delivery dates through this recipient
+page. Detailed scan history is unavailable. The app never runs page scripts
+or treats an estimate as an actual delivery. A missing or changed page reports
+a clear error and uses normal retry backoff; carrier credentials will not fix
+a page-access refusal.
 
 Select **Save shipment** to verify tracking and save the accepted shipment.
 Auto-detection must return a supported carrier, which is always stored with the
@@ -231,6 +255,8 @@ tracking**. A tracking number cannot be removed.
 
 On upgrade, legacy records missing either a carrier or tracking number are
 removed with their sources, history and create replays.
+The recipient-tracking migration also removes DoorDash records missing the
+original tracking link. Re-add those parcels with their original link if needed.
 
 Open a shipment for tracking links, delivery dates, signature information and
 carrier scan history. Action buttons and manual corrections follow history.
@@ -289,6 +315,10 @@ data:
 response_variable: parcel
 ```
 
+For `carrier: DoorDash`, also supply `recipient_url` with the original
+recipient link from the merchant's shipping email. The action verifies the
+same number, carrier and link as the dashboard and API.
+
 Existing shipment actions accept `shipment_id`. The adapter reads the current
 version before submitting a change. Advanced callers can pass `if_match` to
 require a specific revision. A concurrent edit produces a conflict; review the
@@ -343,6 +373,7 @@ The SQLite database is stored in `/data/shipments.sqlite3`. Home Assistant
 stops the app before backing up this directory. Back up both the app and Home
 Assistant configuration to preserve the database and paired integration.
 Treat backups as private: they include shipment details and saved credentials.
+They also include original recipient tracking links.
 They preserve agent access and revocations at the time of the backup.
 
 Stop the app before copying the database manually so its WAL is checkpointed.

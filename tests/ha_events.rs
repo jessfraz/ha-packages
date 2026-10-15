@@ -57,6 +57,7 @@ impl Fixture {
                     order_reference: None,
                     signature_required: None,
                     tracking: InputTracking {
+                        recipient_url: None,
                         carrier: Some("usps".parse().unwrap()),
                         number: number.into(),
                     },
@@ -668,6 +669,7 @@ async fn create_estimate(
 ) -> Shipment {
     let carrier = "usps".parse().unwrap();
     let tracker = Tracker {
+        provider: shipments::shipping_api::types::ProviderId::EasyPost,
         id: format!("trk_fixture_{number}"),
         tracking_code: number.into(),
         carrier,
@@ -687,6 +689,7 @@ async fn create_estimate(
                 order_reference: None,
                 signature_required: None,
                 tracking: InputTracking {
+                    recipient_url: None,
                     carrier: Some(carrier),
                     number: number.into(),
                 },
@@ -1114,6 +1117,7 @@ async fn native_adapter_fixture_uses_the_real_store() {
                     order_reference: None,
                     signature_required: None,
                     tracking: InputTracking {
+                        recipient_url: None,
                         carrier: Some(shipments::carrier::Carrier::Usps),
                         number: number.into(),
                     },

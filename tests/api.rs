@@ -136,6 +136,7 @@ fn input(title: &str) -> CreateShipment {
         order_reference: None,
         signature_required: None,
         tracking: InputTracking {
+            recipient_url: None,
             carrier: Some("usps".parse().unwrap()),
             number: format!(
                 "TEST{}123",
@@ -363,6 +364,7 @@ async fn optimistic_updates_and_null_patch_preserve_newer_state() {
     let mut request = input("Parcel");
     request.merchant = Some("Shop".into());
     request.tracking = InputTracking {
+        recipient_url: None,
         carrier: Some("UPS".parse().unwrap()),
         number: "1Z ABC123".into(),
     };
@@ -525,6 +527,7 @@ async fn duplicate_sources_tracking_archive_and_pagination_use_real_http() {
     let app = App::new(None).await;
     let mut body = input("First");
     body.tracking = InputTracking {
+        recipient_url: None,
         carrier: Some("UPS".parse().unwrap()),
         number: "TEST001".into(),
     };
@@ -551,6 +554,7 @@ async fn duplicate_sources_tracking_archive_and_pagination_use_real_http() {
     let created: Shipment = responses.remove(0).json().await.unwrap();
     let mut ambiguous = input("Carrier not known yet");
     ambiguous.tracking = InputTracking {
+        recipient_url: None,
         carrier: None,
         number: "TEST001".into(),
     };
@@ -1476,6 +1480,31 @@ struct ApiFailure {
 }
 
 #[tokio::test]
+async fn doordash_without_original_recipient_link_is_rejected_before_any_provider_request() {
+    let app = App::new(None).await;
+    let mut body = input("DoorDash recipient link");
+    body.tracking.carrier = Some("DoorDash".parse().unwrap());
+    let response = app
+        .request(Method::POST, "/v1/shipments")
+        .header("Idempotency-Key", "missing-doordash-link")
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let failure: ApiFailure = response.json().await.unwrap();
+    assert_eq!(
+        failure.error_code.as_deref(),
+        Some("tracking_recipient_url_required")
+    );
+    assert!(failure.message.contains("DoorDash"));
+    assert!(failure.message.to_lowercase().contains("link"));
+    assert_eq!(app.provider_fixture.as_ref().unwrap().calls(), 0);
+    assert_eq!(app.store.summary(None).await.unwrap().active, 0);
+    app.close().await;
+}
+
+#[tokio::test]
 async fn every_api_role_rejects_missing_or_invalid_local_tracking_before_provider_io() {
     let app = App::new(None).await;
     let provider = app.provider_fixture.as_ref().unwrap();
@@ -1669,6 +1698,7 @@ async fn rejected_tracking_changes_preserve_the_verified_shipment() {
     let changed = UpdateShipment {
         tracking: Patch {
             value: Some(Some(InputTracking {
+                recipient_url: None,
                 carrier: Some("UPS".parse().unwrap()),
                 number: "NEWNUMBER123".into(),
             })),

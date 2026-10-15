@@ -30,6 +30,7 @@ struct Record {
     carrier_tracking: String,
     tracking_carrier: String,
     tracking_number: String,
+    recipient_url: Option<String>,
     carrier_status: Option<String>,
     override_status: Option<String>,
     override_reason: Option<String>,
@@ -98,6 +99,7 @@ impl Record {
                     },
                 )?,
                 number: self.tracking_number,
+                recipient_url: self.recipient_url,
             },
             status,
             carrier_status,
@@ -169,11 +171,32 @@ pub fn normalize_tracking<C>(tracking: &mut Tracking<C>) -> Result<(), Error> {
     Ok(())
 }
 
+fn normalize_input_tracking(tracking: &mut InputTracking) -> Result<(), Error> {
+    normalize_tracking(tracking)?;
+    if let Some(url) = &tracking.recipient_url {
+        let canonical = crate::shipping_api::doordash::normalize_recipient_url(url)
+            .map_err(|_| Error::InvalidRecipientLink)?;
+        if tracking
+            .carrier
+            .is_some_and(|carrier| carrier != Carrier::DoorDash)
+        {
+            return Err(Error::InvalidRecipientLink);
+        }
+        tracking.carrier = Some(Carrier::DoorDash);
+        tracking.recipient_url = Some(canonical);
+    } else if tracking.carrier == Some(Carrier::DoorDash) {
+        return Err(Error::RecipientLinkRequired);
+    }
+    Ok(())
+}
+
 fn create_fingerprint(input: &CreateShipment) -> Result<String, Error> {
     #[derive(serde::Serialize)]
     struct FingerprintTracking<'a> {
         carrier: Option<String>,
         number: &'a str,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        recipient_url: &'a Option<String>,
     }
 
     #[derive(serde::Serialize)]
@@ -200,6 +223,7 @@ fn create_fingerprint(input: &CreateShipment) -> Result<String, Error> {
         tracking: FingerprintTracking {
             carrier: input.tracking.carrier.as_ref().map(Carrier::as_db_key),
             number: &input.tracking.number,
+            recipient_url: &input.tracking.recipient_url,
         },
         source: &input.source,
     };
@@ -217,7 +241,7 @@ fn validate_source(source: &Source) -> Result<(), Error> {
 pub fn validate_create(input: &mut CreateShipment, key: &str) -> Result<(), Error> {
     valid_text(&input.title, "title", 500)?;
     valid_text(key, "Idempotency-Key", 200)?;
-    normalize_tracking(&mut input.tracking)?;
+    normalize_input_tracking(&mut input.tracking)?;
     for (name, value) in [
         ("merchant", &input.merchant),
         ("order reference", &input.order_reference),
@@ -250,7 +274,7 @@ pub fn validate_update(input: &mut UpdateShipment) -> Result<(), Error> {
         }
     }
     if let Some(value) = &mut input.tracking.value {
-        normalize_tracking(value.as_mut().ok_or(Error::TrackingRequired)?)?;
+        normalize_input_tracking(value.as_mut().ok_or(Error::TrackingRequired)?)?;
     }
     Ok(())
 }
@@ -467,12 +491,14 @@ impl Store {
                 .or(input.tracking.carrier)
                 .ok_or(Error::CarrierRequired)?,
             number: input.tracking.number.clone(),
+            recipient_url: input.tracking.recipient_url.clone(),
         };
         Self::check_tracking(&mut tx, id, &tracking).await?;
-        sqlx::query("INSERT INTO shipments (id,title,direction,merchant,order_reference,signature_required,tracking_carrier,tracking_number,next_attempt_at) VALUES (?,?,?,?,?,?,?,?,unixepoch())")
+        sqlx::query("INSERT INTO shipments (id,title,direction,merchant,order_reference,signature_required,tracking_carrier,tracking_number,recipient_url,tracking_provider,next_attempt_at) VALUES (?,?,?,?,?,?,?,?,?,?,unixepoch())")
             .bind(id.to_string()).bind(&input.title).bind(input.direction.as_str()).bind(&input.merchant).bind(&input.order_reference)
             .bind(input.signature_required)
             .bind(tracking.carrier.as_db_key()).bind(&tracking.number)
+            .bind(&tracking.recipient_url).bind(ProviderId::for_carrier(Some(tracking.carrier)).as_str())
             .execute(&mut *tx).await.map_err(unique_error)?;
         if let Some(tracker) = verified {
             Self::save_verification(&mut tx, id, tracker).await?;
@@ -523,6 +549,7 @@ impl Store {
             let tracking = Tracking {
                 carrier,
                 number: input.tracking.number.clone(),
+                recipient_url: input.tracking.recipient_url.clone(),
             };
             Self::check_tracking(&mut tx, Uuid::now_v7(), &tracking).await?;
         }
@@ -545,6 +572,7 @@ impl Store {
             let tracking = Tracking {
                 carrier,
                 number: tracking.number.clone(),
+                recipient_url: tracking.recipient_url.clone(),
             };
             Self::check_tracking(&mut tx, id, &tracking).await?;
         }
@@ -581,9 +609,10 @@ impl Store {
         let mut changed_tracking = false;
         if let Some(value) = input.tracking.value {
             let mut input_tracking = value.ok_or(Error::TrackingRequired)?;
-            normalize_tracking(&mut input_tracking)?;
+            normalize_input_tracking(&mut input_tracking)?;
             let tracking = Tracking {
                 number: input_tracking.number,
+                recipient_url: input_tracking.recipient_url,
                 carrier: verified
                     .map(|tracker| tracker.carrier)
                     .or(input_tracking.carrier)
@@ -601,10 +630,11 @@ impl Store {
         if !shipment.archived {
             Self::check_tracking(&mut tx, id, &shipment.tracking).await?;
         }
-        sqlx::query("UPDATE shipments SET title=?,direction=?,merchant=?,order_reference=?,signature_required=?,tracking_carrier=?,tracking_number=? WHERE id=?")
+        sqlx::query("UPDATE shipments SET title=?,direction=?,merchant=?,order_reference=?,signature_required=?,tracking_carrier=?,tracking_number=?,recipient_url=?,tracking_provider=? WHERE id=?")
             .bind(shipment.title).bind(shipment.direction.as_str()).bind(shipment.merchant).bind(shipment.order_reference)
             .bind(shipment.signature_required)
             .bind(shipment.tracking.carrier.as_db_key()).bind(&shipment.tracking.number)
+            .bind(&shipment.tracking.recipient_url).bind(ProviderId::for_carrier(Some(shipment.tracking.carrier)).as_str())
             .bind(id.to_string()).execute(&mut *tx).await.map_err(unique_error)?;
         if changed_tracking {
             sqlx::query("UPDATE shipments SET tracking_generation=tracking_generation+1,tracker_id=NULL,tracking_url=NULL,carrier_status=NULL,carrier_tracking='{}',registration_state='pending',registration_started_at=NULL,last_error_code=NULL,last_provider_status=NULL,last_provider_error_code=NULL,status_since=NULL,last_success_at=NULL,last_attempt_at=NULL,last_error=NULL,attempts=0,lease_until=NULL,lease_token=NULL,next_attempt_at=CASE WHEN tracking_number IS NOT NULL AND archived=0 AND ? THEN unixepoch() END WHERE id=?")
@@ -636,7 +666,8 @@ impl Store {
         id: Uuid,
         tracker: &Tracker,
     ) -> Result<(), Error> {
-        sqlx::query(r#"UPDATE shipments SET tracker_id=?,tracking_url=?,carrier_status=?,carrier_tracking=?,registration_state='registered',registration_started_at=NULL,last_error_code=NULL,last_provider_status=NULL,last_provider_error_code=NULL,status_since=strftime('%Y-%m-%dT%H:%M:%fZ','now'),last_success_at=strftime('%Y-%m-%dT%H:%M:%fZ','now'),last_attempt_at=unixepoch(),last_error=NULL,attempts=0,next_attempt_at=CASE WHEN archived=1 OR override_status IN ('"delivered"','"return_to_sender"','"cancelled"') THEN NULL ELSE unixepoch()+? END WHERE id=?"#)
+        sqlx::query(r#"UPDATE shipments SET tracking_provider=?,tracker_id=?,tracking_url=?,carrier_status=?,carrier_tracking=?,registration_state='registered',registration_started_at=NULL,last_error_code=NULL,last_provider_status=NULL,last_provider_error_code=NULL,status_since=strftime('%Y-%m-%dT%H:%M:%fZ','now'),last_success_at=strftime('%Y-%m-%dT%H:%M:%fZ','now'),last_attempt_at=unixepoch(),last_error=NULL,attempts=0,next_attempt_at=CASE WHEN archived=1 OR override_status IN ('"delivered"','"return_to_sender"','"cancelled"') THEN NULL ELSE unixepoch()+? END WHERE id=?"#)
+            .bind(tracker.provider.as_str())
             .bind(&tracker.id).bind(&tracker.public_url).bind(serde_json::to_string(&tracker.status)?)
             .bind(serde_json::to_string(&tracker.carrier_tracking)?)
             .bind(crate::sync::poll_delay(tracker.status, 0, &id.to_string())).bind(id.to_string()).execute(&mut **tx).await?;
@@ -931,6 +962,7 @@ impl Store {
             let mut tracking = InputTracking {
                 number: value.clone(),
                 carrier: None,
+                recipient_url: None,
             };
             normalize_tracking(&mut tracking)?;
             query
@@ -1257,6 +1289,7 @@ impl Store {
         Ok(System {
             version: env!("CARGO_PKG_VERSION").into(),
             provider_enabled,
+            enabled_providers: Vec::new(),
             pending_syncs,
             sync_errors,
             credential_role: String::new(),

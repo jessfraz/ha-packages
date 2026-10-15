@@ -46,6 +46,7 @@ impl Fixture {
                     order_reference: None,
                     signature_required: None,
                     tracking: InputTracking {
+                        recipient_url: None,
                         carrier: Some("USPS".parse().unwrap()),
                         number: number.into(),
                     },
@@ -566,6 +567,7 @@ async fn verified_creates_preserve_poll_cadence_and_retrieve_without_registering
                     order_reference: None,
                     signature_required: None,
                     tracking: InputTracking {
+                        recipient_url: None,
                         number: number.into(),
                         carrier: None,
                     },
@@ -773,6 +775,7 @@ async fn a_response_from_a_replaced_tracking_identity_is_discarded() {
             UpdateShipment {
                 tracking: Patch {
                     value: Some(Some(InputTracking {
+                        recipient_url: None,
                         carrier: Some("USPS".parse().unwrap()),
                         number: "NEWTRACK".into(),
                     })),
@@ -1721,6 +1724,7 @@ async fn carrier_history_merges_deduplicates_and_survives_restart_and_partial_sn
         order_reference: None,
         signature_required: Some(true),
         tracking: InputTracking {
+            recipient_url: None,
             carrier: None,
             number: "HISTORY-TRACK".into(),
         },
@@ -1877,6 +1881,7 @@ async fn tracking_replacement_clears_signature_and_history_and_fences_old_scans(
             UpdateShipment {
                 tracking: Patch {
                     value: Some(Some(InputTracking {
+                        recipient_url: None,
                         carrier: Some("usps".parse().unwrap()),
                         number: "NEW-HISTORY".into(),
                     })),
@@ -1916,6 +1921,7 @@ async fn tracking_replacement_clears_signature_and_history_and_fences_old_scans(
             UpdateShipment {
                 tracking: Patch {
                     value: Some(Some(InputTracking {
+                        recipient_url: None,
                         carrier: Some("usps".parse().unwrap()),
                         number: "ANOTHER-HISTORY".into(),
                     })),

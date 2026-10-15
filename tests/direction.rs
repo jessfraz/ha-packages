@@ -37,6 +37,7 @@ async fn direction_scopes_summaries_search_and_paginated_status_filters() {
                     order_reference: None,
                     signature_required: None,
                     tracking: InputTracking {
+                        recipient_url: None,
                         carrier: Some("usps".parse().unwrap()),
                         number: format!("DIRECTION{index}"),
                     },

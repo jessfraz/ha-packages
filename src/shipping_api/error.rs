@@ -29,11 +29,16 @@ pub enum ErrorKind {
         status: u16,
         retry_after: Option<i64>,
     },
+    ProviderStateRejected {
+        rejection: Rejection,
+        code: &'static str,
+    },
     RegistrationAmbiguous,
     RegistrationExpired,
     ResponseTooLarge,
     InvalidResponse,
     InvalidConnectionResponse,
+    RecipientStatusUnavailable,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -45,6 +50,9 @@ pub enum Rejection {
     InvalidTestCode,
     NoCarrierAccount,
     CarrierCredentialsMissing,
+    RecipientLinkRequired,
+    InvalidRecipientLink,
+    RecipientLinkMismatch,
 }
 
 impl Error {
@@ -61,20 +69,24 @@ impl Error {
             ErrorKind::ProviderRejected { status, .. } if !matches!(status, 400 | 404 | 422) => {
                 http_error_code(*status)
             }
-            ErrorKind::Rejected(rejection) | ErrorKind::ProviderRejected { rejection, .. } => {
-                rejection.error_code()
-            }
+            ErrorKind::Rejected(rejection)
+            | ErrorKind::ProviderRejected { rejection, .. }
+            | ErrorKind::ProviderStateRejected { rejection, .. } => rejection.error_code(),
             ErrorKind::RegistrationAmbiguous => "registration_ambiguous",
             ErrorKind::RegistrationExpired => "registration_expired",
             ErrorKind::Configuration => "provider_configuration",
             ErrorKind::Timeout => "provider_timeout",
             ErrorKind::Connection => "provider_connection",
+            ErrorKind::Http {
+                status: 401 | 403, ..
+            } if self.provider == ProviderId::DoorDash => "recipient_page_unavailable",
             ErrorKind::Http { status, .. } => http_error_code(*status),
             ErrorKind::Throttled { .. } => "provider_throttled",
             ErrorKind::ResponseTooLarge => "provider_response_too_large",
             ErrorKind::InvalidResponse | ErrorKind::InvalidConnectionResponse => {
                 "provider_invalid_response"
             }
+            ErrorKind::RecipientStatusUnavailable => "recipient_page_unavailable",
         }
     }
 
@@ -89,7 +101,8 @@ impl Error {
 
     pub fn provider_error_code(&self) -> Option<&'static str> {
         match self.kind {
-            ErrorKind::ProviderRejected { code, .. } => Some(code),
+            ErrorKind::ProviderRejected { code, .. }
+            | ErrorKind::ProviderStateRejected { code, .. } => Some(code),
             _ => None,
         }
     }
@@ -123,11 +136,23 @@ impl Error {
                     | Rejection::CarrierCodeMismatch
                     | Rejection::MultipleCarriersForCode
                     | Rejection::InvalidParams
+                    | Rejection::RecipientLinkRequired
+                    | Rejection::InvalidRecipientLink
+                    | Rejection::RecipientLinkMismatch
             ) | ErrorKind::ProviderRejected {
                 rejection: Rejection::NoCarrierForCode
                     | Rejection::CarrierCodeMismatch
                     | Rejection::MultipleCarriersForCode
                     | Rejection::InvalidParams,
+                ..
+            } | ErrorKind::ProviderStateRejected {
+                rejection: Rejection::NoCarrierForCode
+                    | Rejection::CarrierCodeMismatch
+                    | Rejection::MultipleCarriersForCode
+                    | Rejection::InvalidParams
+                    | Rejection::RecipientLinkRequired
+                    | Rejection::InvalidRecipientLink
+                    | Rejection::RecipientLinkMismatch,
                 ..
             } | ErrorKind::RegistrationAmbiguous
                 | ErrorKind::RegistrationExpired
@@ -167,6 +192,9 @@ impl Rejection {
             Self::InvalidTestCode => "tracking_test_key",
             Self::NoCarrierAccount => "tracking_carrier_account_required",
             Self::CarrierCredentialsMissing => "tracking_carrier_credentials_required",
+            Self::RecipientLinkRequired => "tracking_recipient_url_required",
+            Self::InvalidRecipientLink => "tracking_recipient_url_invalid",
+            Self::RecipientLinkMismatch => "tracking_recipient_url_mismatch",
         }
     }
 }
@@ -197,10 +225,12 @@ impl fmt::Display for Error {
                 f,
                 "{provider} returned an invalid connection-check response"
             ),
+            ErrorKind::RecipientStatusUnavailable => f.write_str("DoorDash's recipient page did not provide a recognized current tracking status. No shipment was verified. Retry later; if this persists, the tracking page format may have changed."),
             ErrorKind::ProviderRejected { status, .. } if !matches!(status, 400 | 404 | 422) => {
                 write!(f, "{provider} returned HTTP {status}")
             }
-            ErrorKind::Rejected(rejection) | ErrorKind::ProviderRejected { rejection, .. } => {
+            ErrorKind::Rejected(rejection) | ErrorKind::ProviderRejected { rejection, .. }
+            | ErrorKind::ProviderStateRejected { rejection, .. } => {
                 format_rejection(*rejection, provider, f)
             }
         }
@@ -234,5 +264,8 @@ fn format_rejection(
                 Rejection::InvalidTestCode => write!(f, "This {provider} test key accepts only {provider} test tracking numbers. Use a production key for real shipments."),
                 Rejection::NoCarrierAccount => write!(f, "The {provider} account needs a carrier account for this carrier. Configure it in {provider} and try again."),
                 Rejection::CarrierCredentialsMissing => write!(f, "{provider} has no credentials for this carrier. Configure this carrier in {provider}, then retry. This does not mean the tracking number is invalid."),
+                Rejection::RecipientLinkRequired => f.write_str("DoorDash requires its original recipient tracking link in tracking.recipient_url. Copy the link from the merchant's shipping email."),
+                Rejection::InvalidRecipientLink => f.write_str("Use the original HTTPS DoorDash recipient link: https://www.doordash.com/orders/drive?urlCode=... . Other hosts, paths, credentials and duplicate link codes are not accepted."),
+                Rejection::RecipientLinkMismatch => f.write_str("The DoorDash recipient page belongs to a different tracking number. Check tracking.number and tracking.recipient_url; no shipment was verified."),
     }
 }

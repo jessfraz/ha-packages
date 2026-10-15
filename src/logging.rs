@@ -153,7 +153,9 @@ impl slog::Serializer for Fields {
         // Check the key before formatting it: ignored values can contain
         // secrets, addresses, body fragments, or provider error responses.
         match key.as_str() {
-            "provider" => self.provider = allowed(&value.to_string(), &["easypost"]),
+            "provider" => {
+                self.provider = allowed(&value.to_string(), &["easypost", "aftership", "doordash"])
+            }
             "req_id" | "request_id" => self.request_id = Uuid::parse_str(&value.to_string()).ok(),
             "shipment_id" => self.shipment_id = Uuid::parse_str(&value.to_string()).ok(),
             "method" => {
@@ -179,6 +181,17 @@ impl slog::Serializer for Fields {
                         "TRACKER.INVALID_PARAMS",
                         "TRACKER.INVALID_TEST_CODE",
                         "TRACKER.NO_CARRIER_ACCOUNT",
+                        "Pending_002",
+                        "Pending_004",
+                        "Pending_006",
+                        "4005",
+                        "4007",
+                        "4008",
+                        "4009",
+                        "4010",
+                        "4011",
+                        "4012",
+                        "4017",
                     ],
                 );
             }
@@ -192,6 +205,7 @@ impl slog::Serializer for Fields {
                     &value.to_string(),
                     &[
                         "register",
+                        "prepare",
                         "reconcile",
                         "retrieve",
                         "health",
@@ -223,6 +237,10 @@ impl slog::Serializer for Fields {
                     &value.to_string(),
                     &[
                         "tracking_required",
+                        "tracking_recipient_url_required",
+                        "tracking_recipient_url_invalid",
+                        "tracking_recipient_url_mismatch",
+                        "recipient_page_unavailable",
                         "registration_ambiguous",
                         "registration_expired",
                         "tracking_unsupported",
