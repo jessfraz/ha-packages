@@ -118,6 +118,7 @@ def async_register_services(hass: HomeAssistant) -> None:
         if call.service == "add":
             payload = {
                 "title": call.data["title"],
+                "direction": call.data["direction"],
                 "merchant": call.data.get("merchant") or None,
                 "order_reference": call.data.get("order_reference") or None,
                 "tracking": {
@@ -163,6 +164,13 @@ def async_register_services(hass: HomeAssistant) -> None:
         if name == "add":
             fields = {
                 vol.Required("title"): str,
+                vol.Required(
+                    "direction",
+                    msg="Direction is required. Choose inbound or outbound.",
+                ): vol.In(
+                    ("inbound", "outbound"),
+                    msg="Direction must be inbound or outbound.",
+                ),
                 vol.Optional("merchant"): str,
                 vol.Optional("order_reference"): str,
                 vol.Required("tracking_number"): vol.All(

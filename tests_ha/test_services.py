@@ -19,11 +19,18 @@ from .conftest import SHIPMENT_ID, Backend
 
 
 @pytest.mark.parametrize("explicit_key", [False, True])
+@pytest.mark.parametrize("direction", ["inbound", "outbound"])
 async def test_add_action_fields_and_response(
-    hass: HomeAssistant, hass_user, entry, backend: Backend, explicit_key: bool
+    hass: HomeAssistant,
+    hass_user,
+    entry,
+    backend: Backend,
+    explicit_key: bool,
+    direction: str,
 ) -> None:
     fields = {
         "title": "Office supplies",
+        "direction": direction,
         "merchant": "Example shop",
         "order_reference": "ORDER-1",
         "tracking_number": "TEST123",
@@ -31,6 +38,18 @@ async def test_add_action_fields_and_response(
     }
     if explicit_key:
         fields["idempotency_key"] = "create-one"
+    backend.responses[("POST", "/v1/shipments")] = (
+        201,
+        json.dumps(
+            {
+                "id": SHIPMENT_ID,
+                "revision": 7,
+                "status": "expected",
+                "direction": direction,
+            }
+        ).encode(),
+        {"Content-Type": "application/json"},
+    )
     result = await hass.services.async_call(
         DOMAIN,
         "add",
@@ -50,6 +69,7 @@ async def test_add_action_fields_and_response(
         assert UUID(request.headers["Idempotency-Key"]).version == 4
     assert json.loads(request.body) == {
         "title": "Office supplies",
+        "direction": direction,
         "merchant": "Example shop",
         "order_reference": "ORDER-1",
         "tracking": {"number": "TEST123", "carrier": "USPS"},
@@ -65,7 +85,7 @@ async def test_add_requires_nonblank_tracking_before_transport(
     backend: Backend,
     tracking_number: str | None,
 ) -> None:
-    fields = {"title": "Expected parcel"}
+    fields = {"title": "Expected parcel", "direction": "inbound"}
     if tracking_number is not None:
         fields["tracking_number"] = tracking_number
     count = len(backend.requests)
@@ -80,13 +100,56 @@ async def test_add_requires_nonblank_tracking_before_transport(
     assert len(backend.requests) == count
 
 
+async def test_add_requires_direction_before_transport(
+    hass: HomeAssistant, hass_user, entry, backend: Backend
+) -> None:
+    count = len(backend.requests)
+    with pytest.raises(vol.Invalid, match="Direction is required"):
+        await hass.services.async_call(
+            DOMAIN,
+            "add",
+            {"title": "Expected parcel", "tracking_number": "TEST123"},
+            context=Context(user_id=hass_user.id),
+            blocking=True,
+        )
+    assert len(backend.requests) == count
+
+
+@pytest.mark.parametrize("direction", [None, "", "sideways", "INBOUND"])
+async def test_add_rejects_unsupported_direction_before_transport(
+    hass: HomeAssistant,
+    hass_user,
+    entry,
+    backend: Backend,
+    direction: str | None,
+) -> None:
+    count = len(backend.requests)
+    with pytest.raises(vol.Invalid, match="Direction must be inbound or outbound"):
+        await hass.services.async_call(
+            DOMAIN,
+            "add",
+            {
+                "title": "Expected parcel",
+                "tracking_number": "TEST123",
+                "direction": direction,
+            },
+            context=Context(user_id=hass_user.id),
+            blocking=True,
+        )
+    assert len(backend.requests) == count
+
+
 async def test_add_tracked_shipment_without_requesting_response(
     hass: HomeAssistant, hass_user, entry, backend: Backend
 ) -> None:
     result = await hass.services.async_call(
         DOMAIN,
         "add",
-        {"title": "Expected parcel", "tracking_number": " \u2003TEST123\u00a0 "},
+        {
+            "title": "Expected parcel",
+            "direction": "inbound",
+            "tracking_number": " \u2003TEST123\u00a0 ",
+        },
         context=Context(user_id=hass_user.id),
         blocking=True,
     )
@@ -119,7 +182,11 @@ async def test_action_reports_public_backend_error(
         await hass.services.async_call(
             DOMAIN,
             "add",
-            {"title": "Expected parcel", "tracking_number": "TEST123"},
+            {
+                "title": "Expected parcel",
+                "direction": "inbound",
+                "tracking_number": "TEST123",
+            },
             context=Context(user_id=hass_user.id),
             blocking=True,
         )
@@ -150,7 +217,11 @@ async def test_action_error_falls_back_without_reflecting_private_data(
         await hass.services.async_call(
             DOMAIN,
             "add",
-            {"title": "Expected parcel", "tracking_number": "TEST123"},
+            {
+                "title": "Expected parcel",
+                "direction": "inbound",
+                "tracking_number": "TEST123",
+            },
             context=Context(user_id=hass_user.id),
             blocking=True,
         )
@@ -287,7 +358,11 @@ async def test_actions_exist_without_a_loaded_entry(
         await hass.services.async_call(
             DOMAIN,
             "add",
-            {"title": "Office supplies", "tracking_number": "TEST123"},
+            {
+                "title": "Office supplies",
+                "direction": "inbound",
+                "tracking_number": "TEST123",
+            },
             context=Context(user_id=hass_user.id),
             blocking=True,
         )
@@ -304,7 +379,11 @@ async def test_actions_remain_available_after_unload(
         await hass.services.async_call(
             DOMAIN,
             "add",
-            {"title": "Office supplies", "tracking_number": "TEST123"},
+            {
+                "title": "Office supplies",
+                "direction": "inbound",
+                "tracking_number": "TEST123",
+            },
             context=Context(user_id=hass_user.id),
             blocking=True,
         )

@@ -8,6 +8,17 @@ add:
       example: Office supplies
       selector:
         text:
+    direction:
+      name: Direction
+      description: Whether you are receiving or sending this package.
+      required: true
+      selector:
+        select:
+          options:
+            - value: inbound
+              label: Inbound
+            - value: outbound
+              label: Outbound
     merchant:
       name: Merchant
       selector:

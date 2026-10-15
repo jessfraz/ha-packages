@@ -80,7 +80,7 @@ impl App {
     async fn create(&self, title: &str, key: &str) -> Response {
         let mut body = input(title);
         body.tracking.number = format!(
-            "TEST{}",
+            "TEST{}123",
             key.bytes()
                 .filter(u8::is_ascii_alphanumeric)
                 .map(char::from)
@@ -101,17 +101,22 @@ impl App {
 }
 fn input(title: &str) -> CreateShipment {
     CreateShipment {
+        direction: shipments::models::Direction::Inbound,
         title: title.into(),
         merchant: None,
         order_reference: None,
+        signature_required: None,
         tracking: Tracking {
-            carrier: Some("usps".into()),
-            number: title
-                .bytes()
-                .filter(u8::is_ascii_alphanumeric)
-                .map(char::from)
-                .collect::<String>()
-                .to_uppercase(),
+            carrier: Some("usps".parse().unwrap()),
+            number: format!(
+                "TEST{}123",
+                title
+                    .bytes()
+                    .filter(u8::is_ascii_alphanumeric)
+                    .map(char::from)
+                    .collect::<String>()
+                    .to_uppercase()
+            ),
         },
         source: None,
     }
@@ -177,8 +182,8 @@ async fn optimistic_updates_and_null_patch_preserve_newer_state() {
     let mut request = input("Parcel");
     request.merchant = Some("Shop".into());
     request.tracking = Tracking {
-        carrier: Some("UPS".into()),
-        number: "1Z ABC".into(),
+        carrier: Some("UPS".parse().unwrap()),
+        number: "1Z ABC123".into(),
     };
     let created: Shipment = app
         .request(Method::POST, "/v1/shipments")
@@ -214,7 +219,7 @@ async fn optimistic_updates_and_null_patch_preserve_newer_state() {
     assert_eq!(response.status(), StatusCode::OK);
     let edited: Shipment = response.json().await.unwrap();
     assert!(edited.merchant.is_none());
-    assert_eq!(edited.tracking.number, "1ZABC");
+    assert_eq!(edited.tracking.number, "1ZABC123");
     assert_eq!(
         app.request(Method::PATCH, &path)
             .header("If-Match", "\"1\"")
@@ -339,7 +344,7 @@ async fn duplicate_sources_tracking_archive_and_pagination_use_real_http() {
     let app = App::new(None).await;
     let mut body = input("First");
     body.tracking = Tracking {
-        carrier: Some("UPS".into()),
+        carrier: Some("UPS".parse().unwrap()),
         number: "TEST001".into(),
     };
     body.source = Some(Source {
@@ -357,27 +362,8 @@ async fn duplicate_sources_tracking_archive_and_pagination_use_real_http() {
             .send()
     );
     let mut responses = Vec::new();
-    for (key, response) in [("a", one), ("b", two)] {
-        let mut response = response.unwrap();
-        if response.status() == StatusCode::SERVICE_UNAVAILABLE {
-            // Concurrent verification is backpressured by the shared slot.
-            // Once the winning request completes, retry reaches the durable
-            // duplicate check rather than creating a second shipment.
-            assert_eq!(response.headers()["retry-after"], "1");
-            let error: ApiFailure = response.json().await.unwrap();
-            assert_eq!(
-                error.error_code.as_deref(),
-                Some("tracking_verification_rate_limited")
-            );
-            response = app
-                .request(Method::POST, "/v1/shipments")
-                .header("Idempotency-Key", key)
-                .json(&body)
-                .send()
-                .await
-                .unwrap();
-        }
-        responses.push(response);
+    for response in [one, two] {
+        responses.push(response.unwrap());
     }
     responses.sort_by_key(|r| r.status().as_u16());
     assert_eq!(responses[1].status(), StatusCode::CONFLICT);
@@ -456,7 +442,7 @@ async fn duplicate_sources_tracking_archive_and_pagination_use_real_http() {
         .await
         .unwrap();
     assert!(archived.archived);
-    assert_eq!(archived.status, Status::Unknown);
+    assert_eq!(archived.status, Status::Expected);
     let restored: Shipment = app
         .request(Method::DELETE, &archive_path)
         .header("If-Match", "\"2\"")
@@ -1270,14 +1256,14 @@ struct ApiFailure {
 }
 
 #[tokio::test]
-async fn every_api_role_requires_tracking_and_cannot_save_provider_rejections() {
+async fn every_api_role_rejects_missing_or_invalid_local_tracking_before_provider_io() {
     let app = App::new(None).await;
     let provider = app.provider_fixture.as_ref().unwrap();
     for credential in [OWNER, &app.agent, INTEGRATION] {
         for body in [
-            r#"{"title":"Parcel"}"#,
-            r#"{"title":"Parcel","tracking":null}"#,
-            r#"{"title":"Parcel","tracking":{"number":"  "}}"#,
+            r#"{"direction":"inbound","title":"Parcel"}"#,
+            r#"{"direction":"inbound","title":"Parcel","tracking":null}"#,
+            r#"{"direction":"inbound","title":"Parcel","tracking":{"number":"  "}}"#,
         ] {
             let response = app
                 .client
@@ -1295,24 +1281,32 @@ async fn every_api_role_requires_tracking_and_cannot_save_provider_rejections() 
             assert_eq!(error.error_code.as_deref(), Some("tracking_required"));
             assert!(error.message.contains("tracking number is required"));
         }
-        provider.reply(422, r#"{"error":{"code":"TRACKER.NO_CARRIER_FOR_CODE","message":"private-provider-detail"}}"#);
-        let response = app
-            .client
-            .post(format!("{}/v1/shipments", app.url))
-            .bearer_auth(credential)
-            .header("X-Shipments-Actor", "ha:test")
-            .header("Idempotency-Key", "unsupported-number")
-            .json(&input("BOGUS"))
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-        let error: ApiFailure = response.json().await.unwrap();
-        assert_eq!(error.error_code.as_deref(), Some("tracking_unsupported"));
-        assert!(error.message.contains("Check the tracking number"));
-        assert!(!error.message.contains("private-provider-detail"));
+        for (number, code) in [
+            ("PRIVATELETTERS", "tracking_invalid"),
+            ("123", "tracking_invalid"),
+            ("PRIVATE-123!", "tracking_invalid"),
+            ("😈123456", "tracking_invalid"),
+        ] {
+            let mut body = input("Locally rejected parcel");
+            body.tracking.number = number.into();
+            let response = app
+                .client
+                .post(format!("{}/v1/shipments", app.url))
+                .bearer_auth(credential)
+                .header("X-Shipments-Actor", "ha:test")
+                .header("Idempotency-Key", "invalid-number")
+                .json(&body)
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            let error: ApiFailure = response.json().await.unwrap();
+            assert_eq!(error.error_code.as_deref(), Some(code));
+            assert!(error.message.to_lowercase().contains("tracking number"));
+            assert!(!error.message.contains(number));
+        }
     }
-    assert_eq!(provider.calls(), 3);
+    assert_eq!(provider.calls(), 0);
     let summary: Summary = app
         .request(Method::GET, "/v1/summary")
         .send()
@@ -1331,9 +1325,11 @@ async fn every_api_role_requires_tracking_and_cannot_save_provider_rejections() 
 }
 
 #[tokio::test]
-async fn unscanned_tracking_is_accepted_and_replays_do_not_register_it_again() {
+async fn unscanned_tracking_is_saved_pending_then_registered_and_replays_make_no_requests() {
     let app = App::new(None).await;
     let provider = app.provider_fixture.as_ref().unwrap();
+    let worker =
+        shipments::sync::SyncWorker::new(app.store.pool().clone(), provider.client.clone());
     for (index, status) in [Status::Unknown, Status::PreTransit]
         .into_iter()
         .enumerate()
@@ -1361,13 +1357,32 @@ async fn unscanned_tracking_is_accepted_and_replays_do_not_register_it_again() {
             .unwrap();
         assert_eq!(created.status(), StatusCode::CREATED);
         let created: Shipment = created.json().await.unwrap();
-        assert_eq!(created.status, status);
-        assert_eq!(created.tracking.carrier.as_deref(), Some("usps"));
+        assert_eq!(created.status, Status::Expected);
+        assert_eq!(created.sync.registration_state, RegistrationState::Pending);
+        assert!(created.tracking.carrier.is_none());
+        assert!(created.sync.tracker_id.is_none());
+        assert!(created.sync.last_success_at.is_none());
+        assert_eq!(provider.calls(), index);
+        assert!(worker.tick().await.unwrap());
+        let registered: Shipment = app
+            .request(Method::GET, &format!("/v1/shipments/{}", created.id))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(registered.status, status);
         assert_eq!(
-            created.sync.tracking_url.as_deref(),
+            registered.sync.registration_state,
+            RegistrationState::Registered
+        );
+        assert_eq!(registered.tracking.carrier, Some("USPS".parse().unwrap()));
+        assert_eq!(
+            registered.sync.tracking_url.as_deref(),
             Some(format!("https://track.easypost.com/pending-{index}").as_str())
         );
-        assert!(created.sync.last_success_at.is_some());
+        assert!(registered.sync.last_success_at.is_some());
         let replay = app
             .request(Method::POST, "/v1/shipments")
             .header("Idempotency-Key", &key)
@@ -1378,14 +1393,16 @@ async fn unscanned_tracking_is_accepted_and_replays_do_not_register_it_again() {
         assert_eq!(replay.status(), StatusCode::CREATED);
         let replay: Shipment = replay.json().await.unwrap();
         assert_eq!(replay.id, created.id);
+        assert_eq!(replay.revision, created.revision);
+        assert_eq!(replay.sync.registration_state, RegistrationState::Pending);
         assert_eq!(provider.calls(), index + 1);
         let edit = app
             .request(Method::PATCH, &format!("/v1/shipments/{}", created.id))
-            .header("If-Match", "\"1\"")
+            .header("If-Match", format!("\"{}\"", registered.revision))
             .json(&UpdateShipment {
                 title: Some("Metadata edit".into()),
                 tracking: Patch {
-                    value: Some(Some(created.tracking.clone())),
+                    value: Some(Some(registered.tracking.clone())),
                 },
                 ..Default::default()
             })
@@ -1393,29 +1410,39 @@ async fn unscanned_tracking_is_accepted_and_replays_do_not_register_it_again() {
             .await
             .unwrap();
         assert_eq!(edit.status(), StatusCode::OK);
+        let edited: Shipment = edit.json().await.unwrap();
+        assert_eq!(
+            edited.sync.registration_state,
+            RegistrationState::Registered
+        );
+        assert_eq!(edited.sync.tracker_id, registered.sync.tracker_id);
         assert_eq!(provider.calls(), index + 1);
     }
-    let worker =
-        shipments::sync::SyncWorker::new(app.store.pool().clone(), provider.client.clone());
     assert!(!worker.tick().await.unwrap());
     assert_eq!(provider.calls(), 2);
     app.close().await;
 }
 
 #[tokio::test]
-async fn tracking_changes_are_verified_and_failed_changes_preserve_the_record() {
+async fn tracking_changes_save_pending_and_later_provider_rejection_preserves_the_new_input() {
     let app = App::new(None).await;
     let provider = app.provider_fixture.as_ref().unwrap();
+    let worker =
+        shipments::sync::SyncWorker::new(app.store.pool().clone(), provider.client.clone());
     let created: Shipment = app
         .create("Parcel", "identity-change")
         .await
         .json()
         .await
         .unwrap();
+    assert_eq!(provider.calls(), 0);
+    assert!(worker.tick().await.unwrap());
+    let registered = app.store.get(created.id).await.unwrap();
     let path = format!("/v1/shipments/{}", created.id);
+    let version = format!("\"{}\"", registered.revision);
     let cleared = app
         .request(Method::PATCH, &path)
-        .header("If-Match", "\"1\"")
+        .header("If-Match", &version)
         .json(&UpdateShipment {
             tracking: Patch { value: Some(None) },
             ..Default::default()
@@ -1427,33 +1454,36 @@ async fn tracking_changes_are_verified_and_failed_changes_preserve_the_record() 
     let error: ApiFailure = cleared.json().await.unwrap();
     assert_eq!(error.error_code.as_deref(), Some("tracking_required"));
     assert_eq!(provider.calls(), 1);
-    provider.reply(
-        422,
-        r#"{"error":{"code":"TRACKER.CARRIER_CODE_MISMATCH","message":"private-provider-detail"}}"#,
-    );
     let changed = UpdateShipment {
         tracking: Patch {
             value: Some(Some(Tracking {
-                carrier: Some("ups".into()),
-                number: "NEWNUMBER".into(),
+                carrier: Some("ups".parse().unwrap()),
+                number: "NEWNUMBER123".into(),
             })),
         },
         ..Default::default()
     };
-    let rejected = app
+    let accepted = app
         .request(Method::PATCH, &path)
-        .header("If-Match", "\"1\"")
+        .header("If-Match", &version)
         .json(&changed)
         .send()
         .await
         .unwrap();
-    assert_eq!(rejected.status(), StatusCode::BAD_REQUEST);
-    let error: ApiFailure = rejected.json().await.unwrap();
-    assert_eq!(
-        error.error_code.as_deref(),
-        Some("tracking_carrier_mismatch")
+    assert_eq!(accepted.status(), StatusCode::OK);
+    let accepted: Shipment = accepted.json().await.unwrap();
+    assert_eq!(accepted.tracking.number, "NEWNUMBER123");
+    assert_eq!(accepted.sync.registration_state, RegistrationState::Pending);
+    assert!(accepted.sync.tracker_id.is_none());
+    assert!(accepted.sync.last_success_at.is_none());
+    assert_eq!(accepted.revision, registered.revision + 1);
+    assert_eq!(provider.calls(), 1);
+    provider.reply(
+        422,
+        r#"{"error":{"code":"TRACKER.CARRIER_CODE_MISMATCH","message":"private-provider-detail"}}"#,
     );
-    let record: Shipment = app
+    assert!(worker.tick().await.unwrap());
+    let rejected: Shipment = app
         .request(Method::GET, &path)
         .send()
         .await
@@ -1461,106 +1491,172 @@ async fn tracking_changes_are_verified_and_failed_changes_preserve_the_record() 
         .json()
         .await
         .unwrap();
-    assert_eq!(record.tracking, created.tracking);
-    assert_eq!(record.revision, 1);
-    let accepted = app
-        .request(Method::PATCH, &path)
-        .header("If-Match", "\"1\"")
-        .json(&changed)
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(accepted.status(), StatusCode::OK);
-    let accepted: Shipment = accepted.json().await.unwrap();
-    assert_eq!(accepted.tracking.number, "NEWNUMBER");
-    assert_eq!(accepted.sync.tracker_id.as_deref(), Some("trk_NEWNUMBER"));
-    assert_eq!(accepted.status, Status::Unknown);
-    assert_eq!(accepted.revision, 2);
-    assert_eq!(provider.calls(), 3);
+    assert_eq!(rejected.tracking, accepted.tracking);
+    assert_eq!(rejected.revision, accepted.revision);
+    assert_eq!(
+        rejected.sync.registration_state,
+        RegistrationState::Rejected
+    );
+    assert_eq!(
+        rejected.sync.error_code.as_deref(),
+        Some("tracking_carrier_mismatch")
+    );
+    assert_eq!(rejected.sync.provider_status, Some(422));
+    let message = rejected.sync.last_error.as_deref().unwrap();
+    assert!(message.contains("Check the number and carrier"));
+    assert!(!message.contains("private-provider-detail"));
+    assert!(!message.contains("NEWNUMBER123"));
+    assert!(rejected.sync.next_attempt_at.is_none());
+    assert_eq!(provider.calls(), 2);
     let stale = app
         .request(Method::PATCH, &path)
-        .header("If-Match", "\"1\"")
+        .header("If-Match", &version)
         .json(&changed)
         .send()
         .await
         .unwrap();
     assert_eq!(stale.status(), StatusCode::PRECONDITION_FAILED);
-    assert_eq!(provider.calls(), 3);
+    assert!(!worker.tick().await.unwrap());
+    assert_eq!(provider.calls(), 2);
     app.close().await;
 }
 
 #[tokio::test]
-async fn provider_failures_have_actionable_codes_and_never_save_unverified_records() {
-    let unconfigured = App::with_provider(None, None).await;
-    let response = unconfigured.create("Parcel", "unconfigured").await;
-    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
-    let error: ApiFailure = response.json().await.unwrap();
+async fn provider_outage_does_not_discard_a_valid_create() {
+    let app = App::new(None).await;
+    app.provider_fixture
+        .as_ref()
+        .unwrap()
+        .reply(503, "unavailable");
+    let response = app.create("Parcel503", "pending503").await;
     assert_eq!(
-        error.error_code.as_deref(),
-        Some("tracking_provider_unconfigured")
+        response.status(),
+        StatusCode::CREATED,
+        "valid parcels must be durably saved during provider outages"
     );
-    assert!(error.message.contains("Configure the EasyPost API key"));
-    unconfigured.close().await;
-    for (status, body, code, expected_status) in [
+    let shipment: Shipment = response.json().await.unwrap();
+    assert_eq!(
+        app.store.get(shipment.id).await.unwrap().tracking,
+        shipment.tracking
+    );
+    app.close().await;
+}
+
+#[tokio::test]
+async fn provider_failures_are_visible_on_durable_records_with_safe_codes_and_http_status() {
+    for (status, body, code, state, provider_status) in [
+        (
+            422,
+            r#"{"error":{"code":"TRACKER.NO_CARRIER_FOR_CODE","message":"private-provider-detail"}}"#,
+            "tracking_unsupported",
+            RegistrationState::Rejected,
+            Some(422),
+        ),
         (
             422,
             r#"{"error":{"code":"TRACKER.MULTIPLE_CARRIERS_FOR_CODE"}}"#,
             "tracking_carrier_ambiguous",
-            StatusCode::BAD_REQUEST,
+            RegistrationState::Rejected,
+            Some(422),
         ),
         (
             422,
             r#"{"error":{"code":"TRACKER.INVALID_PARAMS"}}"#,
             "tracking_invalid",
-            StatusCode::BAD_REQUEST,
+            RegistrationState::Rejected,
+            Some(422),
         ),
         (
             422,
             r#"{"error":{"code":"TRACKER.INVALID_TEST_CODE"}}"#,
             "tracking_test_key",
-            StatusCode::BAD_REQUEST,
+            RegistrationState::Pending,
+            Some(422),
         ),
         (
-            422,
+            400,
             r#"{"error":{"code":"TRACKER.NO_CARRIER_ACCOUNT"}}"#,
             "tracking_carrier_account_required",
-            StatusCode::SERVICE_UNAVAILABLE,
+            RegistrationState::Pending,
+            Some(400),
         ),
         (
             401,
             "private-provider-detail",
             "tracking_provider_credentials",
-            StatusCode::SERVICE_UNAVAILABLE,
+            RegistrationState::Pending,
+            Some(401),
+        ),
+        (
+            403,
+            "private-provider-detail",
+            "tracking_provider_credentials",
+            RegistrationState::Pending,
+            Some(403),
         ),
         (
             429,
             "private-provider-detail",
             "tracking_verification_rate_limited",
-            StatusCode::SERVICE_UNAVAILABLE,
+            RegistrationState::Pending,
+            Some(429),
         ),
         (
             503,
             "private-provider-detail",
-            "tracking_verification_unavailable",
-            StatusCode::SERVICE_UNAVAILABLE,
+            "provider_http",
+            RegistrationState::Pending,
+            Some(503),
         ),
         (
             200,
             "malformed-provider-response",
-            "tracking_verification_unavailable",
-            StatusCode::SERVICE_UNAVAILABLE,
+            "provider_invalid_response",
+            RegistrationState::Pending,
+            None,
         ),
     ] {
-        // Each upstream response is independent; a 429 now correctly pauses
-        // every operation sharing that provider client.
+        // Each upstream response is independent; a 429 pauses all operations
+        // sharing its provider client.
         let app = App::new(None).await;
         let provider = app.provider_fixture.as_ref().unwrap();
         provider.reply(status, body);
-        let response = app.create("Parcel", "retryable-input").await;
-        assert_eq!(response.status(), expected_status);
-        let error: ApiFailure = response.json().await.unwrap();
-        assert_eq!(error.error_code.as_deref(), Some(code));
-        assert!(!error.message.contains("private-provider-detail"));
+        let response = app.create("Parcel", "durable-input").await;
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let created: Shipment = response.json().await.unwrap();
+        assert_eq!(created.sync.registration_state, RegistrationState::Pending);
+        assert_eq!(provider.calls(), 0);
+        let worker =
+            shipments::sync::SyncWorker::new(app.store.pool().clone(), provider.client.clone());
+        assert!(worker.tick().await.unwrap());
+        let persisted: Shipment = app
+            .request(Method::GET, &format!("/v1/shipments/{}", created.id))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(persisted.tracking, created.tracking);
+        assert_eq!(persisted.sync.registration_state, state);
+        assert_eq!(persisted.sync.error_code.as_deref(), Some(code));
+        assert_eq!(persisted.sync.provider_status, provider_status);
+        assert_eq!(persisted.sync.attempts, 1);
+        let message = persisted.sync.last_error.as_deref().unwrap();
+        assert!(!message.contains("private-provider-detail"));
+        assert!(!message.contains(&created.tracking.number));
+        assert_eq!(
+            persisted.sync.next_attempt_at.is_some(),
+            state == RegistrationState::Pending
+        );
+        let replay: Shipment = app
+            .create("Parcel", "durable-input")
+            .await
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(replay.id, created.id);
+        assert_eq!(provider.calls(), 1);
         let summary: Summary = app
             .request(Method::GET, "/v1/summary")
             .send()
@@ -1569,63 +1665,55 @@ async fn provider_failures_have_actionable_codes_and_never_save_unverified_recor
             .json()
             .await
             .unwrap();
-        assert_eq!(summary.active, 0);
+        assert_eq!(summary.active, 1);
+        assert_eq!(summary.sync_errors, 1);
         app.close().await;
     }
-    // The same key remains usable after validation or provider failure.
-    let app = App::new(None).await;
-    app.provider_fixture
-        .as_ref()
-        .unwrap()
-        .reply(503, "unavailable");
-    assert_eq!(
-        app.create("Parcel", "retryable-input").await.status(),
-        StatusCode::SERVICE_UNAVAILABLE
-    );
-    assert_eq!(
-        app.create("Parcel", "retryable-input").await.status(),
-        StatusCode::CREATED
-    );
-    app.close().await;
 }
 
 #[tokio::test]
-async fn shared_provider_cooldown_returns_retry_time_to_every_api_role_without_saving() {
+async fn shared_provider_cooldown_keeps_new_api_creates_durable_and_worker_requests_paused() {
     let app = App::new(None).await;
     let provider = app.provider_fixture.as_ref().unwrap();
-    provider.reply(429, "private-provider-detail");
+    let worker =
+        shipments::sync::SyncWorker::new(app.store.pool().clone(), provider.client.clone());
     let response = app.create("Limited parcel", "limited").await;
-    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
-    assert_eq!(response.headers()["retry-after"], "60");
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let first: Shipment = response.json().await.unwrap();
+    provider.reply(429, "private-provider-detail");
+    assert!(worker.tick().await.unwrap());
+    let limited = app.store.get(first.id).await.unwrap();
+    assert_eq!(limited.sync.provider_status, Some(429));
+    assert!(limited.sync.next_attempt_at.is_some());
     assert_eq!(provider.calls(), 1);
 
-    for credential in [OWNER, &app.agent, INTEGRATION] {
+    for (index, credential) in [OWNER, &app.agent, INTEGRATION].into_iter().enumerate() {
         let response = app
             .request(Method::POST, "/v1/shipments")
             .bearer_auth(credential)
-            .header("Idempotency-Key", "queued-during-provider-pause")
-            .json(&input("Valid unscanned parcel"))
+            .header("X-Shipments-Actor", "ha:test")
+            .header(
+                "Idempotency-Key",
+                format!("queued-during-provider-pause-{index}"),
+            )
+            .json(&input(&format!("Valid unscanned parcel{index}")))
             .send()
             .await
             .unwrap();
-        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
-        let wait: u64 = response.headers()["retry-after"]
-            .to_str()
-            .unwrap()
-            .parse()
-            .unwrap();
-        assert!((1..=60).contains(&wait));
-        let error: ApiFailure = response.json().await.unwrap();
-        assert_eq!(
-            error.error_code.as_deref(),
-            Some("tracking_verification_rate_limited")
-        );
-        assert!(
-            error
-                .message
-                .contains("does not mean the tracking number is invalid")
-        );
-        assert!(!error.message.contains("private-provider-detail"));
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let created: Shipment = response.json().await.unwrap();
+        assert_eq!(created.sync.registration_state, RegistrationState::Pending);
+        assert!(created.sync.last_error.is_none());
+        assert!(created.sync.error_code.is_none());
+        assert_eq!(created.sync.attempts, 0);
+        assert!(!worker.tick().await.unwrap());
+        let due: bool =
+            sqlx::query_scalar("SELECT next_attempt_at<=unixepoch() FROM shipments WHERE id=?")
+                .bind(created.id.to_string())
+                .fetch_one(app.store.pool())
+                .await
+                .unwrap();
+        assert!(due);
     }
     assert_eq!(provider.calls(), 1);
     let summary: Summary = app
@@ -1636,6 +1724,141 @@ async fn shared_provider_cooldown_returns_retry_time_to_every_api_role_without_s
         .json()
         .await
         .unwrap();
-    assert_eq!(summary.active, 0);
+    assert_eq!(summary.active, 4);
+    assert_eq!(summary.sync_errors, 1);
+    app.close().await;
+}
+
+#[tokio::test]
+async fn direction_is_required_and_invalid_values_never_reach_the_provider() {
+    let app = App::new(None).await;
+    for body in [
+        r#"{"title":"Parcel","tracking":{"number":"DIRECTION-TEST"}}"#,
+        r#"{"title":"Parcel","direction":null,"tracking":{"number":"DIRECTION-TEST"}}"#,
+        r#"{"title":"Parcel","direction":"PRIVATE-DIRECTION-SENTINEL","tracking":{"number":"DIRECTION-TEST"}}"#,
+        r#"{"title":"Parcel","direction":42,"tracking":{"number":"DIRECTION-TEST"}}"#,
+    ] {
+        let response = app
+            .request(Method::POST, "/v1/shipments")
+            .header("Idempotency-Key", "invalid-direction")
+            .header("Content-Type", "application/json")
+            .body(body)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let error: ApiFailure = response.json().await.unwrap();
+        assert!(error.message.contains("direction"));
+        assert!(!error.message.contains("PRIVATE-DIRECTION-SENTINEL"));
+    }
+    assert_eq!(app.provider_fixture.as_ref().unwrap().calls(), 0);
+    app.close().await;
+}
+
+#[tokio::test]
+async fn owners_and_agents_create_and_change_direction_without_reverifying_tracking() {
+    let app = App::new(None).await;
+    let mut request = input("Outbound direction parcel");
+    request.direction = Direction::Outbound;
+    let created: Shipment = app
+        .request(Method::POST, "/v1/shipments")
+        .bearer_auth(&app.agent)
+        .header("Idempotency-Key", "outbound-create")
+        .json(&request)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(created.direction, Direction::Outbound);
+    let replay: Shipment = app
+        .request(Method::POST, "/v1/shipments")
+        .bearer_auth(&app.agent)
+        .header("Idempotency-Key", "outbound-create")
+        .json(&request)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(replay.id, created.id);
+    assert_eq!(replay.direction, Direction::Outbound);
+    request.direction = Direction::Inbound;
+    assert_eq!(
+        app.request(Method::POST, "/v1/shipments")
+            .bearer_auth(&app.agent)
+            .header("Idempotency-Key", "outbound-create")
+            .json(&request)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::CONFLICT
+    );
+    let path = format!("/v1/shipments/{}", created.id);
+    let changed: Shipment = app
+        .request(Method::PATCH, &path)
+        .bearer_auth(&app.agent)
+        .header("If-Match", "\"1\"")
+        .json(&UpdateShipment {
+            direction: Patch {
+                value: Some(Some(Direction::Inbound)),
+            },
+            ..Default::default()
+        })
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(changed.direction, Direction::Inbound);
+    assert_eq!(changed.revision, 2);
+    assert_eq!(app.provider_fixture.as_ref().unwrap().calls(), 0);
+    let null = app
+        .request(Method::PATCH, &path)
+        .header("If-Match", "\"2\"")
+        .header("Content-Type", "application/json")
+        .body(r#"{"direction":null}"#)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(null.status(), StatusCode::BAD_REQUEST);
+    let error: ApiFailure = null.json().await.unwrap();
+    assert!(error.message.contains("direction is required"));
+    let preserved: Shipment = app
+        .request(Method::PATCH, &path)
+        .header("If-Match", "\"2\"")
+        .json(&UpdateShipment {
+            title: Some("Direction stays inbound".into()),
+            ..Default::default()
+        })
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(preserved.direction, Direction::Inbound);
+    let history: ResultsPage<Event> = app
+        .request(Method::GET, &format!("{path}/events"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let directions: Vec<_> = history
+        .items
+        .into_iter()
+        .map(|event| event.snapshot.unwrap().direction)
+        .collect();
+    assert_eq!(
+        directions,
+        vec![Direction::Outbound, Direction::Inbound, Direction::Inbound]
+    );
+    assert_eq!(app.provider_fixture.as_ref().unwrap().calls(), 0);
     app.close().await;
 }

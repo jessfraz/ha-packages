@@ -90,7 +90,7 @@ check_shipment() {
     request GET "/v1/shipments/$id" 200 --header "Authorization: Bearer $token"
     jq --exit-status --arg id "$id" \
         '.id == $id and .title == "Container persistence check" and .merchant == "Test fixture" and
-         .tracking.number == "9400111899223856926381" and .status == "unknown"' \
+         .tracking.number == "9400111899223856926381" and .sync.registration_state == "pending" and .direction == "inbound"' \
         "$scratch/response.json" >/dev/null
 }
 
@@ -110,54 +110,28 @@ request POST /v1/shipments 400 \
     --header "Authorization: Bearer $token" \
     --header 'Content-Type: application/json' \
     --header 'Idempotency-Key: container-required-tracking-check' \
-    --data '{"title":"Missing tracking"}'
+    --data '{"direction":"inbound","title":"Missing tracking"}'
 request POST /v1/shipments 400 \
     --header "Authorization: Bearer $token" \
     --header 'Content-Type: application/json' \
     --header 'Idempotency-Key: container-blank-tracking-check' \
-    --data '{"title":"Blank tracking","tracking":{"number":" "}}'
+    --data '{"direction":"inbound","title":"Blank tracking","tracking":{"number":" "}}'
 jq --exit-status '.error_code == "tracking_required"' "$scratch/response.json" >/dev/null
-request POST /v1/shipments 503 \
+# Admission and persistence do not depend on provider availability. Both
+# owner and agent records below are created through the running API.
+request POST /v1/shipments 201 \
     --header "Authorization: Bearer $token" \
     --header 'Content-Type: application/json' \
-    --header 'Idempotency-Key: container-unconfigured-provider-check' \
-    --data '{"title":"Not saved","tracking":{"number":"9400111899223856926381"}}'
-jq --exit-status '.error_code == "tracking_provider_unconfigured"' "$scratch/response.json" >/dev/null
-request GET /v1/shipments 200 --header "Authorization: Bearer $token"
-jq --exit-status '.items == []' "$scratch/response.json" >/dev/null
-
-# Provider acceptance is covered against the HTTP fixture in Rust tests. Seed
-# only this stopped, disposable database to test container state without keys.
-stop_container
-docker cp "$container:/data/shipments.sqlite3" "$scratch/shipments.sqlite3"
-id='00000000-0000-7000-8000-000000000001'
-agent_shipment_id='00000000-0000-7000-8000-000000000002'
-python3 - "$scratch/shipments.sqlite3" "$id" "$agent_shipment_id" <<'PY'
-import json
-import sqlite3
-import sys
-
-connection = sqlite3.connect(sys.argv[1])
-try:
-    with connection:
-        connection.execute("PRAGMA foreign_keys = ON")
-        connection.executemany(
-            "INSERT INTO shipments (id, title, merchant, tracking_carrier, tracking_number, carrier_status) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
-            [
-                (sys.argv[2], "Container persistence check", "Test fixture", "usps", "9400111899223856926381", json.dumps("unknown")),
-                (sys.argv[3], "Agent shipment", None, "ups", "1Z999AA10123456784", json.dumps("pre_transit")),
-            ],
-        )
-finally:
-    connection.close()
-PY
-docker cp "$scratch/shipments.sqlite3" "$container:/data/shipments.sqlite3"
-docker run --rm --mount "type=volume,source=$volume,target=/data" \
-    --entrypoint chown "$image" 10001:10001 /data/shipments.sqlite3
-docker start "$container" >/dev/null
-base_url="http://$(docker port "$container" 8080/tcp)"
-wait_for_api
+    --header 'Idempotency-Key: container-persistence-check' \
+    --data '{"direction":"inbound","title":"Container persistence check","merchant":"Test fixture","tracking":{"number":"9400111899223856926381","carrier":"USPS"}}'
+jq --exit-status '.sync.registration_state == "pending" and .sync.tracker_id == null' "$scratch/response.json" >/dev/null
+id=$(jq --exit-status --raw-output '.id' "$scratch/response.json")
+request POST /v1/shipments 201 \
+    --header "Authorization: Bearer $token" \
+    --header 'Content-Type: application/json' \
+    --header 'Idempotency-Key: container-second-shipment' \
+    --data '{"direction":"outbound","title":"Agent shipment","tracking":{"number":"1Z999AA10123456784","carrier":"UPS"}}'
+agent_shipment_id=$(jq --exit-status --raw-output '.id' "$scratch/response.json")
 check_shipment
 
 # Supervisor supplies a root-owned data directory and options file. Recreate
@@ -228,14 +202,14 @@ jq --exit-status --arg id "$agent_id" \
 request GET /v1/agents 403 --header "Authorization: Bearer $integration_token"
 request GET /v1/system 200 --header "Authorization: Bearer $agent_token"
 jq --exit-status '.credential_role == "agent"' "$scratch/response.json" >/dev/null
-request POST /v1/shipments 503 \
+request POST /v1/shipments 201 \
     --header "Authorization: Bearer $agent_token" \
     --header 'Content-Type: application/json' \
     --header 'Idempotency-Key: container-agent-check' \
-    --data '{"title":"Not saved by agent","tracking":{"number":"9400111899223856926382"}}'
-jq --exit-status '.error_code == "tracking_provider_unconfigured"' "$scratch/response.json" >/dev/null
+    --data '{"direction":"inbound","title":"Saved by agent","tracking":{"number":"9400111899223856926382"}}'
+jq --exit-status '.sync.registration_state == "pending" and .sync.tracker_id == null' "$scratch/response.json" >/dev/null
 request GET /v1/shipments 200 --header "Authorization: Bearer $agent_token"
-jq --exit-status '.items | length == 2' "$scratch/response.json" >/dev/null
+jq --exit-status '.items | length == 3' "$scratch/response.json" >/dev/null
 request GET "/v1/shipments/$agent_shipment_id" 200 --header "Authorization: Bearer $agent_token"
 agent_revision=$(jq --exit-status --raw-output '.revision' "$scratch/response.json")
 request PATCH "/v1/shipments/$agent_shipment_id" 200 \
@@ -283,7 +257,7 @@ check_shipment
 request GET "/v1/shipments/$agent_shipment_id" 200 --header "Authorization: Bearer $agent_token"
 jq --exit-status --arg id "$agent_shipment_id" \
     '.id == $id and .title == "Agent shipment" and .order_reference == "container-agent-order" and
-     .tracking.number == "1Z999AA10123456784" and .status == "pre_transit" and
+     .tracking.number == "1Z999AA10123456784" and .sync.registration_state == "pending" and .direction == "outbound" and
      (.sources | any(.namespace == "container-smoke" and .key == "agent-evidence")) and
      .status_override == null and .archived == false' "$scratch/response.json" >/dev/null
 request DELETE "/v1/agents/$agent_id" 204 --header "Authorization: Bearer $token"

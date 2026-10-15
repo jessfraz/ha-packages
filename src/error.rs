@@ -2,6 +2,10 @@
 pub enum Error {
     #[error("A tracking number is required. Add one before saving; tracking cannot be cleared.")]
     TrackingRequired,
+    #[error(
+        "Tracking number must contain 6..100 letters or digits, include at least one digit, and use only letters, digits, spaces, or hyphens."
+    )]
+    TrackingInvalid,
     #[error("{0}")]
     Invalid(String),
     #[error("shipment not found")]
@@ -21,7 +25,9 @@ pub enum Error {
 impl From<Error> for dropshot::HttpError {
     fn from(error: Error) -> Self {
         let status = match error {
-            Error::TrackingRequired => dropshot::ClientErrorStatusCode::BAD_REQUEST,
+            Error::TrackingRequired | Error::TrackingInvalid => {
+                dropshot::ClientErrorStatusCode::BAD_REQUEST
+            }
             Error::Invalid(_) => dropshot::ClientErrorStatusCode::BAD_REQUEST,
             Error::NotFound => dropshot::ClientErrorStatusCode::NOT_FOUND,
             Error::Conflict(_) => dropshot::ClientErrorStatusCode::CONFLICT,
@@ -30,6 +36,7 @@ impl From<Error> for dropshot::HttpError {
         };
         let code = match error {
             Error::TrackingRequired => "tracking_required",
+            Error::TrackingInvalid => "tracking_invalid",
             Error::Invalid(_) => "invalid_input",
             Error::NotFound => "not_found",
             Error::Conflict(_) => "conflict",
