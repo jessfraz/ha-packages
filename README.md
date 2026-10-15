@@ -45,6 +45,7 @@ day. It excludes outbound shipments and unknown timestamps, respects daylight
 saving, and links to `#view=delivered_today&direction=inbound` in the dashboard.
 The dashboard uses the same day boundaries even if your browser is elsewhere.
 The sensor stays unavailable while the app and integration versions differ.
+
 Both `sensor.shipments_inbound_delivered_today` and
 `sensor.shipments_inbound_out_for_delivery` include an `items` attribute for
 dashboard package lists. Their states remain counts. Each item contains `id`,

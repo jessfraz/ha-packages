@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.5.4
+
+- Add package details to inbound delivered-today and out-for-delivery sensors.
+  Keep numeric counts, preserve titles, link to each shipment, and cap lists
+  at 20 with an explicit truncation flag. Use the same local-day filters and
+  carrier delivery timestamps as the count, with deliveries newest first and
+  arrivals sorted by ETA.
+- Exclude tracking numbers from sensor attributes and package lists from
+  recorder history. Keep failed or inconsistent snapshots unavailable.
+
 ## 0.5.3
 
 - Match Maintenance's neutral light and dark styling, compact controls, and
