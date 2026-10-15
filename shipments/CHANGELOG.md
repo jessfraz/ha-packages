@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.5.1
+
+- Look for an existing EasyPost tracker before every new registration, including
+  the first attempt. Adopt one confirmed match instead of registering again;
+  only a complete empty lookup permits a new registration. Provider failures
+  back off, while ambiguous matches need attention.
+- Recheck the shipment after waiting for the outbound request slot so an edit,
+  archive, or terminal correction during pacing cancels the registration.
+- Reuse the existing direction enum in Home Assistant summary polling.
+
 ## 0.5.0
 
 - Keep combined and per-direction count entity IDs, add measurement statistics
