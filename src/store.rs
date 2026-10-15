@@ -1,4 +1,4 @@
-use crate::{error::Error, models::*, sync::Tracker};
+use crate::{carrier::Carrier, error::Error, models::*, sync::Tracker};
 use sha2::{Digest, Sha256};
 use sqlx::{
     FromRow, QueryBuilder, Sqlite, SqlitePool, Transaction,
@@ -17,8 +17,11 @@ struct Record {
     id: String,
     revision: i64,
     title: String,
+    direction: String,
     merchant: Option<String>,
     order_reference: Option<String>,
+    signature_required: Option<bool>,
+    carrier_tracking: String,
     tracking_carrier: Option<String>,
     tracking_number: String,
     carrier_status: Option<String>,
@@ -35,6 +38,11 @@ struct Record {
     last_error: Option<String>,
     next_attempt_at: Option<i64>,
     attempts: i64,
+    registration_state: String,
+    registration_started_at: Option<i64>,
+    last_error_code: Option<String>,
+    last_provider_status: Option<u16>,
+    last_provider_error_code: Option<String>,
 }
 
 impl Record {
@@ -65,20 +73,52 @@ impl Record {
             id: parse_id(&self.id)?,
             revision: self.revision,
             title: self.title,
+            direction: match self.direction.as_str() {
+                "inbound" => Direction::Inbound,
+                "outbound" => Direction::Outbound,
+                _ => {
+                    return Err(Error::Invalid(
+                        "stored direction must be inbound or outbound".into(),
+                    ));
+                }
+            },
             merchant: self.merchant,
             order_reference: self.order_reference,
+            signature_required: self.signature_required,
             tracking: Tracking {
-                carrier: self.tracking_carrier,
+                carrier: self
+                    .tracking_carrier
+                    .as_deref()
+                    .map(str::parse)
+                    .transpose()
+                    .map_err(|error: crate::carrier::UnsupportedCarrier| {
+                        Error::Database(sqlx::Error::Decode(Box::new(error)))
+                    })?,
                 number: self.tracking_number,
             },
             status,
             carrier_status,
+            carrier_tracking: serde_json::from_str(&self.carrier_tracking)?,
             status_override,
             archived: self.archived,
             created_at: self.created_at,
             updated_at: self.updated_at,
             sources,
             sync: SyncState {
+                registration_state: match self.registration_state.as_str() {
+                    "pending" => RegistrationState::Pending,
+                    "registered" => RegistrationState::Registered,
+                    "rejected" => RegistrationState::Rejected,
+                    _ => {
+                        return Err(Error::Invalid(
+                            "stored registration state is invalid".into(),
+                        ));
+                    }
+                },
+                registration_started_at: self.registration_started_at,
+                error_code: self.last_error_code,
+                provider_status: self.last_provider_status,
+                provider_error_code: self.last_provider_error_code,
                 tracker_id: self.tracker_id,
                 tracking_url: self.tracking_url,
                 last_success_at: self.last_success_at,
@@ -114,11 +154,47 @@ pub fn normalize_tracking(tracking: &mut Tracking) -> Result<(), Error> {
         .filter(|c| !c.is_whitespace())
         .flat_map(char::to_uppercase)
         .collect();
-    if let Some(carrier) = &mut tracking.carrier {
-        valid_text(carrier, "carrier", 100)?;
-        *carrier = carrier.trim().to_ascii_lowercase();
-    }
     Ok(())
+}
+
+fn create_fingerprint(input: &CreateShipment) -> Result<String, Error> {
+    #[derive(serde::Serialize)]
+    struct FingerprintTracking<'a> {
+        carrier: Option<String>,
+        number: &'a str,
+    }
+
+    #[derive(serde::Serialize)]
+    struct Fingerprint<'a> {
+        title: &'a str,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        direction: Option<Direction>,
+        merchant: &'a Option<String>,
+        order_reference: &'a Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        signature_required: Option<bool>,
+        tracking: FingerprintTracking<'a>,
+        source: &'a Option<Source>,
+    }
+
+    // Existing replays hashed normalized lowercase carriers before the API
+    // exposed canonical names. New optional fields must not change old hashes.
+    let payload = Fingerprint {
+        title: &input.title,
+        direction: (input.direction == Direction::Outbound).then_some(input.direction),
+        merchant: &input.merchant,
+        order_reference: &input.order_reference,
+        signature_required: input.signature_required,
+        tracking: FingerprintTracking {
+            carrier: input.tracking.carrier.as_ref().map(Carrier::as_db_key),
+            number: &input.tracking.number,
+        },
+        source: &input.source,
+    };
+    Ok(format!(
+        "{:x}",
+        Sha256::digest(serde_json::to_vec(&payload)?)
+    ))
 }
 
 fn validate_source(source: &Source) -> Result<(), Error> {
@@ -145,6 +221,11 @@ pub fn validate_create(input: &mut CreateShipment, key: &str) -> Result<(), Erro
 }
 
 pub fn validate_update(input: &mut UpdateShipment) -> Result<(), Error> {
+    if matches!(input.direction.value, Some(None)) {
+        return Err(Error::Invalid(
+            "direction is required and cannot be cleared".into(),
+        ));
+    }
     if let Some(title) = &input.title {
         valid_text(title, "title", 500)?;
     }
@@ -334,7 +415,7 @@ impl Store {
         let Some((fingerprint, response)) = saved else {
             return Ok(None);
         };
-        if fingerprint != format!("{:x}", Sha256::digest(serde_json::to_vec(input)?)) {
+        if fingerprint != create_fingerprint(input)? {
             return Err(Error::Conflict(
                 "Idempotency-Key was already used for different input".into(),
             ));
@@ -350,7 +431,7 @@ impl Store {
         verified: Option<&Tracker>,
     ) -> Result<Shipment, Error> {
         validate_create(&mut input, key)?;
-        let fingerprint = format!("{:x}", Sha256::digest(serde_json::to_vec(&input)?));
+        let fingerprint = create_fingerprint(&input)?;
         let mut tx = self.transaction().await?;
         if let Some((saved_hash, response)) = sqlx::query_as::<_, (String, String)>(
             "SELECT fingerprint, response FROM idempotency WHERE actor_id = ? AND key = ?",
@@ -370,14 +451,15 @@ impl Store {
         let id = Uuid::now_v7();
         let tracking = Tracking {
             carrier: verified
-                .map(|tracker| tracker.carrier.clone())
-                .or(input.tracking.carrier.clone()),
+                .map(|tracker| tracker.carrier)
+                .or(input.tracking.carrier),
             number: input.tracking.number.clone(),
         };
         Self::check_tracking(&mut tx, id, &tracking).await?;
-        sqlx::query("INSERT INTO shipments (id,title,merchant,order_reference,tracking_carrier,tracking_number,next_attempt_at) VALUES (?,?,?,?,?,?,unixepoch())")
-            .bind(id.to_string()).bind(&input.title).bind(&input.merchant).bind(&input.order_reference)
-            .bind(tracking.carrier.as_deref()).bind(&tracking.number)
+        sqlx::query("INSERT INTO shipments (id,title,direction,merchant,order_reference,signature_required,tracking_carrier,tracking_number,next_attempt_at) VALUES (?,?,?,?,?,?,?,?,unixepoch())")
+            .bind(id.to_string()).bind(&input.title).bind(input.direction.as_str()).bind(&input.merchant).bind(&input.order_reference)
+            .bind(input.signature_required)
+            .bind(tracking.carrier.as_ref().map(Carrier::as_db_key)).bind(&tracking.number)
             .execute(&mut *tx).await.map_err(unique_error)?;
         if let Some(tracker) = verified {
             Self::save_verification(&mut tx, id, tracker).await?;
@@ -413,6 +495,11 @@ impl Store {
         if let Some(title) = input.title {
             shipment.title = title;
         }
+        if let Some(direction) = input.direction.value {
+            shipment.direction = direction.ok_or_else(|| {
+                Error::Invalid("direction is required and cannot be cleared".into())
+            })?;
+        }
         if let Some(value) = input.merchant.value {
             shipment.merchant = value;
         }
@@ -424,20 +511,27 @@ impl Store {
             let mut tracking = value.ok_or(Error::TrackingRequired)?;
             normalize_tracking(&mut tracking)?;
             if let Some(tracker) = verified {
-                tracking.carrier = Some(tracker.carrier.clone());
+                tracking.carrier = Some(tracker.carrier);
             }
             changed_tracking = tracking != shipment.tracking;
             shipment.tracking = tracking;
         }
+        if changed_tracking {
+            shipment.signature_required = None;
+        }
+        if let Some(value) = input.signature_required.value {
+            shipment.signature_required = value;
+        }
         if !shipment.archived {
             Self::check_tracking(&mut tx, id, &shipment.tracking).await?;
         }
-        sqlx::query("UPDATE shipments SET title=?,merchant=?,order_reference=?,tracking_carrier=?,tracking_number=? WHERE id=?")
-            .bind(shipment.title).bind(shipment.merchant).bind(shipment.order_reference)
-            .bind(shipment.tracking.carrier.as_deref()).bind(&shipment.tracking.number)
+        sqlx::query("UPDATE shipments SET title=?,direction=?,merchant=?,order_reference=?,signature_required=?,tracking_carrier=?,tracking_number=? WHERE id=?")
+            .bind(shipment.title).bind(shipment.direction.as_str()).bind(shipment.merchant).bind(shipment.order_reference)
+            .bind(shipment.signature_required)
+            .bind(shipment.tracking.carrier.as_ref().map(Carrier::as_db_key)).bind(&shipment.tracking.number)
             .bind(id.to_string()).execute(&mut *tx).await.map_err(unique_error)?;
         if changed_tracking {
-            sqlx::query("UPDATE shipments SET tracking_generation=tracking_generation+1,tracker_id=NULL,tracking_url=NULL,carrier_status=NULL,status_since=NULL,last_success_at=NULL,last_attempt_at=NULL,last_error=NULL,attempts=0,lease_until=NULL,lease_token=NULL,next_attempt_at=CASE WHEN tracking_number IS NOT NULL AND archived=0 AND ? THEN unixepoch() END WHERE id=?")
+            sqlx::query("UPDATE shipments SET tracking_generation=tracking_generation+1,tracker_id=NULL,tracking_url=NULL,carrier_status=NULL,carrier_tracking='{}',registration_state='pending',registration_started_at=NULL,last_error_code=NULL,last_provider_status=NULL,last_provider_error_code=NULL,status_since=NULL,last_success_at=NULL,last_attempt_at=NULL,last_error=NULL,attempts=0,lease_until=NULL,lease_token=NULL,next_attempt_at=CASE WHEN tracking_number IS NOT NULL AND archived=0 AND ? THEN unixepoch() END WHERE id=?")
                 .bind(!shipment.status_override.as_ref().is_some_and(|value|value.status.is_terminal())).bind(id.to_string()).execute(&mut *tx).await?;
             if let Some(tracker) = verified {
                 Self::save_verification(&mut tx, id, tracker).await?;
@@ -466,8 +560,9 @@ impl Store {
         id: Uuid,
         tracker: &Tracker,
     ) -> Result<(), Error> {
-        sqlx::query(r#"UPDATE shipments SET tracker_id=?,tracking_url=?,carrier_status=?,status_since=strftime('%Y-%m-%dT%H:%M:%fZ','now'),last_success_at=strftime('%Y-%m-%dT%H:%M:%fZ','now'),last_attempt_at=unixepoch(),last_error=NULL,attempts=0,next_attempt_at=CASE WHEN archived=1 OR override_status IN ('"delivered"','"return_to_sender"','"cancelled"') THEN NULL ELSE unixepoch()+? END WHERE id=?"#)
+        sqlx::query(r#"UPDATE shipments SET tracker_id=?,tracking_url=?,carrier_status=?,carrier_tracking=?,registration_state='registered',registration_started_at=NULL,last_error_code=NULL,last_provider_status=NULL,last_provider_error_code=NULL,status_since=strftime('%Y-%m-%dT%H:%M:%fZ','now'),last_success_at=strftime('%Y-%m-%dT%H:%M:%fZ','now'),last_attempt_at=unixepoch(),last_error=NULL,attempts=0,next_attempt_at=CASE WHEN archived=1 OR override_status IN ('"delivered"','"return_to_sender"','"cancelled"') THEN NULL ELSE unixepoch()+? END WHERE id=?"#)
             .bind(&tracker.id).bind(&tracker.public_url).bind(serde_json::to_string(&tracker.status)?)
+            .bind(serde_json::to_string(&tracker.carrier_tracking)?)
             .bind(crate::sync::poll_delay(tracker.status, 0, &id.to_string())).bind(id.to_string()).execute(&mut **tx).await?;
         Ok(())
     }
@@ -487,8 +582,9 @@ impl Store {
     ) -> Result<(), Error> {
         // Without a carrier, a number overlaps every known carrier identity.
         // BEGIN IMMEDIATE makes this check and the subsequent write atomic.
+        let carrier = tracking.carrier.as_ref().map(Carrier::as_db_key);
         let exists:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM shipments WHERE archived=0 AND tracking_number=? AND id<>? AND (tracking_carrier IS NULL OR ? IS NULL OR tracking_carrier=?))")
-            .bind(&tracking.number).bind(id.to_string()).bind(&tracking.carrier).bind(&tracking.carrier).fetch_one(&mut **tx).await?;
+            .bind(&tracking.number).bind(id.to_string()).bind(&carrier).bind(&carrier).fetch_one(&mut **tx).await?;
         if exists {
             Err(Error::Conflict(
                 "tracking identity already belongs to an active shipment".into(),
@@ -581,7 +677,7 @@ impl Store {
             .map(|value| value.status)
             .or(current.carrier_status)
             .is_some_and(Status::is_terminal);
-        sqlx::query("UPDATE shipments SET override_status=?,override_reason=?,override_actor=?,override_at=CASE WHEN ? THEN strftime('%Y-%m-%dT%H:%M:%fZ','now') END, next_attempt_at=CASE WHEN ? THEN NULL WHEN tracking_number IS NOT NULL AND archived=0 THEN unixepoch() ELSE NULL END WHERE id=?")
+        sqlx::query("UPDATE shipments SET override_status=?,override_reason=?,override_actor=?,override_at=CASE WHEN ? THEN strftime('%Y-%m-%dT%H:%M:%fZ','now') END, next_attempt_at=CASE WHEN ? THEN NULL WHEN tracking_number IS NOT NULL AND archived=0 AND registration_state!='rejected' THEN unixepoch() ELSE NULL END WHERE id=?")
             .bind(value.as_ref().map(|v|serde_json::to_string(&v.status)).transpose()?).bind(value.as_ref().map(|v|&v.reason))
             .bind(value.as_ref().map(|_|actor)).bind(value.is_some()).bind(terminal)
             .bind(id.to_string()).execute(&mut *tx).await?;
@@ -619,7 +715,7 @@ impl Store {
         if !archived {
             Self::check_tracking(&mut tx, id, &shipment.tracking).await?;
         }
-        sqlx::query("UPDATE shipments SET archived=?,lease_until=NULL,lease_token=NULL,next_attempt_at=CASE WHEN ?=0 AND tracking_number IS NOT NULL AND ? THEN unixepoch() END WHERE id=?")
+        sqlx::query("UPDATE shipments SET archived=?,lease_until=NULL,lease_token=NULL,next_attempt_at=CASE WHEN ?=0 AND tracking_number IS NOT NULL AND ? AND registration_state!='rejected' THEN unixepoch() END WHERE id=?")
             .bind(archived).bind(archived).bind(!shipment.status.is_terminal()).bind(id.to_string()).execute(&mut *tx).await.map_err(unique_error)?;
         Self::bump(&mut tx, id).await?;
         Self::event_in(
@@ -650,6 +746,11 @@ impl Store {
         if shipment.archived {
             return Err(Error::Conflict(
                 "refresh requires an unarchived shipment with tracking".into(),
+            ));
+        }
+        if shipment.sync.registration_state == RegistrationState::Rejected {
+            return Err(Error::Conflict(
+                "EasyPost rejected this tracking registration. Correct the tracking number or carrier before requesting another refresh.".into(),
             ));
         }
         // Refreshes coalesce without disturbing an in-flight check or a retry.
@@ -684,18 +785,41 @@ impl Store {
     pub async fn list(
         &self,
         filters: &Filters,
-        after: Option<Uuid>,
+        after: Option<ShipmentPosition>,
         limit: u32,
-    ) -> Result<Vec<Shipment>, Error> {
+    ) -> Result<Vec<ShipmentListEntry>, Error> {
         if filters.source_namespace.is_some() != filters.source_key.is_some() {
             return Err(Error::Invalid(
                 "source_namespace and source_key must be supplied together".into(),
             ));
         }
-        let mut query = QueryBuilder::<Sqlite>::new("SELECT * FROM shipments WHERE archived=");
+        // Date keys are indexed generated columns. Every page uses the key
+        // captured when the preceding row was selected, never a mutable lookup.
+        let sort_column = match filters.sort.unwrap_or_default() {
+            ShipmentSort::Id => None,
+            ShipmentSort::Expected => Some("expected_sort_key"),
+            ShipmentSort::Delivered => Some("delivered_sort_key"),
+        };
+        let mut query = QueryBuilder::<Sqlite>::new("SELECT shipments.*,");
+        query.push(sort_column.unwrap_or("NULL"));
+        query.push(" AS list_sort_key FROM shipments WHERE archived=");
         query.push_bind(filters.archived.unwrap_or(false));
-        if let Some(id) = after {
-            query.push(" AND id>").push_bind(id.to_string());
+        if let Some(direction) = filters.direction {
+            query.push(" AND direction=").push_bind(direction.as_str());
+        }
+        if let Some(position) = after {
+            if let Some(column) = sort_column {
+                query
+                    .push(" AND (")
+                    .push(column)
+                    .push(",id)>(")
+                    .push_bind(position.sort_key.unwrap_or(i64::MAX))
+                    .push(",")
+                    .push_bind(position.id.to_string())
+                    .push(")");
+            } else {
+                query.push(" AND id>").push_bind(position.id.to_string());
+            }
         }
         if let Some(value) = &filters.tracking_number {
             let mut tracking = Tracking {
@@ -710,7 +834,7 @@ impl Store {
         if let Some(value) = &filters.carrier {
             query
                 .push(" AND tracking_carrier=")
-                .push_bind(value.trim().to_ascii_lowercase());
+                .push_bind(value.as_db_key());
         }
         if let Some(value) = &filters.order_reference {
             query.push(" AND order_reference=").push_bind(value);
@@ -750,9 +874,33 @@ impl Store {
                 .push(" AND coalesce(override_status,carrier_status,'\"expected\"')=")
                 .push_bind(serde_json::to_string(&value)?);
         }
-        query.push(" ORDER BY id LIMIT ").push_bind(limit.min(201));
+        if let Some(exceptions) = filters.exceptions {
+            query.push(" AND coalesce(override_status,carrier_status,'\"expected\"')");
+            query.push(if exceptions { " IN (" } else { " NOT IN (" });
+            {
+                let mut statuses = query.separated(",");
+                for status in [Status::Failure, Status::Error, Status::ReturnToSender] {
+                    statuses.push_bind(serde_json::to_string(&status)?);
+                }
+            }
+            query.push(")");
+        }
+        query.push(" ORDER BY ");
+        if let Some(column) = sort_column {
+            query.push(column).push(",");
+        }
+        query.push("id LIMIT ").push_bind(limit.min(201));
+        #[derive(FromRow)]
+        struct ListRecord {
+            #[sqlx(flatten)]
+            record: Record,
+            list_sort_key: Option<i64>,
+        }
         let mut tx = self.pool.begin().await?;
-        let rows = query.build_query_as::<Record>().fetch_all(&mut *tx).await?;
+        let rows = query
+            .build_query_as::<ListRecord>()
+            .fetch_all(&mut *tx)
+            .await?;
         let mut sources_by_id: HashMap<String, Vec<Source>> = HashMap::new();
         if !rows.is_empty() {
             let mut source_query = QueryBuilder::<Sqlite>::new(
@@ -761,7 +909,7 @@ impl Store {
             {
                 let mut separated = source_query.separated(",");
                 for row in &rows {
-                    separated.push_bind(&row.id);
+                    separated.push_bind(&row.record.id);
                 }
             }
             source_query.push(") ORDER BY namespace,key");
@@ -779,8 +927,15 @@ impl Store {
         let result = rows
             .into_iter()
             .map(|row| {
-                let sources = sources_by_id.remove(&row.id).unwrap_or_default();
-                row.into_shipment(sources)
+                let sources = sources_by_id.remove(&row.record.id).unwrap_or_default();
+                let shipment = row.record.into_shipment(sources)?;
+                Ok(ShipmentListEntry {
+                    position: ShipmentPosition {
+                        id: shipment.id,
+                        sort_key: row.list_sort_key,
+                    },
+                    shipment,
+                })
             })
             .collect();
         tx.commit().await?;
@@ -800,10 +955,21 @@ impl Store {
                 Ok(Event {id,shipment_id:parse_id(&shipment_id)?,kind:serde_json::from_str(&kind)?,actor_id,at,detail,snapshot:snapshot.as_deref().map(serde_json::from_str).transpose()?})).collect()
     }
 
-    pub async fn summary(&self) -> Result<Summary, Error> {
-        let rows=sqlx::query_as::<_,(String,i64)>("SELECT coalesce(override_status,carrier_status,'\"expected\"') AS status,count(*) FROM shipments WHERE archived=0 GROUP BY status").fetch_all(&self.pool).await?;
+    pub async fn summary(&self, direction: Option<Direction>) -> Result<Summary, Error> {
+        let mut query = QueryBuilder::<Sqlite>::new(
+            "SELECT coalesce(override_status,carrier_status,'\"expected\"') AS status,count(*),count(last_error) FROM shipments WHERE archived=0",
+        );
+        if let Some(direction) = direction {
+            query.push(" AND direction=").push_bind(direction.as_str());
+        }
+        query.push(" GROUP BY status");
+        let rows = query
+            .build_query_as::<(String, i64, i64)>()
+            .fetch_all(&self.pool)
+            .await?;
         let mut summary = Summary::default();
-        for (status, count) in rows {
+        for (status, count, sync_errors) in rows {
+            summary.sync_errors += sync_errors;
             let status: Status = serde_json::from_str(&status)?;
             if !status.is_terminal() {
                 summary.active += count;
@@ -821,11 +987,6 @@ impl Store {
                 _ => {}
             }
         }
-        summary.sync_errors = sqlx::query_scalar(
-            "SELECT count(*) FROM shipments WHERE archived=0 AND last_error IS NOT NULL",
-        )
-        .fetch_one(&self.pool)
-        .await?;
         Ok(summary)
     }
 

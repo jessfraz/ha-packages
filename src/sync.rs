@@ -13,8 +13,11 @@ use tokio::sync::Mutex;
 use tokio::time::Instant;
 use uuid::Uuid;
 
+use crate::carrier::Carrier;
 use crate::error::Error;
-use crate::models::{EventKind, Status};
+use crate::models::{
+    CarrierEvent, CarrierTracking, EventKind, ProviderValue, Status, provider_optional,
+};
 
 const LEASE_SECONDS: i64 = 60;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
@@ -40,12 +43,101 @@ pub enum SyncError {
     Throttled { retry_after: i64 },
     #[error(transparent)]
     Rejected(#[from] TrackerRejection),
+    #[error("{rejection}")]
+    ProviderRejected {
+        rejection: TrackerRejection,
+        status: u16,
+        retry_after: Option<i64>,
+    },
+    #[error(
+        "EasyPost returned multiple possible trackers for this registration. Select the correct carrier before retrying; no new tracker was created."
+    )]
+    RegistrationAmbiguous,
+    #[error(
+        "The original EasyPost registration could not be confirmed within its three-month duplicate-protection window. Review the tracker in EasyPost before registering it again; no new tracker was created."
+    )]
+    RegistrationExpired,
     #[error("EasyPost response exceeded the size limit")]
     ResponseTooLarge,
     #[error("EasyPost returned an invalid tracker")]
     InvalidResponse,
     #[error("EasyPost returned an invalid connection-check response")]
     InvalidConnectionResponse,
+}
+
+impl SyncError {
+    pub fn error_code(&self) -> &'static str {
+        match self {
+            Self::Rejected(rejection) | Self::ProviderRejected { rejection, .. } => {
+                rejection.error_code()
+            }
+            Self::RegistrationAmbiguous => "registration_ambiguous",
+            Self::RegistrationExpired => "registration_expired",
+            Self::Configuration => "provider_configuration",
+            Self::Timeout => "provider_timeout",
+            Self::Connection => "provider_connection",
+            Self::Http {
+                status: 401 | 403, ..
+            } => "tracking_provider_credentials",
+            Self::Http { status: 429, .. } => "tracking_verification_rate_limited",
+            Self::Http { .. } => "provider_http",
+            Self::Throttled { .. } => "provider_throttled",
+            Self::ResponseTooLarge => "provider_response_too_large",
+            Self::InvalidResponse | Self::InvalidConnectionResponse => "provider_invalid_response",
+        }
+    }
+
+    pub fn provider_status(&self) -> Option<u16> {
+        match self {
+            Self::Http { status, .. } | Self::ProviderRejected { status, .. } => Some(*status),
+            _ => None,
+        }
+    }
+
+    pub fn provider_error_code(&self) -> Option<&'static str> {
+        match self {
+            Self::ProviderRejected { rejection, .. } => Some(rejection.provider_error_code()),
+            _ => None,
+        }
+    }
+
+    fn retry_after(&self) -> Option<i64> {
+        match self {
+            Self::Http { retry_after, .. } | Self::ProviderRejected { retry_after, .. } => {
+                *retry_after
+            }
+            Self::Throttled { retry_after } => Some(*retry_after),
+            _ => None,
+        }
+    }
+
+    fn set_retry_after(&mut self, value: i64) {
+        match self {
+            Self::Http { retry_after, .. } | Self::ProviderRejected { retry_after, .. } => {
+                *retry_after = Some(value)
+            }
+            _ => {}
+        }
+    }
+
+    fn rejects_registration(&self) -> bool {
+        matches!(
+            self,
+            Self::Rejected(
+                TrackerRejection::NoCarrierForCode
+                    | TrackerRejection::CarrierCodeMismatch
+                    | TrackerRejection::MultipleCarriersForCode
+                    | TrackerRejection::InvalidParams
+            ) | Self::ProviderRejected {
+                rejection: TrackerRejection::NoCarrierForCode
+                    | TrackerRejection::CarrierCodeMismatch
+                    | TrackerRejection::MultipleCarriersForCode
+                    | TrackerRejection::InvalidParams,
+                ..
+            } | Self::RegistrationAmbiguous
+                | Self::RegistrationExpired
+        )
+    }
 }
 
 /// Documented tracker creation failures. Provider free text and nested errors
@@ -78,6 +170,11 @@ pub enum TrackerRejection {
         "The EasyPost account needs a carrier account for this carrier. Configure it in EasyPost and try again."
     )]
     NoCarrierAccount,
+    #[serde(rename = "CREDENTIALS_NOT_FOUND")]
+    #[error(
+        "EasyPost has no credentials for this carrier. Configure this carrier in EasyPost, then retry. This does not mean the tracking number is invalid."
+    )]
+    CarrierCredentialsMissing,
 }
 
 impl TrackerRejection {
@@ -89,6 +186,19 @@ impl TrackerRejection {
             Self::InvalidParams => "tracking_invalid",
             Self::InvalidTestCode => "tracking_test_key",
             Self::NoCarrierAccount => "tracking_carrier_account_required",
+            Self::CarrierCredentialsMissing => "tracking_carrier_credentials_required",
+        }
+    }
+
+    pub fn provider_error_code(self) -> &'static str {
+        match self {
+            Self::NoCarrierForCode => "TRACKER.NO_CARRIER_FOR_CODE",
+            Self::CarrierCodeMismatch => "TRACKER.CARRIER_CODE_MISMATCH",
+            Self::MultipleCarriersForCode => "TRACKER.MULTIPLE_CARRIERS_FOR_CODE",
+            Self::InvalidParams => "TRACKER.INVALID_PARAMS",
+            Self::InvalidTestCode => "TRACKER.INVALID_TEST_CODE",
+            Self::NoCarrierAccount => "TRACKER.NO_CARRIER_ACCOUNT",
+            Self::CarrierCredentialsMissing => "CREDENTIALS_NOT_FOUND",
         }
     }
 }
@@ -119,16 +229,109 @@ struct RequestSchedule {
     rate_limits: u32,
 }
 
-/// The subset of the tracker contract used by the registry. Carrier-provided
-/// free text and location data are deliberately neither stored nor logged.
+/// Carrier text and locations are retained for the tracking timeline, but must
+/// never be included in operational logs or provider errors.
 #[derive(Debug, Deserialize)]
+#[serde(from = "ProviderTracker")]
 pub struct Tracker {
     pub id: String,
     pub tracking_code: String,
-    pub carrier: String,
+    pub carrier: Carrier,
     pub status: Status,
-    #[serde(default)]
     pub public_url: Option<String>,
+    pub carrier_tracking: CarrierTracking,
+}
+
+#[derive(Deserialize)]
+struct ProviderTracker {
+    id: String,
+    tracking_code: String,
+    carrier: Carrier,
+    status: Status,
+    #[serde(default)]
+    public_url: Option<String>,
+    #[serde(default, deserialize_with = "provider_optional")]
+    tracking_details: Option<Vec<ProviderValue<CarrierEvent>>>,
+    #[serde(default, deserialize_with = "provider_optional")]
+    signed_by: Option<String>,
+    #[serde(default, deserialize_with = "provider_optional")]
+    est_delivery_date: Option<String>,
+}
+
+impl From<ProviderTracker> for Tracker {
+    fn from(raw: ProviderTracker) -> Self {
+        let mut carrier_tracking = CarrierTracking {
+            events: raw
+                .tracking_details
+                .unwrap_or_default()
+                .into_iter()
+                .filter_map(|event| match event {
+                    ProviderValue::Value(event) => normalize_event(event),
+                    ProviderValue::Ignored(_) => None,
+                })
+                .collect(),
+            signed_by: clean_text(raw.signed_by, 200),
+            estimated_delivery_at: clean_datetime(raw.est_delivery_date),
+            delivered_at: None,
+            events_truncated: false,
+        };
+        let incoming = std::mem::take(&mut carrier_tracking);
+        carrier_tracking.merge(&incoming);
+        Self {
+            id: raw.id,
+            tracking_code: raw.tracking_code,
+            carrier: raw.carrier,
+            status: raw.status,
+            public_url: raw.public_url,
+            carrier_tracking,
+        }
+    }
+}
+
+fn clean_text(value: Option<String>, maximum: usize) -> Option<String> {
+    let value = value?;
+    let mut cleaned = String::new();
+    for character in value
+        .trim()
+        .chars()
+        .filter(|character| !character.is_control() || matches!(character, '\n' | '\t'))
+    {
+        if cleaned.len() + character.len_utf8() > maximum {
+            break;
+        }
+        cleaned.push(character);
+    }
+    (!cleaned.is_empty()).then_some(cleaned)
+}
+
+fn clean_datetime(value: Option<String>) -> Option<String> {
+    let value = value?;
+    if value.len() > 64 {
+        return None;
+    }
+    time::OffsetDateTime::parse(&value, &time::format_description::well_known::Rfc3339)
+        .ok()?
+        .to_offset(time::UtcOffset::UTC)
+        .format(&time::format_description::well_known::Rfc3339)
+        .ok()
+}
+
+fn normalize_event(mut event: CarrierEvent) -> Option<CarrierEvent> {
+    event.status = event.status.filter(|status| *status != Status::Expected);
+    event.status_detail = clean_text(event.status_detail, 100);
+    event.message = clean_text(event.message, 1024);
+    event.description = clean_text(event.description, 2048);
+    event.datetime = clean_datetime(event.datetime);
+    event.source = clean_text(event.source, 100);
+    event.carrier_code = clean_text(event.carrier_code, 100);
+    event.tracking_location = event.tracking_location.and_then(|mut location| {
+        location.city = clean_text(location.city, 200);
+        location.state = clean_text(location.state, 100);
+        location.country = clean_text(location.country, 100);
+        location.zip = clean_text(location.zip, 40);
+        (location != crate::models::TrackingLocation::default()).then_some(location)
+    });
+    (event != CarrierEvent::default()).then_some(event)
 }
 
 #[derive(Deserialize)]
@@ -153,7 +356,7 @@ struct RegisterTracker<'a> {
 struct RegisterTracking<'a> {
     tracking_code: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
-    carrier: Option<&'a str>,
+    carrier: Option<Carrier>,
 }
 
 impl EasyPostClient {
@@ -253,6 +456,19 @@ impl EasyPostClient {
             Some(SyncError::Rejected(rejection)) => {
                 ("rejected", Some(rejection.error_code()), None, None)
             }
+            Some(SyncError::ProviderRejected {
+                rejection,
+                status,
+                retry_after,
+            }) => (
+                "rejected",
+                Some(rejection.error_code()),
+                Some(*status),
+                *retry_after,
+            ),
+            Some(error @ (SyncError::RegistrationAmbiguous | SyncError::RegistrationExpired)) => {
+                ("rejected", Some(error.error_code()), None, None)
+            }
             Some(error) => (
                 "error",
                 Some(match error {
@@ -269,6 +485,7 @@ impl EasyPostClient {
         slog::info!(self.log, "provider_request";
             "request_id" => request_id, "operation" => operation, "outcome" => outcome,
             "error_code" => error_code, "provider_status" => provider_status,
+            "provider_error_code" => error.and_then(SyncError::provider_error_code),
             "retry_after_seconds" => retry_after, "duration_ms" => started.elapsed().as_millis());
         result
     }
@@ -294,32 +511,23 @@ impl EasyPostClient {
             Err(error) => Err(redact_request_error(error)),
         };
         match result {
-            Err(SyncError::Http {
-                status: 429,
-                retry_after,
-            }) => {
+            Err(mut error) if error.provider_status() == Some(429) => {
                 schedule.rate_limits = schedule.rate_limits.saturating_add(1);
                 let delay = 60_i64
                     .saturating_mul(2_i64.saturating_pow(schedule.rate_limits.saturating_sub(1)))
                     .clamp(60, MAX_RETRY_SECONDS)
-                    .max(retry_after.unwrap_or(0));
+                    .max(error.retry_after().unwrap_or(0));
                 schedule.cooldown =
                     Some(Instant::now() + Duration::from_secs(delay.unsigned_abs()));
-                Err(SyncError::Http {
-                    status: 429,
-                    retry_after: Some(delay),
-                })
+                error.set_retry_after(delay);
+                Err(error)
             }
-            Err(SyncError::Http {
-                status,
-                retry_after: Some(delay),
-            }) => {
-                schedule.cooldown =
-                    Some(Instant::now() + Duration::from_secs(delay.unsigned_abs()));
-                Err(SyncError::Http {
-                    status,
-                    retry_after: Some(delay),
-                })
+            Err(error) if error.retry_after().is_some() => {
+                if let Some(delay) = error.retry_after() {
+                    schedule.cooldown =
+                        Some(Instant::now() + Duration::from_secs(delay.unsigned_abs()));
+                }
+                Err(error)
             }
             Ok(body) => {
                 schedule.rate_limits = 0;
@@ -364,7 +572,7 @@ impl EasyPostClient {
     pub async fn register(
         &self,
         tracking_code: &str,
-        carrier: Option<&str>,
+        carrier: Option<Carrier>,
     ) -> Result<Tracker, SyncError> {
         self.observe("register", async {
             let url = self
@@ -382,8 +590,75 @@ impl EasyPostClient {
                     },
                 });
             let tracker = Self::read_tracker(&self.send(request).await?, tracking_code)?;
-            if carrier.is_some_and(|carrier| !carrier.eq_ignore_ascii_case(&tracker.carrier)) {
+            if carrier.is_some_and(|carrier| carrier != tracker.carrier) {
                 return Err(TrackerRejection::CarrierCodeMismatch.into());
+            }
+            Ok(tracker)
+        })
+        .await
+    }
+
+    /// Resolve an earlier POST whose response may have been lost. This lookup
+    /// never creates trackers; callers must not POST when its coverage is uncertain.
+    pub async fn reconcile_registration(
+        &self,
+        tracking_code: &str,
+        carrier: Option<Carrier>,
+        first_attempt: i64,
+    ) -> Result<Option<Tracker>, SyncError> {
+        self.observe("reconcile", async {
+            let now = time::OffsetDateTime::now_utc().unix_timestamp();
+            let start = shift_calendar_months(first_attempt, -3)?;
+            let start = time::OffsetDateTime::from_unix_timestamp(start)
+                .map_err(|_| SyncError::Configuration)?
+                .format(&time::format_description::well_known::Rfc3339)
+                .map_err(|_| SyncError::Configuration)?;
+            let end = time::OffsetDateTime::from_unix_timestamp(now.saturating_add(60))
+                .map_err(|_| SyncError::Configuration)?
+                .format(&time::format_description::well_known::Rfc3339)
+                .map_err(|_| SyncError::Configuration)?;
+            let mut query = vec![
+                ("tracking_codes[]", tracking_code.to_owned()),
+                ("page_size", "100".to_owned()),
+                ("start_datetime", start),
+                ("end_datetime", end),
+            ];
+            if let Some(carrier) = carrier {
+                query.push(("carrier", carrier.to_string()));
+            }
+            let url = self
+                .base
+                .join("trackers")
+                .map_err(|_| SyncError::Configuration)?;
+            let request = self
+                .client
+                .get(url)
+                .query(&query)
+                .basic_auth(&self.api_key, Some(""));
+            #[derive(Deserialize)]
+            struct Candidates {
+                trackers: Vec<Tracker>,
+                has_more: bool,
+            }
+            let page: Candidates = serde_json::from_slice(&self.send(request).await?)
+                .map_err(|_| SyncError::InvalidResponse)?;
+            if page.has_more || page.trackers.len() > 1 {
+                return Err(SyncError::RegistrationAmbiguous);
+            }
+            let tracker = page
+                .trackers
+                .into_iter()
+                .next()
+                .map(|tracker| {
+                    let tracker = Self::validate_tracker(tracker, tracking_code)?;
+                    if carrier.is_some_and(|carrier| carrier != tracker.carrier) {
+                        return Err(SyncError::InvalidResponse);
+                    }
+                    Ok(tracker)
+                })
+                .transpose()?;
+            if tracker.is_none() && now >= shift_calendar_months(first_attempt, 3)? {
+                return Err(SyncError::RegistrationExpired);
             }
             Ok(tracker)
         })
@@ -418,18 +693,17 @@ impl EasyPostClient {
     }
 
     fn read_tracker(body: &[u8], tracking_code: &str) -> Result<Tracker, SyncError> {
-        let mut tracker: Tracker =
-            serde_json::from_slice(body).map_err(|_| SyncError::InvalidResponse)?;
+        let tracker = serde_json::from_slice(body).map_err(|_| SyncError::InvalidResponse)?;
+        Self::validate_tracker(tracker, tracking_code)
+    }
+
+    fn validate_tracker(mut tracker: Tracker, tracking_code: &str) -> Result<Tracker, SyncError> {
         if !valid_tracker_id(&tracker.id)
             || tracker.tracking_code != tracking_code
-            || tracker.carrier.trim().is_empty()
-            || tracker.carrier.len() > 100
-            || tracker.carrier.chars().any(char::is_control)
             || tracker.status == Status::Expected
         {
             return Err(SyncError::InvalidResponse);
         }
-        tracker.carrier = tracker.carrier.trim().to_ascii_lowercase();
         tracker.public_url = tracker.public_url.and_then(safe_tracking_url);
         Ok(tracker)
     }
@@ -449,9 +723,6 @@ impl EasyPostClient {
                 status: status.as_u16(),
                 retry_after,
             };
-            if !matches!(status.as_u16(), 400 | 422) {
-                return Err(error);
-            }
             Some(error)
         } else {
             None
@@ -460,19 +731,29 @@ impl EasyPostClient {
             .content_length()
             .is_some_and(|length| length > MAX_BODY_BYTES as u64)
         {
-            return Err(SyncError::ResponseTooLarge);
+            return Err(http_error.unwrap_or(SyncError::ResponseTooLarge));
         }
         let mut body = Vec::new();
-        while let Some(chunk) = response.chunk().await.map_err(redact_request_error)? {
+        loop {
+            let chunk = match response.chunk().await {
+                Ok(Some(chunk)) => chunk,
+                Ok(None) => break,
+                Err(error) => return Err(http_error.unwrap_or_else(|| redact_request_error(error))),
+            };
             if chunk.len() > MAX_BODY_BYTES.saturating_sub(body.len()) {
-                return Err(SyncError::ResponseTooLarge);
+                return Err(http_error.unwrap_or(SyncError::ResponseTooLarge));
             }
             body.extend_from_slice(&chunk);
         }
-        if let Some(error) = http_error {
+        if let Some(http_error) = http_error {
+            let retry_after = http_error.retry_after();
             return Err(serde_json::from_slice::<TrackerError>(&body)
-                .map(|error| SyncError::Rejected(error.error.code))
-                .unwrap_or(error));
+                .map(|parsed| SyncError::ProviderRejected {
+                    rejection: parsed.error.code,
+                    status: status.as_u16(),
+                    retry_after,
+                })
+                .unwrap_or(http_error));
         }
         Ok(body)
     }
@@ -510,6 +791,30 @@ fn redact_request_error(error: reqwest::Error) -> SyncError {
     }
 }
 
+// EasyPost documents a calendar-month deduplication window. Clamp month-end
+// days explicitly rather than approximating three months with ninety days.
+fn shift_calendar_months(timestamp: i64, months: i32) -> Result<i64, SyncError> {
+    let at = time::OffsetDateTime::from_unix_timestamp(timestamp)
+        .map_err(|_| SyncError::Configuration)?;
+    let ordinal = at
+        .year()
+        .checked_mul(12)
+        .and_then(|year| year.checked_add(i32::from(u8::from(at.month())) - 1))
+        .and_then(|month| month.checked_add(months))
+        .ok_or(SyncError::Configuration)?;
+    let year = ordinal.div_euclid(12);
+    let month = time::Month::try_from(
+        u8::try_from(ordinal.rem_euclid(12) + 1).map_err(|_| SyncError::Configuration)?,
+    )
+    .map_err(|_| SyncError::Configuration)?;
+    for day in (1..=at.day()).rev() {
+        if let Ok(date) = time::Date::from_calendar_date(year, month, day) {
+            return Ok(date.with_time(at.time()).assume_utc().unix_timestamp());
+        }
+    }
+    Err(SyncError::Configuration)
+}
+
 pub(crate) fn poll_delay(status: Status, unchanged_seconds: i64, shipment_id: &str) -> Option<i64> {
     let base = if status.is_terminal() {
         return None;
@@ -539,6 +844,7 @@ struct Claim {
     tracking_number: String,
     tracking_carrier: Option<String>,
     tracker_id: Option<String>,
+    registration_started_at: Option<i64>,
     lease_token: String,
 }
 
@@ -549,6 +855,7 @@ struct CurrentSync {
     override_status: Option<String>,
     attempts: i64,
     status_age: i64,
+    carrier_tracking: String,
 }
 
 #[derive(Clone)]
@@ -573,12 +880,13 @@ impl SyncWorker {
              WHERE id = (
                  SELECT id FROM shipments
                  WHERE archived = 0 AND tracking_number IS NOT NULL
+                   AND registration_state != 'rejected'
                    AND next_attempt_at <= unixepoch()
                    AND (lease_until IS NULL OR lease_until <= unixepoch())
                  ORDER BY next_attempt_at, id LIMIT 1
              )
              RETURNING id, tracking_generation, tracking_number, tracking_carrier,
-                       tracker_id, lease_token",
+                       tracker_id, registration_started_at, lease_token",
         )
         .bind(Uuid::now_v7().to_string())
         .bind(LEASE_SECONDS)
@@ -588,16 +896,77 @@ impl SyncWorker {
 
         let mut client = self.client.with_request_id(&claim.lease_token);
         client.log = client.log.new(slog::o!("shipment_id" => claim.id.clone()));
+        let carrier = claim
+            .tracking_carrier
+            .as_deref()
+            .map(str::parse)
+            .transpose()
+            .map_err(|error: crate::carrier::UnsupportedCarrier| {
+                Error::Database(sqlx::Error::Decode(Box::new(error)))
+            })?;
         let observation = match &claim.tracker_id {
             Some(id) => client.retrieve(id, &claim.tracking_number).await,
             None => {
-                client
-                    .register(&claim.tracking_number, claim.tracking_carrier.as_deref())
-                    .await
+                // Commit the POST intent before crossing the network boundary.
+                // Cancellation or restart after this point must reconcile first.
+                let started = sqlx::query_scalar::<_, i64>(
+                    "UPDATE shipments SET registration_started_at=coalesce(registration_started_at,unixepoch())
+                     WHERE id=? AND tracking_generation=? AND lease_token=?
+                       AND lease_until>unixepoch() AND archived=0 AND next_attempt_at IS NOT NULL
+                     RETURNING registration_started_at",
+                ).bind(&claim.id).bind(claim.tracking_generation).bind(&claim.lease_token)
+                    .fetch_optional(&self.pool).await?;
+                let Some(started) = started else {
+                    self.release_cancelled_registration(&claim).await?;
+                    return Ok(true);
+                };
+                if claim.registration_started_at.is_some() {
+                    match client
+                        .reconcile_registration(&claim.tracking_number, carrier, started)
+                        .await
+                    {
+                        Ok(Some(tracker)) => Ok(tracker),
+                        Ok(None) => {
+                            // The lookup crossed a network boundary. Do not create
+                            // tracking for a record that was edited or archived meanwhile.
+                            let owned = sqlx::query_scalar::<_, bool>(
+                                "SELECT EXISTS(SELECT 1 FROM shipments WHERE id=? AND tracking_generation=? AND lease_token=? AND lease_until>unixepoch() AND archived=0 AND next_attempt_at IS NOT NULL)",
+                            ).bind(&claim.id).bind(claim.tracking_generation).bind(&claim.lease_token)
+                                .fetch_one(&self.pool).await?;
+                            if !owned {
+                                self.release_cancelled_registration(&claim).await?;
+                                return Ok(true);
+                            }
+                            match shift_calendar_months(started, 3) {
+                                Ok(expiry)
+                                    if time::OffsetDateTime::now_utc().unix_timestamp()
+                                        < expiry =>
+                                {
+                                    client.register(&claim.tracking_number, carrier).await
+                                }
+                                Ok(_) => Err(SyncError::RegistrationExpired),
+                                Err(error) => Err(error),
+                            }
+                        }
+                        Err(error) => Err(error),
+                    }
+                } else {
+                    client.register(&claim.tracking_number, carrier).await
+                }
             }
         };
         self.complete(&claim, observation).await?;
         Ok(true)
+    }
+
+    async fn release_cancelled_registration(&self, claim: &Claim) -> Result<(), Error> {
+        // A terminal correction can cancel the schedule while a read-only
+        // reconciliation is in flight. Release only this still-owned lease so
+        // a later explicit refresh can queue its single permitted probe.
+        sqlx::query("UPDATE shipments SET lease_token=NULL,lease_until=NULL WHERE id=? AND tracking_generation=? AND lease_token=? AND lease_until>unixepoch() AND archived=0 AND next_attempt_at IS NULL")
+            .bind(&claim.id).bind(claim.tracking_generation).bind(&claim.lease_token)
+            .execute(&self.pool).await?;
+        Ok(())
     }
 
     async fn complete(
@@ -612,7 +981,7 @@ impl SyncWorker {
             "UPDATE shipments SET lease_until = lease_until
              WHERE id = ? AND tracking_generation = ? AND lease_token = ?
                AND lease_until > unixepoch() AND archived = 0
-             RETURNING carrier_status, tracking_carrier, override_status, attempts,
+             RETURNING carrier_status, tracking_carrier, override_status, attempts, carrier_tracking,
                        max(0, unixepoch() - coalesce(unixepoch(status_since), unixepoch())) AS status_age",
         )
         .bind(&claim.id)
@@ -638,11 +1007,17 @@ impl SyncWorker {
         match observation {
             Ok(tracker) => {
                 let status = serde_json::to_string(&tracker.status)?;
+                let carrier_key = tracker.carrier.as_db_key();
                 let carrier_changed =
-                    current.tracking_carrier.as_deref() != Some(tracker.carrier.as_str());
+                    current.tracking_carrier.as_deref() != Some(carrier_key.as_str());
                 // Carrier is part of the tracking identity. A canonical carrier
                 // change must invalidate edits that read the earlier identity.
-                let changed = current.carrier_status.as_deref() != Some(&status) || carrier_changed;
+                let mut carrier_tracking: CarrierTracking =
+                    serde_json::from_str(&current.carrier_tracking)?;
+                let history_changed = carrier_tracking.merge(&tracker.carrier_tracking);
+                let changed = current.carrier_status.as_deref() != Some(&status)
+                    || carrier_changed
+                    || history_changed;
                 let next_delay = if override_terminal {
                     None
                 } else {
@@ -658,20 +1033,23 @@ impl SyncWorker {
                 };
                 sqlx::query(
                     "UPDATE shipments SET tracker_id = ?, carrier_status = ?,
-                         tracking_carrier = ?, tracking_url = ?,
+                         tracking_carrier = ?, tracking_url = ?, carrier_tracking = ?,
                          revision = revision + ?,
                          updated_at = CASE WHEN ? THEN strftime('%Y-%m-%dT%H:%M:%fZ', 'now') ELSE updated_at END,
                          last_success_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
                          last_attempt_at = unixepoch(),
                          status_since = CASE WHEN carrier_status = ? THEN coalesce(status_since, strftime('%Y-%m-%dT%H:%M:%fZ', 'now')) ELSE strftime('%Y-%m-%dT%H:%M:%fZ', 'now') END,
-                         last_error = NULL, attempts = 0, next_attempt_at = unixepoch() + ?,
+                         registration_state = 'registered',
+                         last_error = NULL, last_error_code = NULL, last_provider_status = NULL, last_provider_error_code = NULL,
+                         attempts = 0, next_attempt_at = unixepoch() + ?,
                          lease_token = NULL, lease_until = NULL
                      WHERE id = ?",
                 )
                 .bind(&tracker.id)
                 .bind(&status)
-                .bind(&tracker.carrier)
+                .bind(&carrier_key)
                 .bind(&tracker.public_url)
+                .bind(serde_json::to_string(&carrier_tracking)?)
                 .bind(i64::from(changed))
                 .bind(changed)
                 .bind(&status)
@@ -691,6 +1069,8 @@ impl SyncWorker {
                             current.tracking_carrier.as_deref().unwrap_or("unspecified"),
                             tracker.carrier,
                         )
+                    } else if previous_status == status {
+                        "Carrier tracking history or delivery details updated".into()
                     } else {
                         format!("Carrier status: {previous_status} -> {status}")
                     };
@@ -716,22 +1096,25 @@ impl SyncWorker {
                     60_i64.saturating_mul(2_i64.saturating_pow(
                         u32::try_from(attempts.saturating_sub(1)).unwrap_or(u32::MAX),
                     ));
-                let retry_after = match &error {
-                    SyncError::Http { retry_after, .. } => retry_after.unwrap_or(0),
-                    _ => 0,
-                };
+                let retry_after = error.retry_after().unwrap_or(0);
                 // Explicit refresh permits one probe after a terminal status,
                 // including when that probe fails. It must not restart polling.
                 let terminal =
                     override_terminal || previous_status.is_some_and(Status::is_terminal);
-                let delay = (!terminal)
+                let rejected = claim.tracker_id.is_none() && error.rejects_registration();
+                let delay = (!terminal && !rejected)
                     .then_some(exponential.clamp(60, MAX_RETRY_SECONDS).max(retry_after));
                 sqlx::query(
-                    "UPDATE shipments SET last_error = ?, attempts = ?, last_attempt_at = unixepoch(),
+                    "UPDATE shipments SET last_error = ?, last_error_code = ?, last_provider_status = ?, last_provider_error_code = ?,
+                         registration_state = ?, attempts = ?, last_attempt_at = unixepoch(),
                          next_attempt_at = unixepoch() + ?, lease_token = NULL, lease_until = NULL
                      WHERE id = ?",
                 )
                 .bind(error.to_string())
+                .bind(error.error_code())
+                .bind(error.provider_status().map(i64::from))
+                .bind(error.provider_error_code())
+                .bind(if claim.tracker_id.is_some() { "registered" } else if rejected { "rejected" } else { "pending" })
                 .bind(attempts)
                 .bind(delay)
                 .bind(&claim.id)
@@ -751,6 +1134,26 @@ mod tests {
         store::Store,
         sync::{Claim, EasyPostClient, SyncError, SyncWorker, poll_delay},
     };
+
+    #[test]
+    fn registration_windows_use_calendar_months_and_clamp_month_end() {
+        for (value, months, expected) in [
+            ("2024-11-30T12:34:56Z", 3, "2025-02-28T12:34:56Z"),
+            ("2023-11-30T12:34:56Z", 3, "2024-02-29T12:34:56Z"),
+            ("2026-03-31T12:34:56Z", -3, "2025-12-31T12:34:56Z"),
+            ("2026-05-31T12:34:56Z", -3, "2026-02-28T12:34:56Z"),
+        ] {
+            let parse = |value| {
+                time::OffsetDateTime::parse(value, &time::format_description::well_known::Rfc3339)
+                    .unwrap()
+                    .unix_timestamp()
+            };
+            assert_eq!(
+                crate::sync::shift_calendar_months(parse(value), months).unwrap(),
+                parse(expected)
+            );
+        }
+    }
 
     #[test]
     fn polling_offsets_are_stable_bounded_and_spread_a_batch() {
@@ -775,9 +1178,11 @@ mod tests {
         let shipment = store
             .create(
                 CreateShipment {
+                    direction: crate::models::Direction::Inbound,
                     title: "Parcel".into(),
                     merchant: None,
                     order_reference: None,
+                    signature_required: None,
                     tracking: Tracking {
                         number: "TERMINAL-TRACK".into(),
                         carrier: None,
@@ -796,6 +1201,7 @@ mod tests {
             tracking_number: shipment.tracking.number,
             tracking_carrier: None,
             tracker_id: None,
+            registration_started_at: None,
             lease_token: "test-claim".into(),
         };
         sqlx::query("UPDATE shipments SET lease_token=?,lease_until=unixepoch()+60 WHERE id=?")

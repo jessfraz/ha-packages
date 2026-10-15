@@ -15,13 +15,16 @@ fn legacy_shipment(tracking: Option<Tracking>, archived: bool) -> Shipment<Optio
     let id = Uuid::now_v7();
     Shipment {
         id,
+        direction: Default::default(),
         revision: 1,
         title: "Migration test parcel".into(),
         merchant: None,
         order_reference: None,
+        signature_required: None,
         tracking,
         status: Status::Expected,
         carrier_status: None,
+        carrier_tracking: Default::default(),
         status_override: None,
         archived,
         created_at: "2026-01-01T00:00:00Z".into(),
@@ -31,6 +34,11 @@ fn legacy_shipment(tracking: Option<Tracking>, archived: bool) -> Shipment<Optio
             key: id.to_string(),
         }],
         sync: SyncState {
+            registration_state: Default::default(),
+            registration_started_at: None,
+            error_code: None,
+            provider_status: None,
+            provider_error_code: None,
             tracker_id: None,
             tracking_url: None,
             last_success_at: None,
@@ -44,7 +52,7 @@ fn legacy_shipment(tracking: Option<Tracking>, archived: bool) -> Shipment<Optio
 fn tracking(number: &str) -> Tracking {
     Tracking {
         number: number.into(),
-        carrier: Some("usps".into()),
+        carrier: Some("usps".parse().unwrap()),
     }
 }
 
@@ -83,7 +91,7 @@ async fn seed_legacy_record(
         current
             .tracking
             .as_ref()
-            .and_then(|value| value.carrier.as_deref()),
+            .and_then(|value| value.carrier.as_ref().map(|carrier| carrier.as_db_key())),
     )
     .bind(current.tracking.as_ref().map(|value| value.number.as_str()))
     .bind(current.archived)
@@ -175,17 +183,22 @@ async fn required_tracking_migration_preserves_valid_records_and_historical_snap
         .await;
     }
 
-    let valid = legacy_shipment(Some(tracking("VALID123")), false);
+    let mut valid = legacy_shipment(Some(tracking("VALID123")), false);
+    valid.sources[0].key = "valid-source".into();
     let valid_input = CreateShipment {
+        direction: shipments::models::Direction::Inbound,
         title: valid.title.clone(),
         merchant: valid.merchant.clone(),
         order_reference: valid.order_reference.clone(),
+        signature_required: None,
         tracking: valid.tracking.clone().unwrap(),
         source: Some(valid.sources[0].clone()),
     };
     let fingerprint = format!(
         "{:x}",
-        Sha256::digest(serde_json::to_vec(&valid_input).unwrap())
+        // Exact 0.3.1 CreateShipment serialization: lowercase carrier and no
+        // signature field. New API models must still replay this old record.
+        Sha256::digest(br#"{"title":"Migration test parcel","merchant":null,"order_reference":null,"tracking":{"carrier":"usps","number":"VALID123"},"source":{"namespace":"migration-test","key":"valid-source"}}"#)
     );
     seed_legacy_record(&legacy, &valid, &valid, "valid-create", &fingerprint).await;
 
@@ -326,4 +339,310 @@ async fn required_tracking_migration_preserves_valid_records_and_historical_snap
         }
         store.close().await.unwrap();
     }
+}
+
+#[tokio::test]
+async fn carrier_history_upgrade_queues_one_enrichment_without_breaking_retry_or_archive_state() {
+    let directory = tempfile::tempdir().unwrap();
+    let migrations = directory.path().join("old-migrations");
+    std::fs::create_dir(&migrations).unwrap();
+    for filename in [
+        "0001_registry.sql",
+        "0002_agent_credentials.sql",
+        "0003_require_tracking.sql",
+        "0004_smart_polling.sql",
+    ] {
+        std::fs::copy(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("migrations")
+                .join(filename),
+            migrations.join(filename),
+        )
+        .unwrap();
+    }
+    let path = directory.path().join("upgrade.sqlite3");
+    let legacy = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(
+            SqliteConnectOptions::new()
+                .filename(&path)
+                .create_if_missing(true)
+                .foreign_keys(true),
+        )
+        .await
+        .unwrap();
+    Migrator::new(migrations.as_path())
+        .await
+        .unwrap()
+        .run(&legacy)
+        .await
+        .unwrap();
+    let before: i64 = sqlx::query_scalar("SELECT unixepoch()")
+        .fetch_one(&legacy)
+        .await
+        .unwrap();
+    let mut expected = Vec::new();
+    for (archived, terminal, manual_terminal, registered, failed, previous_due, queued) in [
+        (false, true, false, true, false, None, true),
+        (false, false, true, true, false, None, true),
+        (true, true, false, true, false, None, false),
+        (true, false, false, true, false, Some(before + 1800), false),
+        (false, false, false, true, true, Some(before + 900), false),
+        (false, false, false, true, true, Some(before - 10), true),
+        (false, false, false, true, false, Some(before + 1800), true),
+        (false, false, false, false, false, Some(before + 1800), true),
+        (false, false, false, true, false, Some(before - 10), true),
+    ] {
+        let id = Uuid::now_v7();
+        sqlx::query("INSERT INTO shipments(id,title,tracking_number,tracking_carrier,archived,carrier_status,override_status,tracker_id,last_error,next_attempt_at) VALUES(?,?,?,?,?,?,?,?,?,?)")
+            .bind(id.to_string()).bind("Upgrade test parcel").bind(format!("UPGRADE{id}"))
+            .bind("usps").bind(archived).bind(if terminal { "\"delivered\"" } else { "\"in_transit\"" })
+            .bind(manual_terminal.then_some("\"delivered\""))
+            .bind(registered.then_some("trk_upgrade"))
+            .bind(failed.then_some("Temporary provider error")).bind(previous_due)
+            .execute(&legacy).await.unwrap();
+        expected.push((id, previous_due, queued));
+    }
+    legacy.close().await;
+    let upgraded = Store::open(&path).await.unwrap();
+    let after: i64 = sqlx::query_scalar("SELECT unixepoch()")
+        .fetch_one(upgraded.pool())
+        .await
+        .unwrap();
+    for (id, previous_due, queued) in &expected {
+        let actual: Option<i64> =
+            sqlx::query_scalar("SELECT next_attempt_at FROM shipments WHERE id=?")
+                .bind(id.to_string())
+                .fetch_one(upgraded.pool())
+                .await
+                .unwrap();
+        if *queued {
+            assert!((before..=after).contains(&actual.unwrap()));
+        } else {
+            assert_eq!(actual, *previous_due);
+        }
+        let shipment = upgraded.get(*id).await.unwrap();
+        assert!(shipment.carrier_tracking.events.is_empty());
+        assert!(shipment.signature_required.is_none());
+    }
+    let delivered_id = expected[0].0;
+    sqlx::query("UPDATE shipments SET next_attempt_at=NULL WHERE id=?")
+        .bind(delivered_id.to_string())
+        .execute(upgraded.pool())
+        .await
+        .unwrap();
+    upgraded.close().await.unwrap();
+    let reopened = Store::open(&path).await.unwrap();
+    assert!(
+        reopened
+            .get(delivered_id)
+            .await
+            .unwrap()
+            .sync
+            .next_attempt_at
+            .is_none(),
+        "enrichment must only be queued once during the migration"
+    );
+    reopened.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn direction_upgrade_marks_existing_and_historical_shipments_inbound() {
+    use shipments::models::{Direction, Patch, UpdateShipment};
+    let directory = tempfile::tempdir().unwrap();
+    let migrations = directory.path().join("before-direction");
+    std::fs::create_dir(&migrations).unwrap();
+    for filename in [
+        "0001_registry.sql",
+        "0002_agent_credentials.sql",
+        "0003_require_tracking.sql",
+        "0004_smart_polling.sql",
+        "0005_carrier_history.sql",
+        "0006_delivery_sort.sql",
+    ] {
+        std::fs::copy(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("migrations")
+                .join(filename),
+            migrations.join(filename),
+        )
+        .unwrap();
+    }
+    let path = directory.path().join("direction-upgrade.sqlite3");
+    let legacy = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(
+            SqliteConnectOptions::new()
+                .filename(&path)
+                .create_if_missing(true)
+                .foreign_keys(true),
+        )
+        .await
+        .unwrap();
+    Migrator::new(migrations.as_path())
+        .await
+        .unwrap()
+        .run(&legacy)
+        .await
+        .unwrap();
+    let mut ids = Vec::new();
+    for archived in [false, true] {
+        let shipment = legacy_shipment(
+            Some(tracking(if archived {
+                "ARCHIVED-DIRECTION"
+            } else {
+                "ACTIVE-DIRECTION"
+            })),
+            archived,
+        );
+        sqlx::query("INSERT INTO shipments(id,title,tracking_number,tracking_carrier,archived)VALUES(?,?,?,?,?)")
+            .bind(shipment.id.to_string()).bind(&shipment.title).bind(&shipment.tracking.as_ref().unwrap().number).bind("usps").bind(archived).execute(&legacy).await.unwrap();
+        // The older serialized snapshot has no direction field at all.
+        let snapshot = serde_json::to_string(&shipment)
+            .unwrap()
+            .replace("\"direction\":\"inbound\",", "");
+        sqlx::query("INSERT INTO events(shipment_id,kind,actor_id,detail,snapshot)VALUES(?,'\"created\"','test','Legacy create',?)")
+            .bind(shipment.id.to_string()).bind(snapshot).execute(&legacy).await.unwrap();
+        ids.push(shipment.id);
+    }
+    legacy.close().await;
+    let upgraded = Store::open(&path).await.unwrap();
+    for id in &ids {
+        assert_eq!(
+            upgraded.get(*id).await.unwrap().direction,
+            Direction::Inbound
+        );
+        assert_eq!(
+            upgraded.events(*id, 0, 10).await.unwrap()[0]
+                .snapshot
+                .as_ref()
+                .unwrap()
+                .direction,
+            Direction::Inbound
+        );
+    }
+    let current = upgraded.get(ids[0]).await.unwrap();
+    upgraded
+        .update(
+            current.id,
+            current.revision,
+            UpdateShipment {
+                direction: Patch {
+                    value: Some(Some(Direction::Outbound)),
+                },
+                ..Default::default()
+            },
+            "owner",
+            None,
+        )
+        .await
+        .unwrap();
+    assert!(
+        sqlx::query("UPDATE shipments SET direction='sideways' WHERE id=?")
+            .bind(current.id.to_string())
+            .execute(upgraded.pool())
+            .await
+            .is_err()
+    );
+    upgraded.close().await.unwrap();
+    let reopened = Store::open(&path).await.unwrap();
+    assert_eq!(
+        reopened.get(ids[0]).await.unwrap().direction,
+        Direction::Outbound
+    );
+    assert_eq!(
+        reopened.get(ids[1]).await.unwrap().direction,
+        Direction::Inbound
+    );
+    reopened.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn pending_registration_upgrade_preserves_known_trackers_attempts_and_retry_advice() {
+    use shipments::models::RegistrationState;
+    let directory = tempfile::tempdir().unwrap();
+    let migrations = directory.path().join("before-pending");
+    std::fs::create_dir(&migrations).unwrap();
+    for filename in [
+        "0001_registry.sql",
+        "0002_agent_credentials.sql",
+        "0003_require_tracking.sql",
+        "0004_smart_polling.sql",
+        "0005_carrier_history.sql",
+        "0006_delivery_sort.sql",
+        "0007_direction.sql",
+    ] {
+        std::fs::copy(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("migrations")
+                .join(filename),
+            migrations.join(filename),
+        )
+        .unwrap();
+    }
+    let path = directory.path().join("pending-upgrade.sqlite3");
+    let legacy = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(
+            SqliteConnectOptions::new()
+                .filename(&path)
+                .create_if_missing(true)
+                .foreign_keys(true),
+        )
+        .await
+        .unwrap();
+    Migrator::new(migrations.as_path())
+        .await
+        .unwrap()
+        .run(&legacy)
+        .await
+        .unwrap();
+    let now: i64 = sqlx::query_scalar("SELECT unixepoch()")
+        .fetch_one(&legacy)
+        .await
+        .unwrap();
+    let mut cases = Vec::new();
+    for (registered, archived, terminal, failed, attempted, next) in [
+        (true, false, false, false, Some(123), Some(now + 1800)),
+        (true, true, true, false, None, None),
+        (false, false, false, false, None, None),
+        (false, false, false, true, Some(123), Some(now + 900)),
+        (false, false, true, false, Some(123), None),
+        (false, true, false, false, Some(123), None),
+    ] {
+        let id = Uuid::now_v7();
+        sqlx::query("INSERT INTO shipments(id,title,tracking_number,tracking_carrier,tracker_id,archived,carrier_status,last_error,last_attempt_at,next_attempt_at)VALUES(?,?,?,?,?,?,?,?,?,?)")
+            .bind(id.to_string()).bind("Pending upgrade parcel").bind(format!("PENDING{id}")).bind("usps")
+            .bind(registered.then_some("trk_existing")).bind(archived)
+            .bind(if terminal { "\"delivered\"" } else { "\"unknown\"" })
+            .bind(failed.then_some("Provider unavailable")).bind(attempted).bind(next)
+            .execute(&legacy).await.unwrap();
+        cases.push((id, registered, archived, terminal, failed, attempted, next));
+    }
+    legacy.close().await;
+    let upgraded = Store::open(&path).await.unwrap();
+    for (id, registered, archived, terminal, failed, attempted, previous_next) in cases {
+        let shipment = upgraded.get(id).await.unwrap();
+        assert_eq!(
+            shipment.sync.registration_state,
+            if registered {
+                RegistrationState::Registered
+            } else {
+                RegistrationState::Pending
+            }
+        );
+        assert_eq!(
+            shipment.sync.registration_started_at,
+            if registered { None } else { attempted }
+        );
+        assert!(shipment.sync.error_code.is_none());
+        assert!(shipment.sync.provider_status.is_none());
+        assert!(shipment.sync.provider_error_code.is_none());
+        if registered || archived || terminal || failed {
+            assert_eq!(shipment.sync.next_attempt_at, previous_next);
+        } else {
+            assert!(shipment.sync.next_attempt_at.unwrap() >= now);
+        }
+    }
+    upgraded.close().await.unwrap();
 }

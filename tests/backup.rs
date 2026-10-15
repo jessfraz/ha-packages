@@ -19,11 +19,13 @@ async fn cold_backup_restores_records_history_and_replay_without_wal() {
         .unwrap();
     assert!(store.revoke_agent(revoked.id).await.unwrap());
     let input = CreateShipment {
+        direction: shipments::models::Direction::Inbound,
         title: "Backup parcel".into(),
         merchant: None,
         order_reference: Some("TEST-123".into()),
+        signature_required: None,
         tracking: Tracking {
-            carrier: Some("usps".into()),
+            carrier: Some("usps".parse().unwrap()),
             number: "BACKUP123".into(),
         },
         source: Some(Source {

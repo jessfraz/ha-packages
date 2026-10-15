@@ -54,6 +54,7 @@ struct Entry {
     operation: Option<String>,
     outcome: Option<String>,
     provider_status: Option<u16>,
+    provider_error_code: Option<String>,
     retry_after_seconds: Option<u64>,
     duration_ms: Option<u64>,
 }
@@ -265,6 +266,7 @@ fn application_events_only_accept_typed_safe_fields_and_fixed_messages() {
     slog::warn!(logger, "provider_request";
         "request_id" => request_id.to_string(), "operation" => "register", "outcome" => "rejected",
         "error_code" => "tracking_invalid", "provider_status" => Some(422_u16),
+        "provider_error_code" => "TRACKER.INVALID_PARAMS",
         "retry_after_seconds" => Some(60_i64), "duration_ms" => 12_u128,
         "tracking_number" => "PRIVATE_TRACKING_SENTINEL", "api_key" => "PRIVATE_API_KEY_SENTINEL",
         "error_message_internal" => "PRIVATE_ERROR_SENTINEL",
@@ -272,6 +274,7 @@ fn application_events_only_accept_typed_safe_fields_and_fixed_messages() {
     slog::warn!(logger, "provider_request";
         "request_id" => "PRIVATE_REQUEST_ID_SENTINEL", "operation" => "PRIVATE_OPERATION_SENTINEL",
         "error_code" => "PRIVATE_ERROR_CODE_SENTINEL", "duration_ms" => u128::MAX,
+        "provider_error_code" => "PRIVATE_PROVIDER_CODE_SENTINEL",
     );
     slog::warn!(
         logger,
@@ -287,11 +290,16 @@ fn application_events_only_accept_typed_safe_fields_and_fixed_messages() {
     assert_eq!(entry.outcome.as_deref(), Some("rejected"));
     assert_eq!(entry.error_code.as_deref(), Some("tracking_invalid"));
     assert_eq!(entry.provider_status, Some(422));
+    assert_eq!(
+        entry.provider_error_code.as_deref(),
+        Some("TRACKER.INVALID_PARAMS")
+    );
     assert_eq!(entry.retry_after_seconds, Some(60));
     assert_eq!(entry.duration_ms, Some(12));
     assert!(entries[1].request_id.is_none());
     assert!(entries[1].operation.is_none());
     assert!(entries[1].error_code.is_none());
+    assert!(entries[1].provider_error_code.is_none());
     assert!(entries[1].duration_ms.is_none());
     assert!(!capture.text().contains("PRIVATE_"));
 }

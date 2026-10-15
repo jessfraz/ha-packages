@@ -15,7 +15,7 @@ from .coordinator import ShipmentsCoordinator
 _UUID = r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
 _ROUTES = (
     (re.compile(r"shipments"), frozenset({"GET", "POST"}), False),
-    (re.compile(r"summary|system"), frozenset({"GET"}), False),
+    (re.compile(r"summary|system|carriers"), frozenset({"GET"}), False),
     (re.compile(rf"shipments/{_UUID}"), frozenset({"GET", "PATCH"}), False),
     (re.compile(rf"shipments/{_UUID}/events"), frozenset({"GET"}), False),
     (re.compile(rf"shipments/{_UUID}/(?:sources|refresh)"), frozenset({"POST"}), False),
@@ -28,6 +28,9 @@ _ROUTES = (
 _LIST_QUERY = {
     "tracking_number",
     "carrier",
+    "direction",
+    "sort",
+    "exceptions",
     "order_reference",
     "source_namespace",
     "source_key",
@@ -65,17 +68,14 @@ class ShipmentsView(HomeAssistantView):
             raise web.HTTPNotFound
         if request.method not in route[1]:
             raise web.HTTPMethodNotAllowed(request.method, route[1])
-        allowed_query = (
-            (
-                _LIST_QUERY
-                if path == "shipments"
-                else _EVENT_QUERY
-                if path.endswith("/events")
-                else set()
-            )
-            if request.method == "GET"
-            else set()
-        )
+        allowed_query: set[str] = set()
+        if request.method == "GET":
+            if path == "shipments":
+                allowed_query = _LIST_QUERY
+            elif path == "summary":
+                allowed_query = {"direction"}
+            elif path.endswith("/events"):
+                allowed_query = _EVENT_QUERY
         if len(request.query_string) > 4096 or request.query.keys() - allowed_query:
             raise web.HTTPBadRequest(reason="Unsupported query parameters")
         user = request["hass_user"]

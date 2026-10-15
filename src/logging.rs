@@ -47,6 +47,8 @@ struct Fields {
     #[serde(skip_serializing_if = "Option::is_none")]
     provider_status: Option<u16>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    provider_error_code: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     retry_after_seconds: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     duration_ms: Option<u64>,
@@ -89,7 +91,9 @@ impl<W: Write + Send> Drain for JsonLog<W> {
             return Ok(());
         };
         let warning = fields.response_code.is_some_and(|status| status >= 400)
-            || fields.outcome.is_some_and(|outcome| outcome != "success")
+            || fields
+                .outcome
+                .is_some_and(|outcome| !matches!(outcome, "success" | "saved"))
             || matches!(
                 event,
                 "request_cancelled" | "request_panicked" | "server_accept_error"
@@ -133,6 +137,7 @@ fn event_name(message: &str) -> Option<&'static str> {
         "accept error" => "server_accept_error",
         "provider_request" => "provider_request",
         "tracking_verification" => "tracking_verification",
+        "tracking_registration" => "tracking_registration",
         "tracking_sync" => "tracking_sync",
         "integration_discovery" => "integration_discovery",
         _ => return None,
@@ -155,6 +160,20 @@ impl slog::Serializer for Fields {
             "uri" => self.route = Some(route_template(&value.to_string())),
             "response_code" => self.response_code = http_status(&value.to_string()),
             "provider_status" => self.provider_status = http_status(&value.to_string()),
+            "provider_error_code" => {
+                self.provider_error_code = allowed(
+                    &value.to_string(),
+                    &[
+                        "CREDENTIALS_NOT_FOUND",
+                        "TRACKER.NO_CARRIER_FOR_CODE",
+                        "TRACKER.CARRIER_CODE_MISMATCH",
+                        "TRACKER.MULTIPLE_CARRIERS_FOR_CODE",
+                        "TRACKER.INVALID_PARAMS",
+                        "TRACKER.INVALID_TEST_CODE",
+                        "TRACKER.NO_CARRIER_ACCOUNT",
+                    ],
+                );
+            }
             "latency_us" => self.latency_us = bounded_number(&value.to_string(), 86_400_000_000),
             "duration_ms" => self.duration_ms = bounded_number(&value.to_string(), 86_400_000),
             "retry_after_seconds" => {
@@ -165,6 +184,7 @@ impl slog::Serializer for Fields {
                     &value.to_string(),
                     &[
                         "register",
+                        "reconcile",
                         "retrieve",
                         "health",
                         "create",
@@ -179,6 +199,7 @@ impl slog::Serializer for Fields {
                     &value.to_string(),
                     &[
                         "success",
+                        "saved",
                         "rejected",
                         "error",
                         "throttled",
@@ -192,6 +213,8 @@ impl slog::Serializer for Fields {
                     &value.to_string(),
                     &[
                         "tracking_required",
+                        "registration_ambiguous",
+                        "registration_expired",
                         "tracking_unsupported",
                         "tracking_invalid",
                         "tracking_carrier_mismatch",
@@ -200,6 +223,7 @@ impl slog::Serializer for Fields {
                         "tracking_provider_unconfigured",
                         "tracking_provider_credentials",
                         "tracking_carrier_account_required",
+                        "tracking_carrier_credentials_required",
                         "tracking_verification_rate_limited",
                         "tracking_verification_unavailable",
                         "provider_http",
@@ -272,6 +296,7 @@ fn route_template(uri: &str) -> &'static str {
         "/style.css" => "/style.css",
         "/openapi.json" => "/openapi.json",
         "/v1/shipments" => "/v1/shipments",
+        "/v1/carriers" => "/v1/carriers",
         "/v1/summary" => "/v1/summary",
         "/v1/system" => "/v1/system",
         "/v1/installation" => "/v1/installation",

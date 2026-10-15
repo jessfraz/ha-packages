@@ -45,6 +45,8 @@ pub enum CheckStatus {
 pub struct Check {
     pub status: CheckStatus,
     pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub checked_at: Option<u64>,
 }
 
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
@@ -82,8 +84,8 @@ impl Installation {
         let Some(provider) = provider else {
             return;
         };
-        // Serialize outbound probes separately from their short-lived cached
-        // results. Readers never wait for a provider network request.
+        // Serialize outbound probes separately from their completed result.
+        // Readers never wait for a provider network request.
         let _probe = self.probe.lock().await;
         if self
             .provider
@@ -94,13 +96,20 @@ impl Installation {
         {
             return;
         }
-        let result = match provider.check_connection().await {
-            Ok(()) => Check::pass("EasyPost accepted the key. Read-only tracking access works."),
+        let mut result = match provider.check_connection().await {
+            Ok(()) => Check::pass(
+                "Last check: EasyPost accepted the key and allowed read-only tracking access.",
+            ),
             Err(error) => Check {
                 status: CheckStatus::Attention,
-                message: error.to_string(),
+                message: format!("Last EasyPost check failed: {error}"),
+                checked_at: None,
             },
         };
+        result.checked_at = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .ok()
+            .map(|elapsed| elapsed.as_secs());
         *self.provider.lock().await = Some((Instant::now(), result));
     }
 
@@ -122,6 +131,7 @@ impl Installation {
             Check {
                 status: CheckStatus::NotApplicable,
                 message: "Standalone server. The Home Assistant integration is optional.".into(),
+                checked_at: None,
             }
         };
         let authentication = if recent.is_some() {
@@ -137,15 +147,12 @@ impl Installation {
             Check {
                 status: CheckStatus::Attention,
                 message: "Configure the EasyPost API key before adding shipments or changing tracking numbers. Existing records remain available.".into(),
+                checked_at: None,
             }
         } else {
             let provider = self.provider.lock().await;
-            if let Some((at, result)) = provider.as_ref() {
-                if at.elapsed() < Duration::from_secs(300) {
-                    result.clone()
-                } else {
-                    Check::attention("The EasyPost check has expired. Run checks again.")
-                }
+            if let Some((_, result)) = provider.as_ref() {
+                result.clone()
             } else {
                 Check::attention(
                     "EasyPost is configured. Run checks to verify the key and connectivity.",
@@ -153,13 +160,13 @@ impl Installation {
             }
         };
         let backup = match recent.map(|(_, report)| &report.backup.status) {
-            None if !self.supervised => Check { status: CheckStatus::NotApplicable, message: "Standalone server. Stop it before backing up its database and credentials. Home Assistant backup inventory is not available here.".into() },
+            None if !self.supervised => Check { status: CheckStatus::NotApplicable, message: "Standalone server. Stop it before backing up its database and credentials. Home Assistant backup inventory is not available here.".into(), checked_at: None },
             Some(BackupStatus::Complete) => Check::pass("A Home Assistant backup includes this app and the integration configuration. Restore has not been tested."),
             Some(BackupStatus::AppOnly) => Check::attention("A backup includes the app, but not Home Assistant configuration. Back up both to preserve pairing."),
             Some(BackupStatus::Outdated) => Check::attention("The available app backup predates pairing. Create a new backup containing Shipments and Home Assistant configuration to preserve this connection."),
             Some(BackupStatus::Missing) => Check::attention("No backup includes this app. Create a Home Assistant backup containing Shipments and Home Assistant configuration."),
-            Some(BackupStatus::Standalone) => Check { status: CheckStatus::NotApplicable, message: "Standalone backend. Stop it before backing up its data and credentials; back up Home Assistant configuration separately.".into() },
-            _ => Check { status: CheckStatus::Unavailable, message: "Backup status is unavailable. Check Settings → System → Backups and include Shipments and Home Assistant configuration.".into() },
+            Some(BackupStatus::Standalone) => Check { status: CheckStatus::NotApplicable, message: "Standalone backend. Stop it before backing up its data and credentials; back up Home Assistant configuration separately.".into(), checked_at: None },
+            _ => Check { status: CheckStatus::Unavailable, message: "Backup status is unavailable. Check Settings → System → Backups and include Shipments and Home Assistant configuration.".into(), checked_at: None },
         };
         InstallationReport {
             backend: Check::pass("The app is running and SQLite is responding."),
@@ -177,12 +184,14 @@ impl Check {
         Self {
             status: CheckStatus::Pass,
             message: message.into(),
+            checked_at: None,
         }
     }
     fn attention(message: &str) -> Self {
         Self {
             status: CheckStatus::Attention,
             message: message.into(),
+            checked_at: None,
         }
     }
 }
@@ -241,6 +250,111 @@ mod tests {
             "{}",
             report.easypost.message
         );
+    }
+
+    #[tokio::test]
+    async fn old_successful_provider_diagnostic_keeps_its_result_and_timestamp() {
+        use crate::installation::Check;
+
+        #[derive(serde::Deserialize)]
+        struct DiagnosticTime {
+            checked_at: Option<u64>,
+        }
+
+        let installation = Installation::new(false);
+        let result: Check = serde_json::from_str(
+            r#"{"status":"pass","message":"Last EasyPost check succeeded.","checked_at":1700000000}"#,
+        )
+        .unwrap();
+        *installation.provider.lock().await =
+            Some((Instant::now() - Duration::from_secs(86_400), result));
+
+        let report = installation.report(true).await;
+        assert_eq!(
+            report.easypost.status,
+            CheckStatus::Pass,
+            "a completed diagnostic must not expire: {}",
+            report.easypost.message
+        );
+        let observed: DiagnosticTime =
+            serde_json::from_slice(&serde_json::to_vec(&report.easypost).unwrap()).unwrap();
+        assert_eq!(observed.checked_at, Some(1_700_000_000));
+
+        let disabled = installation.report(false).await;
+        assert_eq!(disabled.easypost.status, CheckStatus::Attention);
+        let observed: DiagnosticTime =
+            serde_json::from_slice(&serde_json::to_vec(&disabled.easypost).unwrap()).unwrap();
+        assert_eq!(observed.checked_at, None);
+    }
+
+    #[tokio::test]
+    async fn explicit_provider_probe_replaces_a_previous_pass_and_debounces_rechecks() {
+        use crate::sync::EasyPostClient;
+        use std::time::{SystemTime, UNIX_EPOCH};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let installation = Installation::new(false);
+        for (status, expected) in [(200, CheckStatus::Pass), (401, CheckStatus::Attention)] {
+            if let Some((at, result)) = installation.provider.lock().await.as_mut() {
+                *at = Instant::now() - Duration::from_secs(61);
+                result.checked_at = Some(1);
+            }
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let origin = format!("http://{}/", listener.local_addr().unwrap());
+            let server = tokio::spawn(async move {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut request = Vec::new();
+                while !request.ends_with(b"\r\n\r\n") {
+                    let mut byte = [0];
+                    stream.read_exact(&mut byte).await.unwrap();
+                    request.push(byte[0]);
+                    assert!(request.len() < 4096);
+                }
+                assert!(request.starts_with(b"GET /trackers?page_size=1 "));
+                let body = if status == 200 {
+                    r#"{"trackers":[],"has_more":false}"#
+                } else {
+                    "private provider message"
+                };
+                let response = format!(
+                    "HTTP/1.1 {status} Test\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                stream.write_all(response.as_bytes()).await.unwrap();
+            });
+            let provider =
+                EasyPostClient::for_loopback("unused-diagnostic-test-key", &origin).unwrap();
+            let before = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_secs();
+            tokio::time::timeout(Duration::from_secs(3), async {
+                installation.check_provider(Some(&provider)).await;
+                server.await.unwrap();
+            })
+            .await
+            .unwrap();
+            let checked = installation.report(true).await.easypost;
+            assert_eq!(checked.status, expected);
+            let after = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_secs();
+            assert!((before..=after).contains(&checked.checked_at.unwrap()));
+            if status == 401 {
+                assert_eq!(
+                    checked.message,
+                    "Last EasyPost check failed: EasyPost returned HTTP 401"
+                );
+            }
+            // The HTTP fixture has closed. Rechecks within a minute retain the
+            // completed result instead of attempting another connection.
+            installation.check_provider(Some(&provider)).await;
+            let cached = installation.report(true).await.easypost;
+            assert_eq!(cached.status, checked.status);
+            assert_eq!(cached.message, checked.message);
+            assert_eq!(cached.checked_at, checked.checked_at);
+        }
     }
 
     #[tokio::test]

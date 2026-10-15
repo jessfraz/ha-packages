@@ -3,9 +3,7 @@
 import asyncio
 import json
 import os
-import sqlite3
 from collections.abc import AsyncIterator
-from contextlib import closing
 from dataclasses import dataclass, field
 from datetime import timedelta
 from pathlib import Path
@@ -15,7 +13,6 @@ from aiohttp import ClientError, ClientTimeout
 from homeassistant.config_entries import SOURCE_HASSIO, SOURCE_USER, ConfigEntryState
 from homeassistant.core import Context, HomeAssistant
 from homeassistant.data_entry_flow import FlowResultType
-from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.service_info.hassio import HassioServiceInfo
 from homeassistant.util import dt as dt_util
@@ -29,8 +26,6 @@ from custom_components.shipments.const import (
     SUMMARY_KEYS,
 )
 
-from .conftest import SHIPMENT_ID
-
 OWNER_TOKEN = "test-owner-credential-at-least-32-characters"
 PREFIX = "/api/shipments/v1"
 
@@ -40,7 +35,6 @@ class RustBackend:
     """A disposable real service with credentials excluded from test output."""
 
     origin: str
-    database: Path
     owner_token: str = field(repr=False)
     integration_token: str | None = field(default=None, repr=False)
 
@@ -115,7 +109,7 @@ async def rust_backend(
                 except ClientError, TimeoutError:
                     pass
                 await asyncio.sleep(0.01)
-        yield RustBackend(origin, database, owner_token, integration_token)
+        yield RustBackend(origin, owner_token, integration_token)
     finally:
         if process.returncode is None:
             process.terminate()
@@ -127,23 +121,6 @@ async def rust_backend(
                 await process.wait()
 
 
-def seed_tracked_shipment(database: Path) -> None:
-    """Arrange a previously accepted parcel without calling a live provider."""
-    with closing(sqlite3.connect(database)) as connection, connection:
-        connection.execute(
-            "INSERT INTO shipments "
-            "(id, title, tracking_number, tracking_carrier, carrier_status) "
-            "VALUES (?, ?, ?, ?, ?)",
-            (
-                SHIPMENT_ID,
-                "Office supplies",
-                "TEST123",
-                "usps",
-                json.dumps("pre_transit"),
-            ),
-        )
-
-
 async def test_ha_to_rust_contract(
     hass: HomeAssistant,
     hass_client,
@@ -152,7 +129,7 @@ async def test_ha_to_rust_contract(
     hass_user_token: str,
     rust_backend: RustBackend,
 ) -> None:
-    """Validate create gates, then edit and confirm a previously tracked parcel."""
+    """Save pending parcels through HA, then edit and confirm without a provider."""
     configured = await hass.config_entries.flow.async_init(
         DOMAIN,
         context={"source": SOURCE_USER},
@@ -170,37 +147,56 @@ async def test_ha_to_rust_contract(
     user = await hass_client(hass_user_token)
     response = await user.post(
         f"{PREFIX}/shipments",
-        json={"title": "Office supplies", "source": {"namespace": "test", "key": "1"}},
+        json={
+            "title": "Office supplies",
+            "direction": "inbound",
+            "source": {"namespace": "test", "key": "1"},
+        },
         headers={"Idempotency-Key": "cross-language-create"},
     )
     assert response.status == 400
     response = await user.post(
         f"{PREFIX}/shipments",
-        json={"title": "Office supplies", "tracking": {"number": "TEST123"}},
+        json={
+            "title": "Office supplies",
+            "direction": "inbound",
+            "tracking": {"number": "TEST123", "carrier": "USPS"},
+        },
         headers={"Idempotency-Key": "tracked-create-without-provider"},
     )
-    assert response.status == 503
-    with pytest.raises(HomeAssistantError, match="HTTP 503"):
-        await hass.services.async_call(
-            DOMAIN,
-            "add",
-            {"title": "Second parcel", "tracking_number": "TEST456"},
-            context=Context(user_id=hass_user.id),
-            blocking=True,
-            return_response=True,
-        )
-    assert (await (await user.get(f"{PREFIX}/shipments")).json())["items"] == []
+    assert response.status == 201
+    shipment = await response.json()
+    shipment_id = shipment["id"]
+    assert shipment["status"] == "expected"
+    assert shipment["sync"]["registration_state"] == "pending"
+    assert shipment["sync"]["tracker_id"] is None
+    added = await hass.services.async_call(
+        DOMAIN,
+        "add",
+        {
+            "title": "Second parcel",
+            "direction": "outbound",
+            "tracking_number": "TEST456",
+        },
+        context=Context(user_id=hass_user.id),
+        blocking=True,
+        return_response=True,
+    )
+    assert added["status"] == "expected"
+    assert added["id"] != shipment_id
+    response = await user.get(f"{PREFIX}/shipments/{added['id']}")
+    assert (await response.json())["direction"] == "outbound"
+    items = (await (await user.get(f"{PREFIX}/shipments")).json())["items"]
+    assert {item["id"] for item in items} == {shipment_id, added["id"]}
 
-    # Creation requires provider preflight. A valid durable fixture lets this
-    # provider-free binary test continue through real HA edits and corrections.
-    await asyncio.to_thread(seed_tracked_shipment, rust_backend.database)
-    response = await user.get(f"{PREFIX}/shipments/{SHIPMENT_ID}")
+    response = await user.get(f"{PREFIX}/shipments/{shipment_id}")
     assert response.status == 200
     shipment = await response.json()
-    assert shipment["status"] == "pre_transit"
-    assert shipment["tracking"] == {"number": "TEST123", "carrier": "usps"}
+    assert shipment["status"] == "expected"
+    assert shipment["tracking"] == {"number": "TEST123", "carrier": "USPS"}
+    assert shipment["direction"] == "inbound"
     response = await user.patch(
-        f"{PREFIX}/shipments/{SHIPMENT_ID}",
+        f"{PREFIX}/shipments/{shipment_id}",
         json={"title": "Updated office supplies"},
         headers={"If-Match": response.headers["ETag"]},
     )
@@ -208,10 +204,12 @@ async def test_ha_to_rust_contract(
     shipment = await response.json()
     shipment_id = shipment["id"]
     etag = response.headers["ETag"]
-    assert shipment["status"] == "pre_transit"
+    assert shipment["status"] == "expected"
     assert shipment["revision"] == 2
+    # Burst writes share the integration's existing refresh cooldown.
+    async_fire_time_changed(hass, dt_util.utcnow() + timedelta(seconds=11))
     await hass.async_block_till_done()
-    assert hass.states.get("sensor.shipments_expected").state == "1"
+    assert hass.states.get("sensor.shipments_expected").state == "2"
 
     # Core authenticates the regular user; the bridge denies their confirmation.
     forbidden = await user.put(
@@ -242,7 +240,7 @@ async def test_ha_to_rust_contract(
     assert shipment["status_override"]["actor_id"] == f"ha:{hass_admin_user.id}"
     assert response.headers["ETag"] != etag
     # HA coalesces burst refreshes; advance its clock through the cooldown.
-    async_fire_time_changed(hass, dt_util.utcnow() + timedelta(seconds=11))
+    async_fire_time_changed(hass, dt_util.utcnow() + timedelta(seconds=22))
     await hass.async_block_till_done()
     assert hass.states.get("sensor.shipments_delivered").state == "1"
 
@@ -256,6 +254,7 @@ async def test_ha_to_rust_contract(
     assert events_response.status == 200
     events = (await events_response.json())["items"]
     assert [event["actor_id"] for event in events] == [
+        f"ha:{hass_user.id}",
         f"ha:{hass_user.id}",
         f"ha:{hass_admin_user.id}",
     ]

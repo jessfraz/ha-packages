@@ -18,12 +18,14 @@ impl Fixture {
         let shipment = store
             .create(
                 CreateShipment {
+                    direction: shipments::models::Direction::Inbound,
                     title: "Refresh test parcel".into(),
                     merchant: None,
                     order_reference: None,
+                    signature_required: None,
                     tracking: Tracking {
                         number: "9400111899560000000000".into(),
-                        carrier: Some("usps".into()),
+                        carrier: Some("usps".parse().unwrap()),
                     },
                     source: None,
                 },

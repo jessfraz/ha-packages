@@ -2,7 +2,7 @@ use crate::{
     installation::{Installation, InstallationReport, IntegrationPresence, valid_presence},
     models::*,
     store::{Store, validate_create, validate_update},
-    sync::{EasyPostClient, SyncError, Tracker, TrackerRejection},
+    sync::EasyPostClient,
 };
 use anyhow::{Context as _, Result, anyhow};
 use dropshot::ClientErrorStatusCode as StatusCode;
@@ -236,6 +236,8 @@ struct ShipmentPath {
 #[derive(Deserialize, Serialize, JsonSchema)]
 struct ShipmentCursor {
     after: Uuid,
+    #[serde(default)]
+    sort_key: Option<i64>,
     filters: Filters,
 }
 
@@ -250,7 +252,13 @@ async fn shipments_list(
     let limit = request.page_limit(&params)?.get().min(200);
     let (filters, after) = match &params.page {
         WhichPage::First(filters) => (filters.clone(), None),
-        WhichPage::Next(cursor) => (cursor.filters.clone(), Some(cursor.after)),
+        WhichPage::Next(cursor) => (
+            cursor.filters.clone(),
+            Some(ShipmentPosition {
+                id: cursor.after,
+                sort_key: cursor.sort_key,
+            }),
+        ),
     };
     let mut items = request
         .context()
@@ -260,16 +268,29 @@ async fn shipments_list(
     let more = items.len() > limit as usize;
     items.truncate(limit as usize);
     let mut page = ResultsPage::new(items, &filters, |item, filters| ShipmentCursor {
-        after: item.id,
+        after: item.position.id,
+        sort_key: item.position.sort_key,
         filters: filters.clone(),
     })?;
     if !more {
         page.next_page = None;
     }
-    Ok(HttpResponseOk(page))
+    Ok(HttpResponseOk(ResultsPage {
+        items: page.items.into_iter().map(|entry| entry.shipment).collect(),
+        next_page: page.next_page,
+    }))
 }
 
-/// Verify tracking with EasyPost before creating a durable local record.
+/// List EasyPost's canonical tracking carriers. Omit carrier when automatic detection is preferred.
+#[endpoint {method=GET,path="/v1/carriers",tags=["shipments"]}]
+async fn carriers_list(
+    request: RequestContext<Arc<Context>>,
+) -> Result<HttpResponseOk<Vec<crate::carrier::Carrier>>, HttpError> {
+    authenticate(&request, false).await?;
+    Ok(HttpResponseOk(crate::carrier::Carrier::ALL.to_vec()))
+}
+
+/// Save a durable pending registration before contacting the tracking provider.
 #[endpoint {method=POST,path="/v1/shipments",tags=["shipments"]}]
 async fn shipments_create(
     request: RequestContext<Arc<Context>>,
@@ -281,15 +302,17 @@ async fn shipments_create(
     let mut input = body.into_inner();
     validate_create(&mut input, key)
         .map_err(|error| log_validation_error(&request, error, "create"))?;
+    validate_admission(&input.tracking)
+        .map_err(|error| log_validation_error(&request, error, "create"))?;
     let store = &request.context().store;
     let shipment = if let Some(saved) = store.replay_create(&input, &principal.actor, key).await? {
         saved
     } else {
-        let tracker = verify_tracking(&request, &input.tracking).await?;
-        store
-            .create(input, &principal.actor, key, Some(&tracker))
-            .await?
+        store.create(input, &principal.actor, key, None).await?
     };
+    slog::info!(request.log, "tracking_registration";
+        "request_id" => request.request_id.clone(), "shipment_id" => shipment.id.to_string(),
+        "operation" => "create", "outcome" => "saved");
     let headers = VersionHeaders {
         etag: format!("\"{}\"", shipment.revision),
     };
@@ -321,7 +344,7 @@ async fn shipment_update(
     let expected_revision = revision(&request)?;
     let mut input = body.into_inner();
     validate_update(&mut input).map_err(|error| log_validation_error(&request, error, "update"))?;
-    let verified = if let Some(value) = &mut input.tracking.value {
+    if let Some(value) = &mut input.tracking.value {
         let tracking = value
             .as_mut()
             .ok_or(crate::error::Error::TrackingRequired)?;
@@ -330,36 +353,38 @@ async fn shipment_update(
             return Err(crate::error::Error::Precondition.into());
         }
         if *tracking != current.tracking {
-            Some(verify_tracking(&request, tracking).await?)
-        } else {
-            None
+            validate_admission(tracking)
+                .map_err(|error| log_validation_error(&request, error, "update"))?;
         }
-    } else {
-        None
-    };
-    Ok(shipment_response(
-        request
-            .context()
-            .store
-            .update(
-                id,
-                expected_revision,
-                input,
-                &principal.actor,
-                verified.as_ref(),
-            )
-            .await?,
-    ))
+    }
+    let shipment = request
+        .context()
+        .store
+        .update(id, expected_revision, input, &principal.actor, None)
+        .await?;
+    slog::info!(request.log, "tracking_registration";
+        "request_id" => request.request_id.clone(), "shipment_id" => shipment.id.to_string(),
+        "operation" => "update", "outcome" => "saved");
+    Ok(shipment_response(shipment))
 }
 
-fn tracking_error(code: &str, status: dropshot::ErrorStatusCode, message: &str) -> HttpError {
-    HttpError {
-        status_code: status,
-        error_code: Some(code.into()),
-        external_message: message.into(),
-        internal_message: message.into(),
-        headers: None,
+fn validate_admission(tracking: &Tracking) -> Result<(), crate::error::Error> {
+    let alphanumeric = tracking
+        .number
+        .bytes()
+        .filter(u8::is_ascii_alphanumeric)
+        .count();
+    if !(6..=100).contains(&alphanumeric)
+        || tracking.number.len() > 100
+        || !tracking
+            .number
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+        || !tracking.number.bytes().any(|byte| byte.is_ascii_digit())
+    {
+        return Err(crate::error::Error::TrackingInvalid);
     }
+    Ok(())
 }
 
 fn log_validation_error(
@@ -372,45 +397,6 @@ fn log_validation_error(
         "request_id" => request.request_id.clone(), "operation" => operation,
         "outcome" => "rejected", "error_code" => error.error_code.clone());
     error
-}
-
-async fn verify_tracking(
-    request: &RequestContext<Arc<Context>>,
-    tracking: &Tracking,
-) -> Result<Tracker, HttpError> {
-    let provider = request.context().provider.as_ref().ok_or_else(|| {
-        slog::warn!(request.log, "tracking_verification";
-            "request_id" => request.request_id.clone(), "operation" => "register",
-            "outcome" => "unavailable", "error_code" => "tracking_provider_unconfigured");
-        tracking_error(
-        "tracking_provider_unconfigured", dropshot::ErrorStatusCode::SERVICE_UNAVAILABLE,
-        "Configure the EasyPost API key before adding shipments or changing tracking numbers. No changes were saved.",
-    )})?;
-    provider.with_request_id(&request.request_id).register(&tracking.number, tracking.carrier.as_deref()).await.map_err(|error| {
-        let unavailable = dropshot::ErrorStatusCode::SERVICE_UNAVAILABLE;
-        let error = match error {
-            SyncError::Throttled { retry_after } => SyncError::Http { status: 429, retry_after: Some(retry_after) },
-            error => error,
-        };
-        match error {
-            SyncError::Rejected(rejection) => {
-                let code = rejection.error_code();
-                let status = if rejection == TrackerRejection::NoCarrierAccount { unavailable } else { dropshot::ErrorStatusCode::BAD_REQUEST };
-                tracking_error(code, status, &rejection.to_string())
-            }
-            SyncError::Http { status: 401 | 403, .. } => tracking_error("tracking_provider_credentials", unavailable, "EasyPost rejected the configured API key. Check the key in app settings; no changes were saved."),
-            SyncError::Http { status: 429, retry_after } => {
-                let mut error = tracking_error("tracking_verification_rate_limited", unavailable, "EasyPost tracking requests are temporarily paused to respect rate limits. Wait and retry; no changes were saved. This does not mean the tracking number is invalid.");
-                if let Some(seconds) = retry_after.and_then(|seconds| HeaderValue::from_str(&seconds.to_string()).ok()) {
-                    let mut headers = http::HeaderMap::new();
-                    headers.insert(http::header::RETRY_AFTER, seconds);
-                    error.headers = Some(Box::new(headers));
-                }
-                error
-            }
-            _ => tracking_error("tracking_verification_unavailable", unavailable, "EasyPost could not verify tracking right now. Retry shortly; no changes were saved. This does not mean the tracking number is invalid."),
-        }
-    })
 }
 
 #[endpoint {method=POST,path="/v1/shipments/{id}/sources",tags=["shipments"]}]
@@ -576,9 +562,21 @@ async fn shipment_events(
 #[endpoint {method=GET,path="/v1/summary",tags=["system"]}]
 async fn summary(
     request: RequestContext<Arc<Context>>,
+    query: Query<SummaryFilter>,
 ) -> Result<HttpResponseOk<Summary>, HttpError> {
     authenticate(&request, false).await?;
-    Ok(HttpResponseOk(request.context().store.summary().await?))
+    Ok(HttpResponseOk(
+        request
+            .context()
+            .store
+            .summary(query.into_inner().direction)
+            .await?,
+    ))
+}
+
+#[derive(Deserialize, JsonSchema)]
+struct SummaryFilter {
+    direction: Option<Direction>,
 }
 
 #[endpoint {method=GET,path="/v1/system",tags=["system"]}]
@@ -775,8 +773,9 @@ async fn style(request: RequestContext<Arc<Context>>) -> Result<Response<Body>, 
 
 pub fn description() -> Result<ApiDescription<Arc<Context>>> {
     let mut api = ApiDescription::new();
-    let endpoints: [dropshot::ApiEndpoint<Arc<Context>>; 23] = [
+    let endpoints: [dropshot::ApiEndpoint<Arc<Context>>; 24] = [
         shipments_list.into(),
+        carriers_list.into(),
         shipments_create.into(),
         shipment_get.into(),
         shipment_update.into(),

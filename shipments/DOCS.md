@@ -14,8 +14,8 @@ Add `https://github.com/jessfraz/ha-packages` in **Settings → Apps → App sto
 Repositories**, then install **Shipments**. On older Home Assistant versions,
 these settings are named **Add-ons**.
 
-Set `easypost_api_key`, then start the app. Adding a shipment or changing its
-tracking identity requires EasyPost verification. The app creates and saves
+Set `easypost_api_key`, then start the app. Shipments and tracking edits are
+saved locally, then registered with EasyPost in the background. The app creates and saves
 its own credentials automatically.
 
 Open the web UI from the app page, or enable **Show in sidebar**. Home
@@ -79,26 +79,33 @@ inventory and coverage; restore testing is a separate step.
 
 | Option | Purpose |
 | --- | --- |
-| `easypost_api_key` | Required to verify new shipments and changed tracking identities. |
+| `easypost_api_key` | Enables background registration and tracking updates. |
 
 ## Add or edit a shipment
 
-Every shipment needs a tracking number. Leave **Carrier** blank for automatic
-detection, or supply a carrier when EasyPost cannot identify one unambiguously.
-Select **Save shipment** and wait while the app verifies tracking. A newly
-created label can be saved before its first carrier scan; unknown and
-pre-transit tracking states are accepted.
+Every shipment needs a tracking number and an explicit **Direction**:
+**Inbound** for packages you receive, **Outbound** for packages you send.
+Existing records migrate to inbound. The default list shows both directions
+together; use the optional direction filters to narrow it.
+Leave **Carrier** on **Auto-detect**, or
+choose its canonical EasyPost carrier when detection is ambiguous.
+For FedEx, the **FedEx Default (EasyPost account)** choice uses EasyPost's
+Wallet route. **FedEx (your carrier account)** requires separately configured
+FedEx credentials. If the provider reports `CREDENTIALS_NOT_FOUND`, correct
+that choice or configure the carrier account; retrying does not fix missing
+credentials or mean that the number is invalid.
 
-An invalid number, unsupported carrier, or ambiguous detection must be fixed
-before saving. If EasyPost is unavailable or its key is missing, the change
-is not saved. Your draft stays in the form so you can retry. Existing records
-can still be read, corrected, and edited without changing tracking. A tracking
-number cannot be removed from an existing shipment.
+Select **Save shipment** to commit it locally. Registration runs in the
+background; the pending badge remains until EasyPost accepts the number. New
+labels can be registered before their first scan. Provider outages keep the
+record and schedule retries. Unsupported or mismatched numbers remain visible
+with a clear error so you can correct them; malformed input is rejected before
+saving. A tracking number cannot be removed.
 
-The list shows each carrier and tracking number. Open a shipment to see its
-carrier status, last successful check, next scheduled check, and EasyPost
-health before its sources. Manual corrections are shown separately. Tracking
-links open the supported carrier's site or the EasyPost page when available.
+Open a shipment for tracking links, delivery dates, signature information and
+carrier scan history. Action buttons and manual corrections follow history.
+Sources are collapsed at the bottom. Direction, status filters, search, shipment
+details and open settings have URL fragments for links and browser navigation.
 
 ## Agent access
 
@@ -121,18 +128,31 @@ port and use the Home Assistant host address. All requests to that port
 require a bearer token. Keep it on a trusted network, or put TLS in front of
 it before remote access. Ingress port 8099 is internal to Home Assistant.
 
+The dashboard shows estimated delivery dates, actual delivery dates, and
+available carrier scan history. Status cards filter the list. Signature
+requirements can be recorded when known from a shipping notice; missing
+carrier information remains unknown. EasyPost signature proof is shown
+separately from the requirement.
+
+Healthy installation checks and agent access appear below the shipment list.
+Installation moves above it when a check needs attention. The EasyPost row
+shows the last diagnostic result and its timestamp; it does not expire into a
+failure just because time passed.
+
 ## Actions
 
 The integration adds `shipments.add`, `shipments.refresh`,
 `shipments.set_override`, `shipments.clear_override`, `shipments.archive`, and
 `shipments.unarchive` actions. Use **Developer tools → Actions** to try them.
 Adding a shipment returns its ID, revision, and status when a response is
-requested. For example:
+requested. Direction is required: use `inbound` for packages you receive or
+`outbound` for packages you send. For example:
 
 ```yaml
 action: shipments.add
 data:
   title: Workshop supplies
+  direction: inbound
   merchant: Example shop
   tracking_number: YOUR_TRACKING_NUMBER
 response_variable: parcel

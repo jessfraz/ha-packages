@@ -11,7 +11,6 @@
   <body>
     <header>
       <div>
-        <span class="eyebrow">YOUR DELIVERY DESK</span>
         <h1>Shipments<span>.</span></h1>
       </div>
       <button id="add">Add shipment</button>
@@ -31,10 +30,44 @@
         ><button>Connect</button>
       </form>
       <section id="dashboard" hidden>
+        <nav id="directions" class="direction-tabs" aria-label="Shipment direction">
+          <button type="button" data-direction="all" aria-pressed="true">All shipments</button>
+          <button type="button" data-direction="inbound" aria-pressed="false">Inbound</button>
+          <button type="button" data-direction="outbound" aria-pressed="false">Outbound</button>
+        </nav>
+        <div id="summary" class="summary" aria-label="Shipment summary"></div>
+        <div class="toolbar">
+          <form id="search">
+            <label class="sr-only" for="query">Search shipments</label>
+            <input
+              id="query"
+              type="search"
+              placeholder="Search title, merchant, or order"
+            ><button>Search</button>
+          </form>
+          <label class="view-filter" for="view"
+            >View
+            <select id="view">
+              <option value="active">Active</option>
+              <option value="out_for_delivery">Out for delivery</option>
+              <option value="delivered">Delivered</option>
+              <option value="exceptions">Exceptions</option>
+              <option value="all">All</option>
+              <option value="archived">Archived</option>
+            </select>
+          </label>
+          <button id="refresh" class="quiet" aria-label="Refresh shipment list">
+            Refresh
+          </button>
+        </div>
+        <div id="list" class="shipments"></div>
+        <button id="more" hidden>Load more</button>
+        <p id="health" class="muted"></p>
+        <div id="management">
         <details id="installation" class="installation" hidden>
           <summary>Installation <span id="installation-summary"></span></summary>
           <div class="installation-heading">
-            <p class="muted">Check the app, Home Assistant connection, tracking, and backup coverage.</p>
+            <p class="muted">Connection diagnostics and backup coverage. Shipment tracking updates run independently.</p>
             <button id="check-installation" class="quiet" type="button">Run checks</button>
           </div>
           <ul id="installation-checks"></ul>
@@ -67,32 +100,7 @@
           </div>
           <ul id="agent-list" aria-label="Active agent credentials"></ul>
         </details>
-        <div id="summary" class="summary" aria-label="Shipment summary"></div>
-        <div class="toolbar">
-          <form id="search">
-            <label class="sr-only" for="query">Search shipments</label>
-            <input
-              id="query"
-              type="search"
-              placeholder="Search title, merchant, or order"
-            ><button>Search</button>
-          </form>
-          <label class="view-filter" for="view"
-            >View
-            <select id="view">
-              <option value="active">Active</option>
-              <option value="delivered">Delivered</option>
-              <option value="all">All</option>
-              <option value="archived">Archived</option>
-            </select>
-          </label>
-          <button id="refresh" class="quiet" aria-label="Refresh shipment list">
-            Refresh
-          </button>
         </div>
-        <div id="list" class="shipments"></div>
-        <button id="more" hidden>Load more</button>
-        <p id="health" class="muted"></p>
       </section>
     </main>
     <dialog id="editor" aria-labelledby="edit-title">
@@ -110,16 +118,17 @@
         </div>
         <fieldset id="shipment-fields">
           <label>Title<input name="title" required maxlength="500"></label>
+          <label>Direction<select name="direction" required>
+            <option value="">Choose direction</option>
+            <option value="inbound">Inbound</option>
+            <option value="outbound">Outbound</option>
+          </select></label>
           <div class="columns">
             <label>Merchant<input name="merchant" maxlength="500"></label>
             <label>Order reference<input name="order_reference" maxlength="500"></label>
           </div>
           <div class="columns">
-            <label>Carrier (optional)<input
-              name="carrier"
-              placeholder="Leave blank to detect"
-              maxlength="100"
-            ></label>
+            <label>Carrier<select name="carrier"><option value="">Auto-detect</option></select></label>
             <label>Tracking number<input
               name="number"
               required
@@ -127,9 +136,14 @@
               aria-describedby="tracking-help"
             ></label>
           </div>
+          <label>Signature<select name="signature_required">
+            <option value="">Not known</option>
+            <option value="true">Signature required</option>
+            <option value="false">No signature required</option>
+          </select></label>
           <p id="tracking-help" class="muted">
-            A tracking number is required. EasyPost verifies it before saving;
-            new labels do not need a carrier scan.
+            A tracking number is required. Your shipment is saved first, then
+            registered with EasyPost in the background. New labels do not need a scan.
           </p>
         </fieldset>
         <p id="edit-status" class="muted" role="status"></p>
@@ -150,9 +164,15 @@
         </button>
       </div>
       <div id="detail-content"></div>
+      <section id="history" class="tracking-history" aria-labelledby="tracking-history-title">
+        <h3 id="tracking-history-title">Tracking history</h3>
+        <p id="carrier-history-note" class="muted"></p>
+        <ol id="carrier-events" class="carrier-timeline"></ol>
+      </section>
       <div id="actions" class="actions"></div>
+      <details id="correction" class="detail-disclosure">
+        <summary>Correct shipment status</summary>
       <form id="override-form">
-        <h3>Manual correction</h3>
         <label
           >Status<select name="status">
             <option value="delivered">Delivered</option>
@@ -173,11 +193,14 @@
           ></label
         ><button>Save correction</button>
       </form>
-      <h3>History</h3>
+      </details>
+      <details id="activity" class="detail-disclosure">
+      <summary>Record activity</summary>
       <ol id="events"></ol>
       <button id="more-events" hidden>More history</button>
+      </details>
+      <div id="sources"></div>
       <p id="detail-error" role="alert"></p>
     </dialog>
-    <footer>LOCAL RECORDS. YOUR CORRECTIONS COUNT.</footer>
   </body>
 </html>

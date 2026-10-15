@@ -74,7 +74,11 @@ async def test_non_admin_can_add_and_read(
     client = await hass_client(hass_user_token)
     response = await client.post(
         f"{PREFIX}/shipments",
-        json={"title": "Office supplies", "tracking": {"number": "TEST123"}},
+        json={
+            "title": "Office supplies",
+            "direction": "inbound",
+            "tracking": {"number": "TEST123"},
+        },
         headers={"Idempotency-Key": "create-123"},
     )
     assert response.status == 200
@@ -85,6 +89,53 @@ async def test_non_admin_can_add_and_read(
     assert (await client.get(f"{PREFIX}/shipments")).status == 200
 
 
+async def test_carrier_catalog_is_an_authenticated_read(
+    hass_client, hass_user, hass_user_token, entry, backend: Backend
+) -> None:
+    backend.responses[("GET", "/v1/carriers")] = (
+        200,
+        b'["USPS","UPS","FedEx"]',
+        {"Content-Type": "application/json"},
+    )
+    client = await hass_client(hass_user_token)
+    response = await client.get(f"{PREFIX}/carriers")
+    assert response.status == 200
+    assert await response.json() == ["USPS", "UPS", "FedEx"]
+    forwarded = backend.requests[-1]
+    assert forwarded.method == "GET"
+    assert forwarded.path == "/v1/carriers"
+    assert forwarded.headers["Authorization"] == "Bearer test-owner-token"
+    assert forwarded.headers["X-Shipments-Actor"] == f"ha:{hass_user.id}"
+
+
+@pytest.mark.parametrize("sort", ["expected", "delivered"])
+async def test_shipment_direction_sort_and_exception_filters_are_forwarded(
+    hass_client, hass_user, hass_user_token, entry, backend: Backend, sort: str
+) -> None:
+    client = await hass_client(hass_user_token)
+    query = {"direction": "outbound", "sort": sort, "exceptions": "true"}
+    response = await client.get(f"{PREFIX}/shipments", params=query)
+    assert response.status == 200
+    forwarded = backend.requests[-1]
+    assert forwarded.method == "GET"
+    assert forwarded.path == "/v1/shipments"
+    assert forwarded.query == query
+    assert forwarded.headers["X-Shipments-Actor"] == f"ha:{hass_user.id}"
+
+
+@pytest.mark.parametrize("direction", ["inbound", "outbound"])
+async def test_summary_direction_filter_is_forwarded(
+    hass_client, entry, backend: Backend, direction: str
+) -> None:
+    client = await hass_client()
+    response = await client.get(f"{PREFIX}/summary", params={"direction": direction})
+    assert response.status == 200
+    forwarded = backend.requests[-1]
+    assert forwarded.method == "GET"
+    assert forwarded.path == "/v1/summary"
+    assert forwarded.query == {"direction": direction}
+
+
 @pytest.mark.parametrize(
     "method,path,status",
     [
@@ -92,8 +143,10 @@ async def test_non_admin_can_add_and_read(
         ("get", "https://elsewhere.invalid", 404),
         ("get", "shipments/not-a-uuid", 404),
         ("post", "system", 405),
+        ("post", "carriers", 405),
         ("delete", "shipments", 405),
         ("get", "summary?url=https://elsewhere.invalid", 400),
+        ("get", "carriers?url=https://elsewhere.invalid", 400),
         ("get", "shipments?destination=https://elsewhere.invalid", 400),
         ("post", f"shipments/{SHIPMENT_ID}/refresh?limit=1", 400),
     ],

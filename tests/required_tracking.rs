@@ -12,9 +12,9 @@ async fn api_requires_tracking_before_any_provider_access() {
     let server = api::start("127.0.0.1:0".parse().unwrap(), context).unwrap();
     let client = reqwest::Client::new();
     for body in [
-        r#"{"title":"Parcel"}"#,
-        r#"{"title":"Parcel","tracking":null}"#,
-        r#"{"title":"Parcel","tracking":{"number":"  "}}"#,
+        r#"{"direction":"inbound","title":"Parcel"}"#,
+        r#"{"direction":"inbound","title":"Parcel","tracking":null}"#,
+        r#"{"direction":"inbound","title":"Parcel","tracking":{"number":"  "}}"#,
     ] {
         let response = client
             .post(format!("http://{}/v1/shipments", server.local_addr()))

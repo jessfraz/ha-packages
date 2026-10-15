@@ -1,13 +1,40 @@
 # Changelog
 
-## 0.3.1
+## 0.4.0
 
+- Preserve EasyPost carrier-credential errors, including native
+  `CREDENTIALS_NOT_FOUND` on HTTP 404, instead of hiding them as unavailable
+  tracking. Distinguish FedEx account choices and keep the provider status and
+  safe native code in shipment state and logs. Add regressions for credential
+  failures and successful FedEx Default registration.
+
+- Save shipments and tracking edits before contacting EasyPost. Pending
+  registration survives outages and restarts; uncertain outcomes reconcile
+  existing trackers before retrying. Show actionable registration states,
+  provider status and safe errors without losing local records.
+- Require inbound or outbound direction for new shipments, migrate existing
+  records to inbound, and show both directions together with optional filters
+  and matching colored badges.
+- Keep shipment, filter and settings views in shareable URL fragments with
+  browser navigation. Show carrier history before actions and corrections,
+  with sources collapsed at the bottom.
+
+- Show expected and delivered dates, signature requirements, and carrier scan
+  history. Active views sort by expected delivery; delivered views show newest
+  deliveries first, with stable backend pagination and unknown dates last.
+- Use status colors, clickable count filters, clearer shipment details, and
+  carrier location map links. Move healthy installation checks and agent
+  access below the list, and remove the dashboard slogans.
+- Use a typed carrier enum and the same canonical EasyPost catalog in the API
+  and carrier dropdown, with automatic detection still optional.
+- Keep the last EasyPost installation diagnostic and its check time instead
+  of turning a successful result into a failure after five minutes.
 - Write redacted JSON registration, sync, and request logs with UTC timestamps,
   request IDs, safe routes, durations, and error codes. Credentials, tracking
   numbers, request bodies, raw URLs, and provider messages stay out of logs.
 - Share EasyPost concurrency and rate-limit protection across tracking checks,
-  tracking verification, and connection checks. Respect provider cooldowns and
-  give callers a clear retry time without saving unverified input.
+  registration, and connection checks. Respect provider cooldowns while
+  allowing local creates and edits to save.
 - Coalesce manual refreshes with a persistent one-minute cooldown, including
   failed checks on terminal shipments.
 - Spread polling with per-shipment jitter and slow unchanged unknown and
