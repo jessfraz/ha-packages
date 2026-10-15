@@ -1,0 +1,28 @@
+[package]
+name = "shipments"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "A local shipment registry for Home Assistant"
+repository = "https://github.com/jessfraz/ha-packages"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive", "env"] }
+dropshot = "0.17"
+http = "1"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+schemars = { version = "0.8", features = ["uuid1"] }
+semver = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite", "migrate", "macros"] }
+subtle = "2"
+thiserror = "2"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "sync", "time"] }
+uuid = { version = "1", features = ["serde", "v7"] }
+
+[dev-dependencies]
+tempfile = "3"
+expectorate = "1"

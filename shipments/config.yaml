@@ -1,0 +1,28 @@
+name: Shipments
+version: "0.1.0"
+slug: shipments
+description: A local shipment registry with a Home Assistant dashboard
+url: https://github.com/jessfraz/ha-packages
+arch:
+  - amd64
+  - aarch64
+image: ghcr.io/jessfraz/ha-packages
+startup: application
+boot: auto
+backup: cold
+init: false
+ingress: true
+ingress_port: 8099
+panel_admin: true
+panel_icon: mdi:package-variant-closed
+ports:
+  8080/tcp: null
+ports_description:
+  8080/tcp: Bearer-authenticated API for the integration and external clients
+environment:
+  SHIPMENTS_ENABLE_INGRESS: "true"
+options: {}
+schema:
+  api_token: password
+  agent_token: password?
+  easypost_api_key: password?

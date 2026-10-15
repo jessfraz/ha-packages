@@ -1,0 +1,134 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <meta name="color-scheme" content="light dark">
+    <title>Shipments</title>
+    <link rel="stylesheet" href="style.css">
+    <script src="app.js" defer></script>
+  </head>
+  <body>
+    <header>
+      <div>
+        <span class="eyebrow">YOUR DELIVERY DESK</span>
+        <h1>Shipments<span>.</span></h1>
+      </div>
+      <button id="add">Add shipment</button>
+    </header>
+    <main>
+      <p id="notice" role="status" aria-live="polite"></p>
+      <form id="login" hidden>
+        <h2>Connect to your registry</h2>
+        <p>Enter your shipment API token. It stays in this tab’s memory.</p>
+        <label
+          >API token<input
+            name="token"
+            type="password"
+            required
+            autocomplete="off"
+          ></label
+        ><button>Connect</button>
+      </form>
+      <section id="dashboard" hidden>
+        <div id="summary" class="summary" aria-label="Shipment summary"></div>
+        <div class="toolbar">
+          <form id="search">
+            <label class="sr-only" for="query">Search shipments</label>
+            <input
+              id="query"
+              type="search"
+              placeholder="Search title, merchant, or order"
+            ><button>Search</button>
+          </form>
+          <label class="archive-filter"
+            ><input id="archived" type="checkbox">
+            Archived</label
+          >
+        </div>
+        <div id="list" class="shipments"></div>
+        <button id="more" hidden>Load more</button>
+        <p id="health" class="muted"></p>
+      </section>
+    </main>
+    <dialog id="editor">
+      <form id="edit-form">
+        <div class="dialog-heading">
+          <h2 id="edit-title">Add shipment</h2>
+          <button
+            type="button"
+            class="quiet"
+            data-close="editor"
+            aria-label="Close"
+          >
+            ×
+          </button>
+        </div>
+        <label>Title<input name="title" required maxlength="500"></label>
+        <div class="columns">
+          <label>Merchant<input name="merchant" maxlength="500"></label
+          ><label
+            >Order reference<input
+              name="order_reference"
+              maxlength="500"
+            ></label
+          >
+        </div>
+        <div class="columns">
+          <label
+            >Carrier<input
+              name="carrier"
+              placeholder="UPS, USPS, FedEx…"
+              maxlength="100"
+            ></label
+          ><label>Tracking number<input name="number" maxlength="200"></label>
+        </div>
+        <p class="muted">No tracking number yet? You can add it later.</p>
+        <p id="edit-error" role="alert"></p>
+        <button id="save">Save shipment</button>
+      </form>
+    </dialog>
+    <dialog id="detail">
+      <div class="dialog-heading">
+        <h2 id="detail-title"></h2>
+        <button
+          type="button"
+          class="quiet"
+          data-close="detail"
+          aria-label="Close"
+        >
+          ×
+        </button>
+      </div>
+      <div id="detail-content"></div>
+      <div id="actions" class="actions"></div>
+      <form id="override-form">
+        <h3>Manual correction</h3>
+        <label
+          >Status<select name="status">
+            <option value="delivered">Delivered</option>
+            <option value="in_transit">In transit</option>
+            <option value="out_for_delivery">Out for delivery</option>
+            <option value="available_for_pickup">Available for pickup</option>
+            <option value="failure">Delivery exception</option>
+            <option value="return_to_sender">Return to sender</option>
+            <option value="cancelled">Cancelled</option>
+            <option value="expected">Expected</option>
+          </select></label
+        ><label
+          >Reason<input
+            name="reason"
+            required
+            maxlength="1000"
+            placeholder="e.g. Physically received"
+          ></label
+        ><button>Save correction</button>
+      </form>
+      <h3>History</h3>
+      <ol id="events"></ol>
+      <button id="more-events" hidden>More history</button>
+      <p id="detail-error" role="alert"></p>
+    </dialog>
+    <footer>LOCAL RECORDS. YOUR CORRECTIONS COUNT.</footer>
+  </body>
+</html>

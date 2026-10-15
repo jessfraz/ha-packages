@@ -1,0 +1,58 @@
+{
+  "title": "Shipments",
+  "config": {
+    "step": {
+      "user": {
+        "title": "Connect to Shipments",
+        "description": "Enter the service origin and owner credential. For the Home Assistant app, use http://HOSTNAME:8080 with the hostname shown on its Info tab.",
+        "data": {
+          "backend_url": "Backend URL",
+          "token": "Owner token"
+        }
+      },
+      "reauth_confirm": {
+        "title": "Connect to Shipments",
+        "description": "Enter the service origin and owner credential. For the Home Assistant app, use http://HOSTNAME:8080 with the hostname shown on its Info tab.",
+        "data": {
+          "backend_url": "Backend URL",
+          "token": "Owner token"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Cannot connect to the Shipments service.",
+      "invalid_auth": "The service rejected the credential.",
+      "owner_required": "Use the owner credential for the Home Assistant adapter.",
+      "invalid_url": "Enter an HTTP or HTTPS origin without credentials, path, query, or fragment."
+    },
+    "abort": {
+      "single_instance_allowed": "Only one Shipments backend can be configured.",
+      "reauth_successful": "The service credential was updated."
+    }
+  },
+  "entity": {
+    "sensor": {
+      "active": {
+        "name": "Active"
+      },
+      "expected": {
+        "name": "Expected"
+      },
+      "in_transit": {
+        "name": "In transit"
+      },
+      "out_for_delivery": {
+        "name": "Out for delivery"
+      },
+      "delivered": {
+        "name": "Delivered"
+      },
+      "exceptions": {
+        "name": "Exceptions"
+      },
+      "sync_errors": {
+        "name": "Sync errors"
+      }
+    }
+  }
+}

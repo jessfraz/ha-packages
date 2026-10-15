@@ -1,0 +1,289 @@
+:root {
+  font-family:ui-sans-serif,system-ui,-apple-system,sans-serif;
+  color:#26392f;
+  background:#f6f7f2;
+  font-synthesis:none;
+  --paper:#fff;
+  --line:#dce2d7;
+  --muted:#647369;
+  --green:#265d40;
+  --soft:#e6efdf}
+  * {
+    box-sizing:border-box}
+    body {
+      margin:0}
+      header,main,footer {
+        max-width:1100px;
+        margin:auto;
+        padding:32px}
+        header {
+          display:flex;
+          justify-content:space-between;
+          align-items:center;
+          border-bottom:1px solid var(--line);
+          padding-top:50px}
+          h1 {
+            font-size:clamp(36px,6vw,60px);
+            letter-spacing:-3px;
+            margin:6px 0 0;
+            font-weight:650}
+            h1 span {
+              color:#8ba755}
+              .eyebrow,footer {
+                font:11px ui-monospace,monospace;
+                letter-spacing:1.5px;
+                color:var(--muted)}
+                h2 {
+                  font-size:24px;
+                  letter-spacing:-.6px}
+                  h3 {
+                    font-size:15px;
+                    margin-top:28px}
+                    .muted {
+                      color:var(--muted);
+                      font-size:13px;
+                      line-height:1.7}
+                      button,input,select {
+                        font:inherit}
+                        button {
+                          border:1px solid transparent;
+                          background:var(--green);
+                          color:white;
+                          border-radius:7px;
+                          padding:11px 17px;
+                          cursor:pointer;
+                          font-size:14px;
+                          font-weight:550}
+                          button:hover {
+                            filter:brightness(1.12)}
+                            button:disabled {
+                              opacity:.5;
+                              cursor:wait}
+                              .quiet {
+                                background:transparent;
+                                color:inherit;
+                                border-color:var(--line)}
+                                input,select {
+                                  width:100%;
+                                  padding:11px 12px;
+                                  border:1px solid var(--line);
+                                  border-radius:6px;
+                                  background:var(--paper);
+                                  color:inherit}
+                                  input:focus,select:focus,button:focus-visible {
+                                    outline:2px solid #82a266;
+                                    outline-offset:3px}
+                                    label {
+                                      display:grid;
+                                      gap:7px;
+                                      font-size:13px;
+                                      margin:16px 0}
+                                      #notice:empty {
+                                        display:none}
+                                        #notice {
+                                          background:var(--soft);
+                                          border-radius:7px;
+                                          padding:14px;
+                                          font-size:14px}
+                                          #notice.error,[role=alert] {
+                                            color:#aa452d}
+                                            #login {
+                                              max-width:460px;
+                                              margin:50px auto}
+                                              .summary {
+                                                display:grid;
+                                                grid-template-columns:repeat(4,1fr);
+                                                gap:16px;
+                                                margin:8px 0 30px}
+                                                .stat {
+                                                  background:var(--paper);
+                                                  border:1px solid var(--line);
+                                                  border-radius:10px;
+                                                  padding:22px}
+                                                  .stat strong {
+                                                    display:block;
+                                                    font-size:34px;
+                                                    font-weight:550;
+                                                    letter-spacing:-1px}
+                                                    .stat span {
+                                                      display:block;
+                                                      color:var(--muted);
+                                                      font-size:12px;
+                                                      margin-top:8px}
+                                                      .toolbar {
+                                                        display:flex;
+                                                        gap:24px;
+                                                        align-items:center;
+                                                        justify-content:space-between;
+                                                        margin-bottom:20px}
+                                                        #search {
+                                                          display:flex;
+                                                          flex:1;
+                                                          gap:8px;
+                                                          max-width:560px}
+                                                          #search button {
+                                                            background:transparent;
+                                                            color:var(--green);
+                                                            border-color:var(--line)}
+                                                            .archive-filter {
+                                                              display:flex;
+                                                              align-items:center;
+                                                              white-space:nowrap;
+                                                              margin:0}
+                                                              .archive-filter input {
+                                                                width:auto}
+                                                                .shipments {
+                                                                  display:grid;
+                                                                  gap:10px}
+                                                                  .shipment {
+                                                                    display:flex;
+                                                                    align-items:center;
+                                                                    justify-content:space-between;
+                                                                    gap:16px;
+                                                                    background:var(--paper);
+                                                                    color:inherit;
+                                                                    border:1px solid var(--line);
+                                                                    border-radius:9px;
+                                                                    text-align:left;
+                                                                    padding:22px;
+                                                                    width:100%;
+                                                                    font-weight:400}
+                                                                    .shipment:hover {
+                                                                      border-color:#97b08a;
+                                                                      filter:none}
+                                                                      .shipment h2 {
+                                                                        font-size:16px;
+                                                                        margin:0 0 7px;
+                                                                        letter-spacing:-.2px}
+                                                                        .shipment p {
+                                                                          margin:0;
+                                                                          font-size:12px;
+                                                                          color:var(--muted)}
+                                                                          .badge {
+                                                                            font-size:11px;
+                                                                            font-weight:600;
+                                                                            border-radius:30px;
+                                                                            padding:7px 11px;
+                                                                            background:var(--soft);
+                                                                            white-space:nowrap}
+                                                                            .badge.warning {
+                                                                              background:#fff0da;
+                                                                              color:#8b601d}
+                                                                              .empty {
+                                                                                padding:70px 24px;
+                                                                                text-align:center;
+                                                                                border:1px dashed var(--line);
+                                                                                border-radius:10px}
+                                                                                .empty h2 {
+                                                                                  font-size:21px}
+                                                                                  .empty p {
+                                                                                    color:var(--muted);
+                                                                                    font-size:14px}
+                                                                                    #more {
+                                                                                      display:block;
+                                                                                      margin:24px auto}
+                                                                                      #more[hidden] {
+                                                                                        display:none}
+                                                                                        #health {
+                                                                                          margin:24px 0}
+                                                                                          dialog {
+                                                                                            background:var(--paper);
+                                                                                            color:inherit;
+                                                                                            border:1px solid var(--line);
+                                                                                            border-radius:14px;
+                                                                                            padding:30px;
+                                                                                            max-width:620px;
+                                                                                            width:calc(100% - 32px);
+                                                                                            max-height:90dvh}
+                                                                                            dialog::backdrop {
+                                                                                              background:#14291e70;
+                                                                                              backdrop-filter:blur(3px)}
+                                                                                              .dialog-heading {
+                                                                                                display:flex;
+                                                                                                align-items:center;
+                                                                                                justify-content:space-between;
+                                                                                                gap:12px}
+                                                                                                .dialog-heading h2 {
+                                                                                                  margin:0}
+                                                                                                  .dialog-heading .quiet {
+                                                                                                    font-size:24px;
+                                                                                                    padding:2px 10px}
+                                                                                                    .columns {
+                                                                                                      display:grid;
+                                                                                                      grid-template-columns:1fr 1fr;
+                                                                                                      gap:16px}
+                                                                                                      .actions {
+                                                                                                        display:flex;
+                                                                                                        flex-wrap:wrap;
+                                                                                                        gap:8px;
+                                                                                                        margin:24px 0}
+                                                                                                        .actions button {
+                                                                                                          font-size:12px;
+                                                                                                          padding:9px 12px}
+                                                                                                          .detail-item {
+                                                                                                            font-size:14px;
+                                                                                                            line-height:1.7;
+                                                                                                            overflow-wrap:anywhere}
+                                                                                                            #events {
+                                                                                                              list-style:none;
+                                                                                                              padding:0;
+                                                                                                              border-top:1px solid var(--line)}
+                                                                                                              #events li {
+                                                                                                                font-size:13px;
+                                                                                                                padding:13px 0;
+                                                                                                                border-bottom:1px solid var(--line)}
+                                                                                                                #events time {
+                                                                                                                  display:block;
+                                                                                                                  font-size:11px;
+                                                                                                                  color:var(--muted);
+                                                                                                                  margin-top:5px}
+                                                                                                                  footer {
+                                                                                                                    margin-top:40px;
+                                                                                                                    border-top:1px solid var(--line);
+                                                                                                                    padding-bottom:40px}
+                                                                                                                    .sr-only {
+                                                                                                                      position:absolute;
+                                                                                                                      width:1px;
+                                                                                                                      height:1px;
+                                                                                                                      overflow:hidden;
+                                                                                                                      clip:rect(0,0,0,0)}
+                                                                                                                      [hidden] {
+                                                                                                                        display:none!important}
+                                                                                                                        @media(max-width:650px) {
+                                                                                                                          header,main,footer {
+                                                                                                                            padding:24px 18px}
+                                                                                                                            header {
+                                                                                                                              padding-top:32px}
+                                                                                                                              .summary {
+                                                                                                                                grid-template-columns:1fr 1fr;
+                                                                                                                                gap:10px}
+                                                                                                                                .stat {
+                                                                                                                                  padding:16px}
+                                                                                                                                  .stat strong {
+                                                                                                                                    font-size:28px}
+                                                                                                                                    .toolbar {
+                                                                                                                                      flex-wrap:wrap;
+                                                                                                                                      gap:12px}
+                                                                                                                                      .shipment {
+                                                                                                                                        padding:17px}
+                                                                                                                                        .columns {
+                                                                                                                                          grid-template-columns:1fr;
+                                                                                                                                          gap:0}
+                                                                                                                                          dialog {
+                                                                                                                                            padding:22px}
+                                                                                                                                          }
+                                                                                                                                          @media(prefers-color-scheme:dark) {
+                                                                                                                                            :root {
+                                                                                                                                              color:#e0e8df;
+                                                                                                                                              background:#152219;
+                                                                                                                                              --paper:#1c2c21;
+                                                                                                                                              --line:#344738;
+                                                                                                                                              --muted:#a0b09e;
+                                                                                                                                              --green:#397751;
+                                                                                                                                              --soft:#2b4430}
+                                                                                                                                              .badge.warning {
+                                                                                                                                                background:#493b25;
+                                                                                                                                                color:#e5bf79}
+                                                                                                                                                #notice.error,[role=alert] {
+                                                                                                                                                  color:#f29e85}
+                                                                                                                                                }

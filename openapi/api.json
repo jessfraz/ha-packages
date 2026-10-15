@@ -1,0 +1,1223 @@
+{
+  "components": {
+    "responses": {
+      "Error": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        },
+        "description": "Error"
+      }
+    },
+    "schemas": {
+      "CreateShipment": {
+        "additionalProperties": false,
+        "properties": {
+          "merchant": {
+            "nullable": true,
+            "type": "string"
+          },
+          "order_reference": {
+            "nullable": true,
+            "type": "string"
+          },
+          "source": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Source"
+              }
+            ],
+            "nullable": true
+          },
+          "title": {
+            "type": "string"
+          },
+          "tracking": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Tracking"
+              }
+            ],
+            "nullable": true
+          }
+        },
+        "required": [
+          "title"
+        ],
+        "type": "object"
+      },
+      "Error": {
+        "description": "Error information from a response.",
+        "properties": {
+          "error_code": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "request_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "message",
+          "request_id"
+        ],
+        "type": "object"
+      },
+      "Event": {
+        "properties": {
+          "actor_id": {
+            "type": "string"
+          },
+          "at": {
+            "type": "string"
+          },
+          "detail": {
+            "type": "string"
+          },
+          "id": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/EventKind"
+          },
+          "shipment_id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "snapshot": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Shipment"
+              }
+            ],
+            "nullable": true
+          }
+        },
+        "required": [
+          "actor_id",
+          "at",
+          "detail",
+          "id",
+          "kind",
+          "shipment_id"
+        ],
+        "type": "object"
+      },
+      "EventKind": {
+        "enum": [
+          "created",
+          "updated",
+          "source_added",
+          "override_set",
+          "override_cleared",
+          "archived",
+          "restored",
+          "refresh_requested",
+          "carrier_updated"
+        ],
+        "type": "string"
+      },
+      "EventResultsPage": {
+        "description": "A single page of results",
+        "properties": {
+          "items": {
+            "description": "list of items on this page of results",
+            "items": {
+              "$ref": "#/components/schemas/Event"
+            },
+            "type": "array"
+          },
+          "next_page": {
+            "description": "token used to fetch the next page of results (if any)",
+            "nullable": true,
+            "type": "string"
+          }
+        },
+        "required": [
+          "items"
+        ],
+        "type": "object"
+      },
+      "SetOverride": {
+        "additionalProperties": false,
+        "properties": {
+          "reason": {
+            "type": "string"
+          },
+          "status": {
+            "$ref": "#/components/schemas/Status"
+          }
+        },
+        "required": [
+          "reason",
+          "status"
+        ],
+        "type": "object"
+      },
+      "Shipment": {
+        "properties": {
+          "archived": {
+            "type": "boolean"
+          },
+          "carrier_status": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Status"
+              }
+            ],
+            "nullable": true
+          },
+          "created_at": {
+            "type": "string"
+          },
+          "id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "merchant": {
+            "nullable": true,
+            "type": "string"
+          },
+          "order_reference": {
+            "nullable": true,
+            "type": "string"
+          },
+          "revision": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "sources": {
+            "items": {
+              "$ref": "#/components/schemas/Source"
+            },
+            "type": "array"
+          },
+          "status": {
+            "$ref": "#/components/schemas/Status"
+          },
+          "status_override": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/StatusOverride"
+              }
+            ],
+            "nullable": true
+          },
+          "sync": {
+            "$ref": "#/components/schemas/SyncState"
+          },
+          "title": {
+            "type": "string"
+          },
+          "tracking": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Tracking"
+              }
+            ],
+            "nullable": true
+          },
+          "updated_at": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "archived",
+          "created_at",
+          "id",
+          "revision",
+          "sources",
+          "status",
+          "sync",
+          "title",
+          "updated_at"
+        ],
+        "type": "object"
+      },
+      "ShipmentResultsPage": {
+        "description": "A single page of results",
+        "properties": {
+          "items": {
+            "description": "list of items on this page of results",
+            "items": {
+              "$ref": "#/components/schemas/Shipment"
+            },
+            "type": "array"
+          },
+          "next_page": {
+            "description": "token used to fetch the next page of results (if any)",
+            "nullable": true,
+            "type": "string"
+          }
+        },
+        "required": [
+          "items"
+        ],
+        "type": "object"
+      },
+      "Source": {
+        "additionalProperties": false,
+        "properties": {
+          "key": {
+            "type": "string"
+          },
+          "namespace": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "key",
+          "namespace"
+        ],
+        "type": "object"
+      },
+      "Status": {
+        "enum": [
+          "expected",
+          "unknown",
+          "pre_transit",
+          "in_transit",
+          "out_for_delivery",
+          "available_for_pickup",
+          "delivered",
+          "return_to_sender",
+          "failure",
+          "cancelled",
+          "error"
+        ],
+        "type": "string"
+      },
+      "StatusOverride": {
+        "properties": {
+          "actor_id": {
+            "type": "string"
+          },
+          "reason": {
+            "type": "string"
+          },
+          "set_at": {
+            "type": "string"
+          },
+          "status": {
+            "$ref": "#/components/schemas/Status"
+          }
+        },
+        "required": [
+          "actor_id",
+          "reason",
+          "set_at",
+          "status"
+        ],
+        "type": "object"
+      },
+      "Summary": {
+        "properties": {
+          "active": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "delivered": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "exceptions": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "expected": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "in_transit": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "out_for_delivery": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "sync_errors": {
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "active",
+          "delivered",
+          "exceptions",
+          "expected",
+          "in_transit",
+          "out_for_delivery",
+          "sync_errors"
+        ],
+        "type": "object"
+      },
+      "SyncState": {
+        "properties": {
+          "attempts": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "last_error": {
+            "nullable": true,
+            "type": "string"
+          },
+          "last_success_at": {
+            "nullable": true,
+            "type": "string"
+          },
+          "next_attempt_at": {
+            "format": "int64",
+            "nullable": true,
+            "type": "integer"
+          },
+          "tracker_id": {
+            "nullable": true,
+            "type": "string"
+          }
+        },
+        "required": [
+          "attempts"
+        ],
+        "type": "object"
+      },
+      "System": {
+        "properties": {
+          "credential_role": {
+            "type": "string"
+          },
+          "pending_syncs": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "provider_enabled": {
+            "type": "boolean"
+          },
+          "sync_errors": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "version": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "credential_role",
+          "pending_syncs",
+          "provider_enabled",
+          "sync_errors",
+          "version"
+        ],
+        "type": "object"
+      },
+      "Tracking": {
+        "additionalProperties": false,
+        "properties": {
+          "carrier": {
+            "nullable": true,
+            "type": "string"
+          },
+          "number": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "number"
+        ],
+        "type": "object"
+      },
+      "UpdateShipment": {
+        "additionalProperties": false,
+        "properties": {
+          "merchant": {
+            "nullable": true,
+            "type": "string"
+          },
+          "order_reference": {
+            "nullable": true,
+            "type": "string"
+          },
+          "title": {
+            "nullable": true,
+            "type": "string"
+          },
+          "tracking": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Tracking"
+              }
+            ],
+            "nullable": true
+          }
+        },
+        "type": "object"
+      }
+    }
+  },
+  "info": {
+    "description": "Persistent local shipment records, manual corrections, and carrier synchronization. Use a Bearer owner or ingestion token. Creates require Idempotency-Key; writes to an existing shipment require its quoted revision in If-Match.",
+    "title": "Shipments API",
+    "version": "0.1.0"
+  },
+  "openapi": "3.0.3",
+  "paths": {
+    "/": {
+      "get": {
+        "operationId": "index",
+        "responses": {
+          "default": {
+            "content": {
+              "*/*": {
+                "schema": {}
+              }
+            },
+            "description": ""
+          }
+        },
+        "tags": [
+          "web"
+        ]
+      }
+    },
+    "/app.js": {
+      "get": {
+        "operationId": "script",
+        "responses": {
+          "default": {
+            "content": {
+              "*/*": {
+                "schema": {}
+              }
+            },
+            "description": ""
+          }
+        },
+        "tags": [
+          "web"
+        ]
+      }
+    },
+    "/openapi.json": {
+      "get": {
+        "operationId": "schema",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "successful operation"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "tags": [
+          "system"
+        ]
+      }
+    },
+    "/style.css": {
+      "get": {
+        "operationId": "style",
+        "responses": {
+          "default": {
+            "content": {
+              "*/*": {
+                "schema": {}
+              }
+            },
+            "description": ""
+          }
+        },
+        "tags": [
+          "web"
+        ]
+      }
+    },
+    "/v1/shipments": {
+      "get": {
+        "operationId": "shipments_list",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "archived",
+            "schema": {
+              "nullable": true,
+              "type": "boolean"
+            }
+          },
+          {
+            "in": "query",
+            "name": "carrier",
+            "schema": {
+              "nullable": true,
+              "type": "string"
+            }
+          },
+          {
+            "description": "Maximum number of items returned by a single call",
+            "in": "query",
+            "name": "limit",
+            "schema": {
+              "format": "uint32",
+              "minimum": 1,
+              "nullable": true,
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "order_reference",
+            "schema": {
+              "nullable": true,
+              "type": "string"
+            }
+          },
+          {
+            "description": "Token returned by previous call to retrieve the subsequent page",
+            "in": "query",
+            "name": "page_token",
+            "schema": {
+              "nullable": true,
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "search",
+            "schema": {
+              "nullable": true,
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "source_key",
+            "schema": {
+              "nullable": true,
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "source_namespace",
+            "schema": {
+              "nullable": true,
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "status",
+            "schema": {
+              "$ref": "#/components/schemas/Status"
+            }
+          },
+          {
+            "in": "query",
+            "name": "tracking_number",
+            "schema": {
+              "nullable": true,
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ShipmentResultsPage"
+                }
+              }
+            },
+            "description": "successful operation"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "List local shipment records using stable keyset pagination.",
+        "tags": [
+          "shipments"
+        ],
+        "x-dropshot-pagination": {
+          "required": []
+        }
+      },
+      "post": {
+        "operationId": "shipments_create",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateShipment"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Shipment"
+                }
+              }
+            },
+            "description": "successful creation",
+            "headers": {
+              "etag": {
+                "required": true,
+                "schema": {
+                  "type": "string"
+                },
+                "style": "simple"
+              }
+            }
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Create a durable local record; provider registration happens asynchronously.",
+        "tags": [
+          "shipments"
+        ]
+      }
+    },
+    "/v1/shipments/{id}": {
+      "get": {
+        "operationId": "shipment_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Shipment"
+                }
+              }
+            },
+            "description": "successful operation",
+            "headers": {
+              "etag": {
+                "required": true,
+                "schema": {
+                  "type": "string"
+                },
+                "style": "simple"
+              }
+            }
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "tags": [
+          "shipments"
+        ]
+      },
+      "patch": {
+        "operationId": "shipment_update",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateShipment"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Shipment"
+                }
+              }
+            },
+            "description": "successful operation",
+            "headers": {
+              "etag": {
+                "required": true,
+                "schema": {
+                  "type": "string"
+                },
+                "style": "simple"
+              }
+            }
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "tags": [
+          "shipments"
+        ]
+      }
+    },
+    "/v1/shipments/{id}/archive": {
+      "delete": {
+        "operationId": "shipment_restore",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Shipment"
+                }
+              }
+            },
+            "description": "successful operation",
+            "headers": {
+              "etag": {
+                "required": true,
+                "schema": {
+                  "type": "string"
+                },
+                "style": "simple"
+              }
+            }
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "tags": [
+          "shipments"
+        ]
+      },
+      "put": {
+        "operationId": "shipment_archive",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Shipment"
+                }
+              }
+            },
+            "description": "successful operation",
+            "headers": {
+              "etag": {
+                "required": true,
+                "schema": {
+                  "type": "string"
+                },
+                "style": "simple"
+              }
+            }
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "tags": [
+          "shipments"
+        ]
+      }
+    },
+    "/v1/shipments/{id}/events": {
+      "get": {
+        "operationId": "shipment_events",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Maximum number of items returned by a single call",
+            "in": "query",
+            "name": "limit",
+            "schema": {
+              "format": "uint32",
+              "minimum": 1,
+              "nullable": true,
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Token returned by previous call to retrieve the subsequent page",
+            "in": "query",
+            "name": "page_token",
+            "schema": {
+              "nullable": true,
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EventResultsPage"
+                }
+              }
+            },
+            "description": "successful operation"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "tags": [
+          "shipments"
+        ],
+        "x-dropshot-pagination": {
+          "required": []
+        }
+      }
+    },
+    "/v1/shipments/{id}/refresh": {
+      "post": {
+        "operationId": "shipment_refresh",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Shipment"
+                }
+              }
+            },
+            "description": "successful operation",
+            "headers": {
+              "etag": {
+                "required": true,
+                "schema": {
+                  "type": "string"
+                },
+                "style": "simple"
+              }
+            }
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "tags": [
+          "shipments"
+        ]
+      }
+    },
+    "/v1/shipments/{id}/sources": {
+      "post": {
+        "operationId": "shipment_source",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Source"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Shipment"
+                }
+              }
+            },
+            "description": "successful operation",
+            "headers": {
+              "etag": {
+                "required": true,
+                "schema": {
+                  "type": "string"
+                },
+                "style": "simple"
+              }
+            }
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "tags": [
+          "shipments"
+        ]
+      }
+    },
+    "/v1/shipments/{id}/status-override": {
+      "delete": {
+        "operationId": "override_clear",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Shipment"
+                }
+              }
+            },
+            "description": "successful operation",
+            "headers": {
+              "etag": {
+                "required": true,
+                "schema": {
+                  "type": "string"
+                },
+                "style": "simple"
+              }
+            }
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "tags": [
+          "shipments"
+        ]
+      },
+      "put": {
+        "operationId": "override_set",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetOverride"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Shipment"
+                }
+              }
+            },
+            "description": "successful operation",
+            "headers": {
+              "etag": {
+                "required": true,
+                "schema": {
+                  "type": "string"
+                },
+                "style": "simple"
+              }
+            }
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "tags": [
+          "shipments"
+        ]
+      }
+    },
+    "/v1/summary": {
+      "get": {
+        "operationId": "summary",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Summary"
+                }
+              }
+            },
+            "description": "successful operation"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "tags": [
+          "system"
+        ]
+      }
+    },
+    "/v1/system": {
+      "get": {
+        "operationId": "system",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/System"
+                }
+              }
+            },
+            "description": "successful operation"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "tags": [
+          "system"
+        ]
+      }
+    }
+  },
+  "tags": [
+    {
+      "name": "shipments"
+    },
+    {
+      "name": "system"
+    },
+    {
+      "name": "web"
+    }
+  ]
+}

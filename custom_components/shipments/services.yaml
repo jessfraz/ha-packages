@@ -1,0 +1,69 @@
+add:
+  name: Add shipment
+  description: Add a shipment to the registry.
+  fields:
+    payload:
+      name: Shipment
+      description: Shipment fields accepted by the service API.
+      required: true
+      selector:
+        object:
+    idempotency_key:
+      name: Idempotency key
+      description: A unique key reused only when retrying this same creation.
+      required: true
+      selector:
+        text:
+refresh:
+  name: Refresh shipment
+  description: Ask the service to refresh tracking for a shipment.
+  fields:
+    shipment_id: &shipment_id
+      name: Shipment ID
+      required: true
+      selector:
+        text:
+    if_match: &if_match
+      name: Current ETag
+      description: The current shipment version from the service API.
+      required: true
+      selector:
+        text:
+    idempotency_key: &idempotency_key
+      name: Idempotency key
+      selector:
+        text:
+set_override:
+  name: Set status override
+  description: Record an administrator's explicit status decision.
+  fields:
+    shipment_id: *shipment_id
+    if_match: *if_match
+    idempotency_key: *idempotency_key
+    payload:
+      name: Override
+      description: Status and reason accepted by the service API.
+      required: true
+      selector:
+        object:
+clear_override:
+  name: Clear status override
+  description: Remove an administrator's status override.
+  fields:
+    shipment_id: *shipment_id
+    if_match: *if_match
+    idempotency_key: *idempotency_key
+archive:
+  name: Archive shipment
+  description: Archive a shipment after an administrator's explicit decision.
+  fields:
+    shipment_id: *shipment_id
+    if_match: *if_match
+    idempotency_key: *idempotency_key
+unarchive:
+  name: Restore shipment
+  description: Return an archived shipment to the active registry.
+  fields:
+    shipment_id: *shipment_id
+    if_match: *if_match
+    idempotency_key: *idempotency_key
