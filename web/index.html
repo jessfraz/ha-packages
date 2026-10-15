@@ -31,6 +31,16 @@
         ><button>Connect</button>
       </form>
       <section id="dashboard" hidden>
+        <details id="installation" class="installation" hidden>
+          <summary>Installation <span id="installation-summary"></span></summary>
+          <div class="installation-heading">
+            <p class="muted">Check the app, Home Assistant connection, tracking, and backup coverage.</p>
+            <button id="check-installation" class="quiet" type="button">Run checks</button>
+          </div>
+          <ul id="installation-checks"></ul>
+          <p id="backup-date" class="muted"></p>
+          <a href="https://github.com/jessfraz/ha-packages/blob/main/shipments/DOCS.md" target="_blank" rel="noopener noreferrer">Installation and pairing instructions ↗</a>
+        </details>
         <div id="summary" class="summary" aria-label="Shipment summary"></div>
         <div class="toolbar">
           <form id="search">

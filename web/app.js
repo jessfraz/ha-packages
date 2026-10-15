@@ -30,6 +30,8 @@ let savingEditor = false;
 let appliedSearch = "";
 let listController = null;
 let refreshTimer = null;
+let showInstallation = false;
+let installationInitialized = false;
 
 class ApiError extends Error {
   constructor(message, status) {
@@ -91,6 +93,7 @@ async function connect() {
   byId("login").hidden = true;
   byId("dashboard").hidden = false;
   byId("add").hidden = false;
+  showInstallation = system.credential_role === "owner";
   byId("health").textContent = system.provider_enabled
     ? `${system.pending_syncs} tracking checks scheduled · ${system.sync_errors} sync errors`
     : "Carrier tracking is off. Local records and manual controls are available.";
@@ -129,14 +132,16 @@ async function load(append = false) {
   }
 
   try {
-    const [summary, page, system] = await Promise.all([
+    const [summary, page, system, installation] = await Promise.all([
       api("v1/summary", { signal: controller.signal }),
       api(`v1/shipments?${query}`, { signal: controller.signal }),
       api("v1/system", { signal: controller.signal }),
+      showInstallation ? api("v1/installation", { signal: controller.signal }) : null,
     ]);
     // A search or archive-filter change owns its whole result, including any
     // pagination requests already in flight for the previous list.
     if (generation !== listGeneration) return;
+    if (installation) renderInstallation(installation);
     byId("health").textContent = system.provider_enabled
       ? `${system.pending_syncs} tracking checks scheduled · ${system.sync_errors} sync errors`
       : "Carrier tracking is off. Local records and manual controls are available.";
@@ -244,6 +249,59 @@ async function load(append = false) {
     }
   }
 }
+
+function renderInstallation(report) {
+  const list = byId("installation-checks");
+  list.replaceChildren();
+  let attention = 0;
+  for (const [key, label] of [
+    ["backend", "App and database"],
+    ["integration", "Home Assistant"],
+    ["authentication", "Authentication"],
+    ["easypost", "EasyPost"],
+    ["backup", "Backup"],
+  ]) {
+    const check = report[key];
+    const needsAttention = ["attention", "unavailable"].includes(check.status);
+    if (needsAttention) attention += 1;
+    const row = element("li", undefined, needsAttention ? "check-attention" : "");
+    const state = {
+      pass: "Passed",
+      attention: "Needs attention",
+      unavailable: "Unavailable",
+      not_applicable: "Optional",
+    }[check.status];
+    row.append(
+      element("strong", label),
+      element("span", state, "check-state"),
+      element("p", check.message),
+    );
+    list.append(row);
+  }
+  byId("backup-date").textContent = report.last_backup
+    ? `Last covering backup: ${new Date(report.last_backup * 1000).toLocaleString()}.`
+    : "";
+  byId("installation-summary").textContent = attention
+    ? `${attention} need attention`
+    : "Checks passed";
+  byId("installation").hidden = false;
+  if (!installationInitialized) {
+    byId("installation").open = attention > 0;
+    installationInitialized = true;
+  }
+}
+
+byId("check-installation").addEventListener("click", guarded(async () => {
+  const button = byId("check-installation");
+  button.disabled = true;
+  button.textContent = "Checking…";
+  try {
+    renderInstallation(await api("v1/installation/check", { method: "POST" }));
+  } finally {
+    button.disabled = false;
+    button.textContent = "Run checks";
+  }
+}));
 
 async function refreshDashboard() {
   if (listController || document.hidden || byId("dashboard").hidden) return;

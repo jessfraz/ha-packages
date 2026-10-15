@@ -7,8 +7,7 @@
   "documentation": "https://github.com/jessfraz/ha-packages",
   "integration_type": "service",
   "iot_class": "local_polling",
-  "issue_tracker": "https://github.com/jessfraz/ha-packages/issues",
   "requirements": [],
   "single_config_entry": true,
-  "version": "0.1.1"
+  "version": "0.2.0"
 }

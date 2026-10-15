@@ -36,6 +36,8 @@ pub enum SyncError {
     ResponseTooLarge,
     #[error("EasyPost returned an invalid tracker")]
     InvalidResponse,
+    #[error("EasyPost returned an invalid connection-check response")]
+    InvalidConnectionResponse,
 }
 
 #[derive(Clone)]
@@ -52,6 +54,19 @@ pub struct Tracker {
     pub id: String,
     pub tracking_code: String,
     pub status: Status,
+}
+
+#[derive(Deserialize)]
+struct TrackerPage {
+    trackers: Vec<TrackerObject>,
+    #[serde(rename = "has_more")]
+    _has_more: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "object")]
+enum TrackerObject {
+    Tracker,
 }
 
 #[derive(Serialize)]
@@ -109,6 +124,29 @@ impl EasyPostClient {
         })
     }
 
+    /// Check authenticated access with one read-only list request. No trackers
+    /// are created, and no returned tracking or account details leave this call.
+    pub async fn check_connection(&self) -> Result<(), SyncError> {
+        let url = self
+            .base
+            .join("trackers")
+            .map_err(|_| SyncError::Configuration)?;
+        let response = self
+            .client
+            .get(url)
+            .query(&[("page_size", 1_u8)])
+            .basic_auth(&self.api_key, Some(""))
+            .send()
+            .await
+            .map_err(redact_request_error)?;
+        let page: TrackerPage = serde_json::from_slice(&Self::read_body(response).await?)
+            .map_err(|_| SyncError::InvalidConnectionResponse)?;
+        if page.trackers.len() > 1 {
+            return Err(SyncError::InvalidConnectionResponse);
+        }
+        Ok(())
+    }
+
     pub async fn register(
         &self,
         tracking_code: &str,
@@ -164,10 +202,19 @@ impl EasyPostClient {
         Ok(tracker)
     }
 
-    async fn read_tracker(
-        mut response: Response,
-        tracking_code: &str,
-    ) -> Result<Tracker, SyncError> {
+    async fn read_tracker(response: Response, tracking_code: &str) -> Result<Tracker, SyncError> {
+        let tracker: Tracker = serde_json::from_slice(&Self::read_body(response).await?)
+            .map_err(|_| SyncError::InvalidResponse)?;
+        if !valid_tracker_id(&tracker.id)
+            || tracker.tracking_code != tracking_code
+            || tracker.status == Status::Expected
+        {
+            return Err(SyncError::InvalidResponse);
+        }
+        Ok(tracker)
+    }
+
+    async fn read_body(mut response: Response) -> Result<Vec<u8>, SyncError> {
         if !response.status().is_success() {
             // Accept bounded delta-seconds. Ignore unparseable, zero, or
             // excessive advice; none of the raw header or body is persisted.
@@ -195,15 +242,7 @@ impl EasyPostClient {
             }
             body.extend_from_slice(&chunk);
         }
-        let tracker: Tracker =
-            serde_json::from_slice(&body).map_err(|_| SyncError::InvalidResponse)?;
-        if !valid_tracker_id(&tracker.id)
-            || tracker.tracking_code != tracking_code
-            || tracker.status == Status::Expected
-        {
-            return Err(SyncError::InvalidResponse);
-        }
-        Ok(tracker)
+        Ok(body)
     }
 }
 

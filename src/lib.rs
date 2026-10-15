@@ -1,6 +1,8 @@
 pub mod api;
 pub mod config;
 pub mod error;
+pub mod installation;
 pub mod models;
 pub mod store;
+pub mod supervisor;
 pub mod sync;

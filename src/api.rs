@@ -1,10 +1,16 @@
-use crate::{models::*, store::Store};
+use crate::{
+    installation::{Installation, InstallationReport, IntegrationPresence, valid_presence},
+    models::*,
+    store::Store,
+    sync::EasyPostClient,
+};
 use anyhow::{Context as _, Result, anyhow};
 use dropshot::ClientErrorStatusCode as StatusCode;
 use dropshot::{
     ApiDescription, Body, ConfigDropshot, ConfigLogging, ConfigLoggingLevel, HttpError,
-    HttpResponseCreated, HttpResponseHeaders, HttpResponseOk, HttpServer, HttpServerStarter,
-    PaginationParams, Path, Query, RequestContext, ResultsPage, TypedBody, WhichPage, endpoint,
+    HttpResponseCreated, HttpResponseHeaders, HttpResponseOk, HttpResponseUpdatedNoContent,
+    HttpServer, HttpServerStarter, PaginationParams, Path, Query, RequestContext, ResultsPage,
+    TypedBody, WhichPage, endpoint,
 };
 use http::{HeaderValue, Response};
 use schemars::JsonSchema;
@@ -17,12 +23,15 @@ use std::{
 use subtle::ConstantTimeEq;
 use uuid::Uuid;
 
+#[derive(Clone)]
 pub struct Context {
     pub store: Store,
     owner_digest: [u8; 32],
     agent_digest: Option<[u8; 32]>,
+    integration_digest: Option<[u8; 32]>,
     ingress_peer: Option<IpAddr>,
-    provider_enabled: bool,
+    provider: Option<EasyPostClient>,
+    installation: Arc<Installation>,
 }
 
 impl Context {
@@ -31,21 +40,35 @@ impl Context {
         owner: &str,
         agent: Option<&str>,
         ingress_peer: Option<IpAddr>,
-        provider_enabled: bool,
+        provider: Option<EasyPostClient>,
     ) -> Self {
         Self {
             store,
             owner_digest: Sha256::digest(owner).into(),
             agent_digest: agent.map(|value| Sha256::digest(value).into()),
+            integration_digest: None,
             ingress_peer,
-            provider_enabled,
+            provider,
+            installation: Arc::new(Installation::new(false)),
         }
+    }
+
+    pub fn with_integration(mut self, token: &str) -> Self {
+        self.integration_digest = Some(Sha256::digest(token).into());
+        self.installation = Arc::new(Installation::new(true));
+        self
+    }
+
+    pub fn for_ingress(mut self, peer: IpAddr) -> Self {
+        self.ingress_peer = Some(peer);
+        self
     }
 }
 
 struct Principal {
     actor: String,
     owner: bool,
+    integration: bool,
 }
 
 fn client_error(status: StatusCode, message: &str) -> HttpError {
@@ -93,6 +116,7 @@ fn authenticate(
         Principal {
             actor: format!("ha:{user}"),
             owner: true,
+            integration: false,
         }
     } else {
         let token = header(request, "authorization")
@@ -112,6 +136,31 @@ fn authenticate(
             Principal {
                 actor: actor.to_string(),
                 owner: true,
+                integration: false,
+            }
+        } else if context
+            .integration_digest
+            .as_ref()
+            .is_some_and(|expected| bool::from(digest.ct_eq(expected)))
+        {
+            let actor = header(request, "x-shipments-actor");
+            if request.request.method() != http::Method::GET
+                && !actor.is_some_and(|value| {
+                    value.starts_with("ha:")
+                        && value.len() > 3
+                        && value.len() <= 200
+                        && !value.chars().any(char::is_control)
+                })
+            {
+                return Err(client_error(
+                    StatusCode::FORBIDDEN,
+                    "integration writes require a Home Assistant actor",
+                ));
+            }
+            Principal {
+                actor: actor.unwrap_or("ha:integration").into(),
+                owner: false,
+                integration: true,
             }
         } else if context
             .agent_digest
@@ -121,12 +170,13 @@ fn authenticate(
             Principal {
                 actor: "agent".into(),
                 owner: false,
+                integration: false,
             }
         } else {
             return Err(client_error(StatusCode::UNAUTHORIZED, "invalid credential"));
         }
     };
-    if human_only && !principal.owner {
+    if human_only && !principal.owner && !principal.integration {
         return Err(client_error(
             StatusCode::FORBIDDEN,
             "owner credential required for manual corrections and archive",
@@ -446,10 +496,89 @@ async fn system(
     let mut system = request
         .context()
         .store
-        .system(request.context().provider_enabled)
+        .system(request.context().provider.is_some())
         .await?;
-    system.credential_role = if principal.owner { "owner" } else { "agent" }.into();
+    system.credential_role = if principal.owner {
+        "owner"
+    } else if principal.integration {
+        "integration"
+    } else {
+        "agent"
+    }
+    .into();
     Ok(HttpResponseOk(system))
+}
+
+/// Read local installation checks without contacting EasyPost.
+#[endpoint {method=GET,path="/v1/installation",tags=["system"]}]
+async fn installation(
+    request: RequestContext<Arc<Context>>,
+) -> Result<HttpResponseOk<InstallationReport>, HttpError> {
+    require_owner(&request)?;
+    installation_report(&request).await.map(HttpResponseOk)
+}
+
+/// Explicitly check EasyPost using a read-only request, cached for one minute.
+#[endpoint {method=POST,path="/v1/installation/check",tags=["system"]}]
+async fn installation_check(
+    request: RequestContext<Arc<Context>>,
+) -> Result<HttpResponseOk<InstallationReport>, HttpError> {
+    require_owner(&request)?;
+    let context = request.context();
+    context
+        .installation
+        .check_provider(context.provider.as_ref())
+        .await;
+    installation_report(&request).await.map(HttpResponseOk)
+}
+
+/// Report a successful integration poll and its Supervisor backup inventory.
+#[endpoint {method=POST,path="/v1/integration/presence",tags=["system"]}]
+async fn integration_presence(
+    request: RequestContext<Arc<Context>>,
+    body: TypedBody<IntegrationPresence>,
+) -> Result<HttpResponseUpdatedNoContent, HttpError> {
+    let principal = authenticate(&request, false)?;
+    if !principal.integration {
+        return Err(client_error(
+            StatusCode::FORBIDDEN,
+            "integration credential required",
+        ));
+    }
+    let presence = body.into_inner();
+    if !valid_presence(&presence) {
+        return Err(client_error(
+            StatusCode::BAD_REQUEST,
+            "invalid integration presence",
+        ));
+    }
+    request.context().installation.presence(presence).await;
+    Ok(HttpResponseUpdatedNoContent())
+}
+
+fn require_owner(request: &RequestContext<Arc<Context>>) -> Result<(), HttpError> {
+    if !authenticate(request, false)?.owner {
+        return Err(client_error(
+            StatusCode::FORBIDDEN,
+            "owner credential required for installation checks",
+        ));
+    }
+    Ok(())
+}
+
+async fn installation_report(
+    request: &RequestContext<Arc<Context>>,
+) -> Result<InstallationReport, HttpError> {
+    // Test the actual database connection, rather than inferring it from uptime.
+    sqlx::query_scalar::<_, i64>("SELECT 1")
+        .fetch_one(request.context().store.pool())
+        .await
+        .map_err(crate::error::Error::from)?;
+    Ok(request
+        .context()
+        .installation
+        .report(request.context().provider.is_some())
+        .await)
 }
 
 #[endpoint {method=GET,path="/openapi.json",tags=["system"]}]
@@ -495,7 +624,7 @@ async fn style(request: RequestContext<Arc<Context>>) -> Result<Response<Body>, 
 
 pub fn description() -> Result<ApiDescription<Arc<Context>>> {
     let mut api = ApiDescription::new();
-    let endpoints: [dropshot::ApiEndpoint<Arc<Context>>; 17] = [
+    let endpoints: [dropshot::ApiEndpoint<Arc<Context>>; 20] = [
         shipments_list.into(),
         shipments_create.into(),
         shipment_get.into(),
@@ -509,6 +638,9 @@ pub fn description() -> Result<ApiDescription<Arc<Context>>> {
         shipment_events.into(),
         summary.into(),
         system.into(),
+        installation.into(),
+        installation_check.into(),
+        integration_presence.into(),
         schema.into(),
         index.into(),
         script.into(),

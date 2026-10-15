@@ -3,6 +3,7 @@ use shipments::{
     api,
     config::Config,
     store::Store,
+    supervisor::Supervisor,
     sync::{EasyPostClient, SyncWorker},
 };
 use std::sync::Arc;
@@ -19,31 +20,53 @@ async fn main() -> Result<()> {
         .api_token
         .as_deref()
         .context("missing owner credential")?;
-    let context = Arc::new(api::Context::new(
+    let provider = config
+        .easypost_api_key
+        .map(EasyPostClient::new)
+        .transpose()?;
+    let mut context = api::Context::new(
         store.clone(),
         token,
         config.agent_token.as_deref(),
         None,
-        config.easypost_api_key.is_some(),
-    ));
-    let server = api::start(config.bind, context)?;
+        provider.clone(),
+    );
+    if let Some(token) = &config.integration_token {
+        context = context.with_integration(token);
+    }
+    let server = api::start(config.bind, Arc::new(context.clone()))?;
     let ingress = if let Some(bind) = config.ingress_bind {
         Some(api::start(
             bind,
-            Arc::new(api::Context::new(
-                store.clone(),
-                token,
-                None,
-                Some(config.ingress_peer),
-                config.easypost_api_key.is_some(),
-            )),
+            Arc::new(context.for_ingress(config.ingress_peer)),
         )?)
     } else {
         None
     };
     let (stop_tx, mut stop_rx) = tokio::sync::watch::channel(false);
-    let worker = if let Some(key) = config.easypost_api_key {
-        let worker = SyncWorker::new(store.pool().clone(), EasyPostClient::new(key)?);
+    let discovery = if let (Some(supervisor), Some(integration_token)) =
+        (Supervisor::from_environment()?, config.integration_token)
+    {
+        let mut discovery_stop = stop_rx.clone();
+        Some(tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = discovery_stop.changed() => break,
+                    result = supervisor.announce(&integration_token) => {
+                        if result.is_err() { eprintln!("Home Assistant discovery is unavailable; retrying"); }
+                    }
+                }
+                tokio::select! {
+                    _ = discovery_stop.changed() => break,
+                    _ = tokio::time::sleep(std::time::Duration::from_secs(60)) => {}
+                }
+            }
+        }))
+    } else {
+        None
+    };
+    let worker = if let Some(provider) = provider {
+        let worker = SyncWorker::new(store.pool().clone(), provider);
         Some(tokio::spawn(async move {
             loop {
                 tokio::select! {
@@ -73,6 +96,9 @@ async fn main() -> Result<()> {
     let _ = stop_tx.send(true);
     if let Some(worker) = worker {
         worker.await?;
+    }
+    if let Some(discovery) = discovery {
+        discovery.await?;
     }
     store.close().await?;
     Ok(())
