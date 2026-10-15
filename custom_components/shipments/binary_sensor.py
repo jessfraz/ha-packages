@@ -7,12 +7,11 @@ from homeassistant.components.binary_sensor import (
 )
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
-from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from .const import DOMAIN
 from .coordinator import ShipmentsCoordinator
+from .entity import shipments_device_info
 
 
 async def async_setup_entry(
@@ -21,7 +20,7 @@ async def async_setup_entry(
     async_add_entities: AddConfigEntryEntitiesCallback,
 ) -> None:
     async_add_entities(
-        ShipmentProblem(entry.runtime_data, entry.entry_id, key)
+        ShipmentProblem(entry.runtime_data, entry, key)
         for key in ("exceptions", "sync_errors")
     )
 
@@ -32,14 +31,17 @@ class ShipmentProblem(CoordinatorEntity[ShipmentsCoordinator], BinarySensorEntit
     _attr_has_entity_name = True
 
     def __init__(
-        self, coordinator: ShipmentsCoordinator, entry_id: str, key: str
+        self,
+        coordinator: ShipmentsCoordinator,
+        entry: ConfigEntry[ShipmentsCoordinator],
+        key: str,
     ) -> None:
         super().__init__(coordinator)
         self.entity_description = BinarySensorEntityDescription(
             key=key, translation_key=key, device_class=BinarySensorDeviceClass.PROBLEM
         )
-        self._attr_unique_id = f"{entry_id}_{key}_problem"
-        self._attr_device_info = DeviceInfo(identifiers={(DOMAIN, entry_id)})
+        self._attr_unique_id = f"{entry.entry_id}_{key}_problem"
+        self._attr_device_info = shipments_device_info(entry)
 
     @property
     def is_on(self) -> bool:

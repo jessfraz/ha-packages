@@ -5,13 +5,12 @@ from datetime import datetime
 from homeassistant.components.calendar import CalendarEntity, CalendarEvent
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
-from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from homeassistant.util import dt as dt_util
 
-from .const import DOMAIN
 from .coordinator import ShipmentsCoordinator
+from .entity import shipments_device_info
 
 
 async def async_setup_entry(
@@ -19,7 +18,7 @@ async def async_setup_entry(
     entry: ConfigEntry[ShipmentsCoordinator],
     async_add_entities: AddConfigEntryEntitiesCallback,
 ) -> None:
-    async_add_entities([InboundDeliveryCalendar(entry.runtime_data, entry.entry_id)])
+    async_add_entities([InboundDeliveryCalendar(entry.runtime_data, entry)])
 
 
 class InboundDeliveryCalendar(CoordinatorEntity[ShipmentsCoordinator], CalendarEntity):
@@ -29,10 +28,14 @@ class InboundDeliveryCalendar(CoordinatorEntity[ShipmentsCoordinator], CalendarE
     _attr_translation_key = "inbound_deliveries"
     _attr_supported_features = 0
 
-    def __init__(self, coordinator: ShipmentsCoordinator, entry_id: str) -> None:
+    def __init__(
+        self,
+        coordinator: ShipmentsCoordinator,
+        entry: ConfigEntry[ShipmentsCoordinator],
+    ) -> None:
         super().__init__(coordinator)
-        self._attr_unique_id = f"{entry_id}_inbound_deliveries"
-        self._attr_device_info = DeviceInfo(identifiers={(DOMAIN, entry_id)})
+        self._attr_unique_id = f"{entry.entry_id}_inbound_deliveries"
+        self._attr_device_info = shipments_device_info(entry)
 
     @property
     def event(self) -> CalendarEvent | None:
