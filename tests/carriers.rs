@@ -2,7 +2,6 @@ use std::sync::Arc;
 
 use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use shipments::{api, error::Error, models::CreateShipment, store::Store};
 
 #[derive(Serialize)]
@@ -61,9 +60,9 @@ async fn unsupported_carrier_is_rejected_before_provider_configuration_is_requir
 
 #[tokio::test]
 async fn canonical_carriers_preserve_legacy_create_replays_and_database_identity() {
-    // Exact normalized CreateShipment wire format from 0.3.1, before signature
-    // metadata and canonical carrier serialization were added.
-    let legacy_input = r#"{"title":"Legacy parcel","merchant":null,"order_reference":null,"tracking":{"carrier":"usps","number":"LEGACY-TRACK"},"source":null}"#;
+    // SHA-256 of the normalized 0.3.1 CreateShipment, before signature metadata
+    // and canonical carrier serialization were added.
+    let legacy_fingerprint = "7544857e9aaff2976b141e1cb728de5f1133ff55fcaac7302e8b257e469fa71c";
     let mut input: CreateShipment = serde_json::from_str(r#"{"title":"Legacy parcel","direction":"inbound","merchant":null,"order_reference":null,"tracking":{"carrier":"usps","number":"LEGACY-TRACK"},"source":null}"#).unwrap();
     let directory = tempfile::tempdir().unwrap();
     let store = Store::open(&directory.path().join("shipments.sqlite3"))
@@ -80,7 +79,7 @@ async fn canonical_carriers_preserve_legacy_create_replays_and_database_identity
             .fetch_one(store.pool())
             .await
             .unwrap();
-    assert_eq!(fingerprint, format!("{:x}", Sha256::digest(legacy_input)));
+    assert_eq!(fingerprint, legacy_fingerprint);
     let carrier: String = sqlx::query_scalar("SELECT tracking_carrier FROM shipments WHERE id=?")
         .bind(created.id.to_string())
         .fetch_one(store.pool())

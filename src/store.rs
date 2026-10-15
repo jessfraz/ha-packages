@@ -203,10 +203,10 @@ fn create_fingerprint(input: &CreateShipment) -> Result<String, Error> {
         },
         source: &input.source,
     };
-    Ok(format!(
-        "{:x}",
-        Sha256::digest(serde_json::to_vec(&payload)?)
-    ))
+    Ok(Sha256::digest(serde_json::to_vec(&payload)?)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect())
 }
 
 fn validate_source(source: &Source) -> Result<(), Error> {
