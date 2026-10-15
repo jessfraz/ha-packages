@@ -13,6 +13,7 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from .const import SENSOR_KEYS
 from .coordinator import ShipmentsCoordinator
 from .entity import shipments_device_info
+from .models import ShipmentItems, ShipmentItemsAttributes
 
 
 async def async_setup_entry(
@@ -27,9 +28,10 @@ async def async_setup_entry(
 
 
 class ShipmentCountSensor(CoordinatorEntity[ShipmentsCoordinator], SensorEntity):
-    """A backend-owned count, with no local shipment interpretation."""
+    """A backend-owned count with optional bounded dashboard items."""
 
     _attr_has_entity_name = True
+    _unrecorded_attributes = frozenset({"items", "items_truncated"})
 
     def __init__(
         self,
@@ -64,3 +66,14 @@ class ShipmentCountSensor(CoordinatorEntity[ShipmentsCoordinator], SensorEntity)
         """Return only a count supported by the coordinated backend."""
         data = self.coordinator.data
         return data.get(self.entity_description.key) if data is not None else None
+
+    @property
+    def extra_state_attributes(self) -> ShipmentItemsAttributes | None:
+        """Expose only the two bounded dashboard lists, never stale item data."""
+        key = self.entity_description.key
+        if key not in {"inbound_delivered_today", "inbound_out_for_delivery"}:
+            return None
+        projection = (
+            self.coordinator.shipment_items.get(key) if self.available else None
+        )
+        return (projection or ShipmentItems()).attributes()

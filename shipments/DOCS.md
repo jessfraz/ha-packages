@@ -125,6 +125,33 @@ uses the same window: `#view=delivered_today&direction=inbound`. The linkable
 count. Failed carrier setup remains visible until explicitly retried after
 configuration.
 
+### Package lists in dashboard sensors
+
+`sensor.shipments_inbound_delivered_today` and
+`sensor.shipments_inbound_out_for_delivery` keep count states and also expose:
+
+| Attribute | Meaning |
+| --- | --- |
+| `items` | Up to 20 matching inbound shipments; an empty list when none match. |
+| `items_truncated` | `true` when more than 20 shipments match. |
+
+Each item has `id`, `title`, `carrier`, `status`, `delivered_at`,
+`estimated_delivery`, and `url`. Dates are ISO strings or `null` when unknown.
+Titles retain their stored text. The relative URL opens that shipment through
+the Shipments panel, for example
+`/shipments/shipments/shipment%3D0193c69f-e5c4-7e93-b6cb-8172dacb617e`.
+
+Today's list uses the count's exact Home Assistant local-day bounds and sorts
+by actual delivery time, newest first. The out-for-delivery list sorts by ETA.
+Unknown ETAs sort last. Each refresh adds one bounded list request per sensor.
+If counts and items cannot form a complete snapshot, the sensors become
+unavailable rather than publish mismatched details. The existing mixed-version
+rule still applies to the delivered-today sensor.
+
+Tracking numbers are not included in these attributes. Both `items` and
+`items_truncated` are excluded from the Home Assistant recorder, so changing
+package details does not accumulate in its history database.
+
 The integration also creates native problem entities:
 
 | Default entity ID | On when |

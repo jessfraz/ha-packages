@@ -1,4 +1,4 @@
-"""Coordinate shipment counts and authenticated installation check-ins."""
+"""Coordinate shipment counts, dashboard items and installation check-ins."""
 
 import asyncio
 import json
@@ -26,12 +26,15 @@ from .models import (
     DeliveryDayReport,
     DeliveryEstimate,
     Direction,
+    ShipmentItem,
+    ShipmentItems,
     ShipmentStatusEvent,
     delivery_estimate,
 )
 
 _LOGGER = logging.getLogger(__name__)
 _BACKUP_TIMEOUT_SECONDS = 10
+_ITEM_LIMIT = 20
 
 
 class BackupReport(TypedDict):
@@ -80,6 +83,7 @@ class ShipmentsCoordinator(DataUpdateCoordinator[dict[str, int]]):
         self._entry = entry
         self._version = version
         self.inbound_estimates: tuple[DeliveryEstimate, ...] = ()
+        self.shipment_items: dict[str, ShipmentItems] = {}
         self._event_store = Store[EventCheckpoint](
             hass, 1, f"{DOMAIN}.{entry.entry_id}.events", atomic_writes=True
         )
@@ -99,11 +103,19 @@ class ShipmentsCoordinator(DataUpdateCoordinator[dict[str, int]]):
             for direction, keys in DIRECTION_SUMMARY_KEYS.items():
                 counts = await self._async_summary(direction)
                 summary.update({f"{direction}_{key}": counts[key] for key in keys})
+            item_lists = {
+                "inbound_out_for_delivery": await self._async_items(
+                    summary["inbound_out_for_delivery"]
+                )
+            }
             day = None
             if versions_match:
                 day = DeliveryDay.at(dt_util.utcnow(), self.hass.config.time_zone)
                 delivered = await self._async_summary(Direction.INBOUND, day)
                 summary["inbound_delivered_today"] = delivered["delivered"]
+                item_lists["inbound_delivered_today"] = await self._async_items(
+                    delivered["delivered"], day
+                )
             estimates = await self._async_estimates()
             await self._async_report_presence(day)
         except (ClientError, TimeoutError, ResponseTooLarge, ValueError) as err:
@@ -130,7 +142,45 @@ class ShipmentsCoordinator(DataUpdateCoordinator[dict[str, int]]):
             if isinstance(err, ConfigEntryAuthFailed):
                 self._entry.async_start_reauth(self.hass)
         self.inbound_estimates = estimates
+        self.shipment_items = item_lists
         return summary
+
+    async def _async_items(
+        self, count: int, day: DeliveryDay | None = None
+    ) -> ShipmentItems:
+        """Read one bounded page, using the count's exact filters and day bounds."""
+        query = {
+            "direction": Direction.INBOUND,
+            "archived": "false",
+            "limit": str(_ITEM_LIMIT),
+            "sort": "delivered" if day is not None else "expected",
+        }
+        if day is not None:
+            query.update(day.query())
+        else:
+            query["status"] = "out_for_delivery"
+        response = await self.client.request("GET", f"/v1/shipments?{urlencode(query)}")
+        if response.status in {401, 403}:
+            raise ConfigEntryAuthFailed("The backend rejected its credential")
+        if response.status != 200:
+            raise UpdateFailed("Cannot read inbound shipment items")
+        data = response.json()
+        if not isinstance(data, dict) or not isinstance(data.get("items"), list):
+            raise ValueError("Invalid shipment item page")
+        records = data["items"]
+        cursor = data.get("next_page")
+        if cursor is not None and (not isinstance(cursor, str) or not cursor):
+            raise ValueError("Invalid shipment item cursor")
+        if len(records) != min(count, _ITEM_LIMIT) or (cursor is not None) != (
+            count > _ITEM_LIMIT
+        ):
+            # Counts and pages are separate reads. A concurrent update must not
+            # publish mismatched lists; the next poll can obtain a new snapshot.
+            raise ValueError("Shipment count and item page changed during refresh")
+        items = tuple(ShipmentItem.parse(record, day) for record in records)
+        if len({item.id for item in items}) != len(items):
+            raise ValueError("Duplicate shipment in item page")
+        return ShipmentItems(items, count > _ITEM_LIMIT)
 
     @callback
     def async_subscribe_event(

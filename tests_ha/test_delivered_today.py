@@ -70,7 +70,7 @@ async def test_inbound_delivered_today_uses_ha_timezone_and_dst(
     queries = [
         request.query
         for request in backend.requests
-        if "delivered_after" in request.query
+        if request.path == "/v1/summary" and "delivered_after" in request.query
     ]
     assert queries
     assert all(
@@ -151,7 +151,9 @@ async def test_presence_shares_exact_ha_day_with_the_app_ui(
     ][-1]
     report = json.loads(presence.body)
     summary = [
-        request for request in backend.requests if "delivered_after" in request.query
+        request
+        for request in backend.requests
+        if request.path == "/v1/summary" and "delivered_after" in request.query
     ][-1]
     assert report["delivery_day"] == {
         "date": "2026-03-08",
