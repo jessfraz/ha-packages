@@ -78,8 +78,9 @@ Assistant. Without a recent integration check-in, the version match is
 unverified.
 
 **Run checks** makes a read-only EasyPost request when a key is configured;
-results are cached for up to a minute. Without a key, new shipments and tracking
-edits are still saved; their EasyPost registration remains pending.
+requests are rate-limited to once per minute. A successful result stays passed
+until a later check actually fails. Without a key, new shipments and tracking
+edits cannot be verified or saved.
 
 The backup check shows the recorded backup time. It requires a backup made
 after pairing. An older, app-only, or missing backup needs attention; an
@@ -97,6 +98,7 @@ shipments, including **Exceptions** and **Sync errors**. It also adds:
 | --- | --- |
 | `inbound_active` | Active packages you receive. |
 | `inbound_out_for_delivery` | Incoming packages out for delivery. |
+| `inbound_delivered_today` | Incoming packages delivered during Home Assistant’s local day, using actual carrier delivery timestamps. |
 | `inbound_exceptions` | Incoming packages with a delivery exception. |
 | `outbound_active` | Active packages you send. |
 | `outbound_exceptions` | Outgoing packages with a delivery exception. |
@@ -113,6 +115,14 @@ delivered shipment reduces that count. Keep the existing `expected` sensor
 entity ID; its visible name is now **Awaiting pickup**. That API aggregate
 includes expected, unknown, and pre-transit shipments. An unknown tracking state
 does not prove the carrier has created a label or is waiting for pickup.
+
+**Inbound delivered today** excludes outbound shipments and unknown delivery
+timestamps. Its day starts at midnight in Home Assistant's configured timezone,
+including daylight-saving changes. The dashboard's **Delivered today** filter
+uses the same window: `#view=delivered_today&direction=inbound`. The linkable
+**Tracking issues** card (`#view=tracking_issues`) matches the combined sync-error
+count. Failed carrier setup remains visible until explicitly retried after
+configuration.
 
 The integration also creates native problem entities:
 
@@ -161,7 +171,7 @@ rename an entity in Home Assistant.
 
 | Option | Purpose |
 | --- | --- |
-| `easypost_api_key` | Enables background registration and tracking updates. |
+| `easypost_api_key` | Enables tracking verification before saving and background tracking updates. |
 
 ## Add or edit a shipment
 
@@ -177,16 +187,22 @@ FedEx credentials. If the provider reports `CREDENTIALS_NOT_FOUND`, correct
 that choice or configure the carrier account; retrying does not fix missing
 credentials or mean that the number is invalid.
 
-Select **Save shipment** to commit it locally. Registration runs in the
-background; the pending badge remains until EasyPost confirms tracking. The
-app first looks for an existing matching tracker and adopts it when found,
-including for old failed creates that were never saved locally. It registers
-only after a complete lookup finds no match. A failed lookup backs off, and
-ambiguous matches need attention. New
-labels can be registered before their first scan. Provider outages keep the
-record and schedule retries. Unsupported or mismatched numbers remain visible
-with a clear error so you can correct them; malformed input is rejected before
-saving. A tracking number cannot be removed.
+Select **Save shipment** to verify tracking and save the accepted shipment.
+Auto-detection must return a supported carrier, which is always stored with the
+tracking number. New labels can be accepted before their first scan. Failed
+detection or verification shows a clear error and saves no shipment; a failed
+tracking edit preserves the original tracking identity.
+
+The app checks for an existing matching tracker before registration, including
+old failed creates that were never saved locally. Durable verification intent
+survives timeouts and restarts. Retry the same request and idempotency key after
+the displayed backoff; only a complete empty lookup permits a new registration.
+Missing carrier accounts or credentials show **Setup required** and stop
+background retries. Configure the carrier in EasyPost, then select **Refresh
+tracking**. A tracking number cannot be removed.
+
+On upgrade, legacy records missing either a carrier or tracking number are
+removed with their sources, history and create replays.
 
 Open a shipment for tracking links, delivery dates, signature information and
 carrier scan history. Action buttons and manual corrections follow history.

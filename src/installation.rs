@@ -1,7 +1,7 @@
 //! Live install checks. A recent authenticated adapter heartbeat establishes
 //! that Home Assistant actually loaded the integration and reached this app.
 
-use crate::shipping_api::ShippingApi;
+use crate::{delivery::DeliveryDay, shipping_api::ShippingApi};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -35,6 +35,8 @@ pub struct IntegrationPresence {
     pub backup: BackupReport,
     #[serde(default)]
     pub administrator_ids: Vec<String>,
+    #[serde(default)]
+    pub delivery_day: Option<DeliveryDay>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
@@ -131,6 +133,18 @@ impl Installation {
             .ok()
             .map(|elapsed| elapsed.as_secs());
         *self.provider.lock().await = Some((Instant::now(), result));
+    }
+
+    pub async fn delivery_day(&self) -> Option<DeliveryDay> {
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).ok()?;
+        let now = i64::try_from(now.as_secs()).ok()?;
+        let presence = self.presence.lock().await;
+        presence
+            .as_ref()
+            .filter(|(at, _)| at.elapsed() < PRESENCE_MAX_AGE)
+            .and_then(|(_, report)| report.delivery_day.as_ref())
+            .filter(|day| day.valid() && day.contains(now))
+            .cloned()
     }
 
     pub async fn report(&self, provider_enabled: bool) -> InstallationReport {
@@ -246,6 +260,10 @@ pub fn valid_presence(presence: &IntegrationPresence) -> bool {
     let mut administrator_ids = HashSet::new();
     semver::Version::parse(&presence.version).is_ok()
         && presence.version.len() <= 64
+        && presence
+            .delivery_day
+            .as_ref()
+            .is_none_or(DeliveryDay::valid)
         && presence.administrator_ids.len() <= 200
         && presence.administrator_ids.iter().all(|id| {
             !id.is_empty()
@@ -414,6 +432,7 @@ mod tests {
             .presence(IntegrationPresence {
                 version: "0.2.0".into(),
                 administrator_ids: Vec::new(),
+                delivery_day: None,
                 backup: BackupReport {
                     status: BackupStatus::Complete,
                     last_backup: Some(1_700_000_000),
@@ -432,11 +451,42 @@ mod tests {
         assert_eq!(stale.last_backup, None);
     }
 
+    #[tokio::test]
+    async fn ui_day_requires_fresh_presence_and_the_current_local_day() {
+        let installation = Installation::new(true);
+        assert!(installation.delivery_day().await.is_none());
+        let now = time::OffsetDateTime::now_utc();
+        let after = now.unix_timestamp().div_euclid(86_400) * 86_400;
+        let day = crate::delivery::DeliveryDay {
+            date: now.date().to_string(),
+            time_zone: "UTC".into(),
+            delivered_after: after,
+            delivered_before: after + 86_400,
+        };
+        let mut report = integration_presence(env!("CARGO_PKG_VERSION"), &[]);
+        report.delivery_day = Some(day.clone());
+        assert!(valid_presence(&report));
+        installation.presence(report).await;
+        assert_eq!(installation.delivery_day().await, Some(day.clone()));
+        installation.presence.lock().await.as_mut().unwrap().0 =
+            Instant::now() - Duration::from_secs(181);
+        assert!(installation.delivery_day().await.is_none());
+        let mut report = integration_presence(env!("CARGO_PKG_VERSION"), &[]);
+        report.delivery_day = Some(crate::delivery::DeliveryDay {
+            delivered_after: after - 86_400,
+            delivered_before: after,
+            ..day
+        });
+        installation.presence(report).await;
+        assert!(installation.delivery_day().await.is_none());
+    }
+
     #[test]
     fn presence_rejects_unsupported_versions_and_inconsistent_backup_reports() {
         let mut report = IntegrationPresence {
             version: "0.2.0".into(),
             administrator_ids: Vec::new(),
+            delivery_day: None,
             backup: BackupReport {
                 status: BackupStatus::Missing,
                 last_backup: None,
@@ -456,6 +506,7 @@ mod tests {
         IntegrationPresence {
             version: version.into(),
             administrator_ids: administrators.iter().map(|id| (*id).into()).collect(),
+            delivery_day: None,
             backup: BackupReport {
                 status: BackupStatus::Missing,
                 last_backup: None,

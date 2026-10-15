@@ -125,7 +125,7 @@ carriers! {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 #[error(
-    "Unsupported tracking carrier. Choose a supported EasyPost carrier from /v1/carriers, or omit carrier for automatic detection."
+    "Unsupported tracking carrier. Choose a supported carrier from /v1/carriers, or omit carrier for automatic detection."
 )]
 pub struct UnsupportedCarrier;
 
@@ -161,7 +161,13 @@ impl<'de> Deserialize<'de> for Carrier {
             type Value = Carrier;
 
             fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-                formatter.write_str("a supported EasyPost tracking carrier from /v1/carriers")
+                formatter.write_str("a required tracking carrier from /v1/carriers")
+            }
+
+            fn visit_unit<E: de::Error>(self) -> Result<Carrier, E> {
+                Err(E::custom(
+                    "A carrier is required. Choose a carrier from /v1/carriers; carrier cannot be cleared.",
+                ))
             }
 
             fn visit_str<E: de::Error>(self, value: &str) -> Result<Carrier, E> {

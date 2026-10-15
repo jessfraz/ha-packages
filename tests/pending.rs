@@ -8,8 +8,8 @@ use reqwest::{Client, StatusCode};
 use shipments::{
     api,
     models::{
-        CreateShipment, Direction, Event, Patch, RegistrationState, Shipment, Source, Tracking,
-        UpdateShipment,
+        CreateShipment, Direction, Event, InputTracking, Patch, RegistrationState, Shipment,
+        Source, UpdateShipment,
     },
     shipping_api::easypost::EasyPostClient,
     store::Store,
@@ -45,7 +45,7 @@ fn input(number: &str) -> CreateShipment {
         merchant: None,
         order_reference: None,
         signature_required: None,
-        tracking: Tracking {
+        tracking: InputTracking {
             carrier: Some("usps".parse().unwrap()),
             number: number.into(),
         },
@@ -63,7 +63,7 @@ struct Failure {
 }
 
 #[tokio::test]
-async fn creates_commit_pending_records_sources_history_and_replays_without_provider_io() {
+async fn verified_create_replays_preserve_sources_history_and_make_no_provider_requests() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("pending.sqlite3");
     let store = Store::open(&path).await.unwrap();
@@ -92,6 +92,18 @@ async fn creates_commit_pending_records_sources_history_and_replays_without_prov
         .build()
         .unwrap();
     let request = input("9400111899223856926381");
+    let verified = shipments::shipping_api::types::Tracker {
+        id: "trk_verified_fixture".into(),
+        tracking_code: request.tracking.number.clone(),
+        carrier: "USPS".parse().unwrap(),
+        status: shipments::models::Status::Unknown,
+        public_url: None,
+        carrier_tracking: Default::default(),
+    };
+    store
+        .create(request.clone(), "owner", "durable-pending", Some(&verified))
+        .await
+        .unwrap();
     let mut saved = None;
     for _ in 0..2 {
         let response = client
@@ -126,8 +138,11 @@ async fn creates_commit_pending_records_sources_history_and_replays_without_prov
         assert!(!output.contains(&request.tracking.number));
         assert!(!output.contains(&request.title));
         assert!(!output.contains(OWNER));
-        assert_eq!(shipment.sync.registration_state, RegistrationState::Pending);
-        assert!(shipment.sync.tracker_id.is_none());
+        assert_eq!(
+            shipment.sync.registration_state,
+            RegistrationState::Registered
+        );
+        assert!(shipment.sync.tracker_id.is_some());
         assert!(shipment.sync.registration_started_at.is_none());
         assert!(shipment.sync.next_attempt_at.is_some());
         assert_eq!(shipment.sources, vec![request.source.clone().unwrap()]);
@@ -145,7 +160,7 @@ async fn creates_commit_pending_records_sources_history_and_replays_without_prov
     assert_eq!(events.len(), 1);
     assert_eq!(
         events[0].snapshot.as_ref().unwrap().sync.registration_state,
-        RegistrationState::Pending
+        RegistrationState::Registered
     );
     let duplicate = client
         .post(format!("{base}/v1/shipments"))
@@ -160,7 +175,10 @@ async fn creates_commit_pending_records_sources_history_and_replays_without_prov
     store.close().await.unwrap();
     let restored = Store::open(&path).await.unwrap();
     let shipment = restored.get(id).await.unwrap();
-    assert_eq!(shipment.sync.registration_state, RegistrationState::Pending);
+    assert_eq!(
+        shipment.sync.registration_state,
+        RegistrationState::Registered
+    );
     assert_eq!(shipment.sources, vec![request.source.unwrap()]);
     assert_eq!(restored.events(id, 0, 100).await.unwrap().len(), 1);
     let without_provider = api::start(
@@ -184,9 +202,7 @@ async fn creates_commit_pending_records_sources_history_and_replays_without_prov
         .send()
         .await
         .unwrap();
-    assert_eq!(response.status(), StatusCode::CREATED);
-    let shipment: Shipment = response.json().await.unwrap();
-    assert_eq!(shipment.sync.registration_state, RegistrationState::Pending);
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
     without_provider.close().await.unwrap();
     restored.close().await.unwrap();
 }
@@ -222,15 +238,13 @@ async fn local_validation_rejects_garbage_and_tracking_edits_reset_durable_rejec
         assert_eq!(error.error_code.as_deref(), Some(code));
         assert!(!error.message.contains(number));
     }
-    let created: Shipment = client
-        .post(format!("{base}/v1/shipments"))
-        .bearer_auth(OWNER)
-        .header("Idempotency-Key", "editable-pending")
-        .json(&input("9400111899223856926383"))
-        .send()
-        .await
-        .unwrap()
-        .json()
+    let created = store
+        .create(
+            input("9400111899223856926383"),
+            "owner",
+            "editable-pending",
+            None,
+        )
         .await
         .unwrap();
     sqlx::query("UPDATE shipments SET registration_state='rejected',registration_started_at=123,last_error='Carrier rejected the number',last_error_code='tracking_unsupported',last_provider_status=422,last_provider_error_code='TRACKER.NO_CARRIER_FOR_CODE',attempts=3,next_attempt_at=NULL WHERE id=?")
@@ -253,23 +267,22 @@ async fn local_validation_rejects_garbage_and_tracking_edits_reset_durable_rejec
         .await
         .unwrap();
     assert_eq!(refresh.status(), StatusCode::CONFLICT);
-    let changed: Shipment = client
-        .patch(format!("{base}/v1/shipments/{}", created.id))
-        .bearer_auth(OWNER)
-        .header("If-Match", "\"1\"")
-        .json(&UpdateShipment {
-            tracking: Patch {
-                value: Some(Some(Tracking {
-                    carrier: Some("usps".parse().unwrap()),
-                    number: "9400111899223856926384".into(),
-                })),
+    let changed = store
+        .update(
+            created.id,
+            1,
+            UpdateShipment {
+                tracking: Patch {
+                    value: Some(Some(InputTracking {
+                        carrier: Some("USPS".parse().unwrap()),
+                        number: "9400111899223856926384".into(),
+                    })),
+                },
+                ..Default::default()
             },
-            ..Default::default()
-        })
-        .send()
-        .await
-        .unwrap()
-        .json()
+            "owner",
+            None,
+        )
         .await
         .unwrap();
     assert_eq!(changed.revision, 2);

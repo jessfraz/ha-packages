@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use shipments::models::{
-    CarrierEvent, CreateShipment, EventKind, Patch, SetOverride, Shipment, Status, Tracking,
+    CarrierEvent, CreateShipment, EventKind, InputTracking, Patch, SetOverride, Shipment, Status,
     TrackingLocation, UpdateShipment,
 };
 use shipments::store::Store;
@@ -45,7 +45,7 @@ impl Fixture {
                     merchant: None,
                     order_reference: None,
                     signature_required: None,
-                    tracking: Tracking {
+                    tracking: InputTracking {
                         carrier: Some("USPS".parse().unwrap()),
                         number: number.into(),
                     },
@@ -516,14 +516,7 @@ async fn worker_persists_canonical_carrier_and_safe_url_without_revising_identic
         });
     assert!(task.await.unwrap().unwrap());
     let first = fixture.store.get(shipment.id).await.unwrap();
-    assert_eq!(
-        first
-            .tracking
-            .carrier
-            .as_ref()
-            .map(|carrier| carrier.as_str()),
-        Some("USPS")
-    );
+    assert_eq!(first.tracking.carrier.as_str(), "USPS");
     assert_eq!(
         first.sync.tracking_url.as_deref(),
         Some("https://track.easypost.com/public-tracker")
@@ -572,7 +565,7 @@ async fn verified_creates_preserve_poll_cadence_and_retrieve_without_registering
                     merchant: None,
                     order_reference: None,
                     signature_required: None,
-                    tracking: Tracking {
+                    tracking: InputTracking {
                         number: number.into(),
                         carrier: None,
                     },
@@ -584,14 +577,7 @@ async fn verified_creates_preserve_poll_cadence_and_retrieve_without_registering
             )
             .await
             .unwrap();
-        assert_eq!(
-            shipment
-                .tracking
-                .carrier
-                .as_ref()
-                .map(|carrier| carrier.as_str()),
-            Some("USPS")
-        );
+        assert_eq!(shipment.tracking.carrier.as_str(), "USPS");
         assert_eq!(shipment.sync.tracker_id.as_deref(), Some("trk_test"));
         assert_eq!(shipment.status, status);
         let remaining = delay(&fixture.store, shipment.id).await.unwrap();
@@ -614,12 +600,12 @@ async fn verified_creates_preserve_poll_cadence_and_retrieve_without_registering
 }
 
 #[tokio::test]
-async fn carrier_autofill_invalidates_stale_tracking_edits_and_preserves_verification() {
+async fn canonical_carrier_changes_invalidate_stale_tracking_edits_and_preserve_verification() {
     let fixture = Fixture::new().await;
     let shipment = fixture.shipment("LEGACY-CARRIER").await;
-    // Before carrier autofill, a valid registered tracker could have a known
-    // status and tracker ID while its optional input carrier remained NULL.
-    sqlx::query("UPDATE shipments SET tracking_carrier=NULL,carrier_status=?,tracker_id='trk_test' WHERE id=?")
+    // A provider's canonical carrier observation must invalidate edits that
+    // read the previous carrier while preserving the verified tracker.
+    sqlx::query("UPDATE shipments SET tracking_carrier='ups',carrier_status=?,tracker_id='trk_test' WHERE id=?")
         .bind(serde_json::to_string(&Status::Unknown).unwrap())
         .bind(shipment.id.to_string())
         .execute(fixture.store.pool())
@@ -643,7 +629,7 @@ async fn carrier_autofill_invalidates_stale_tracking_edits_and_preserves_verific
             stale.revision,
             UpdateShipment {
                 tracking: Patch {
-                    value: Some(Some(stale.tracking)),
+                    value: Some(Some(stale.tracking.into())),
                 },
                 ..Default::default()
             },
@@ -655,14 +641,7 @@ async fn carrier_autofill_invalidates_stale_tracking_edits_and_preserves_verific
     assert!(matches!(error, shipments::error::Error::Precondition));
     let current = fixture.store.get(shipment.id).await.unwrap();
     assert_eq!(current.revision, stale.revision + 1);
-    assert_eq!(
-        current
-            .tracking
-            .carrier
-            .as_ref()
-            .map(|carrier| carrier.as_str()),
-        Some("USPS")
-    );
+    assert_eq!(current.tracking.carrier.as_str(), "USPS");
     assert_eq!(current.sync.tracker_id.as_deref(), Some("trk_test"));
     let current_generation: i64 =
         sqlx::query_scalar("SELECT tracking_generation FROM shipments WHERE id=?")
@@ -793,7 +772,7 @@ async fn a_response_from_a_replaced_tracking_identity_is_discarded() {
             shipment.revision,
             UpdateShipment {
                 tracking: Patch {
-                    value: Some(Some(Tracking {
+                    value: Some(Some(InputTracking {
                         carrier: Some("USPS".parse().unwrap()),
                         number: "NEWTRACK".into(),
                     })),
@@ -1596,6 +1575,7 @@ async fn provider_logs_correlate_requests_and_shipments_without_exposing_private
         error_code: Option<String>,
         provider_error_code: Option<String>,
         provider_status: Option<u16>,
+        provider_request_id: Option<uuid::Uuid>,
         duration_ms: u64,
     }
     let capture = Capture::default();
@@ -1604,11 +1584,12 @@ async fn provider_logs_correlate_requests_and_shipments_without_exposing_private
         .client()
         .with_logger(shipments::logging::with_writer(capture.clone()));
     let request_id = uuid::Uuid::now_v7();
+    let provider_request_id = uuid::Uuid::now_v7();
     let task_client = client.with_request_id(&request_id.to_string());
     let task =
         tokio::spawn(async move { task_client.register("PRIVATE-TRACKING-CODE", None).await });
     provider.request().await.reply(Reply {
-        status: 404, headers: Vec::new(),
+        status: 404, headers: vec![("x-ep-request-uuid".into(), provider_request_id.to_string())],
         body: r#"{"error":{"code":"CREDENTIALS_NOT_FOUND","message":"PRIVATE-TRACKING-CODE test-secret PRIVATE-PROVIDER-DATA"}}"#.into(),
     });
     assert!(task.await.unwrap().is_err());
@@ -1648,7 +1629,11 @@ async fn provider_logs_correlate_requests_and_shipments_without_exposing_private
             .await
             .map(|response| (server, response))
     });
-    provider.request().await.reply(Reply::error(401));
+    let mut reply = Reply::error(401);
+    reply
+        .headers
+        .push(("x-ep-request-uuid".into(), "PRIVATE-PROVIDER-DATA".into()));
+    provider.request().await.reply(reply);
     let (server, response) = health.await.unwrap().unwrap();
     assert_eq!(response.status(), reqwest::StatusCode::OK);
     let health_request_id =
@@ -1682,6 +1667,7 @@ async fn provider_logs_correlate_requests_and_shipments_without_exposing_private
         Some("tracking_carrier_credentials_required")
     );
     assert_eq!(entries[0].provider_status, Some(404));
+    assert_eq!(entries[0].provider_request_id, Some(provider_request_id));
     assert_eq!(
         entries[0].provider_error_code.as_deref(),
         Some("CREDENTIALS_NOT_FOUND")
@@ -1697,6 +1683,7 @@ async fn provider_logs_correlate_requests_and_shipments_without_exposing_private
     assert!(entries[2].error_code.is_none());
     assert_eq!(entries[3].request_id, health_request_id);
     assert_eq!(entries[3].operation, "health");
+    assert!(entries[3].provider_request_id.is_none());
     assert_eq!(entries[3].outcome, "error");
     for entry in entries {
         assert_eq!(
@@ -1733,7 +1720,7 @@ async fn carrier_history_merges_deduplicates_and_survives_restart_and_partial_sn
         merchant: None,
         order_reference: None,
         signature_required: Some(true),
-        tracking: Tracking {
+        tracking: InputTracking {
             carrier: None,
             number: "HISTORY-TRACK".into(),
         },
@@ -1889,7 +1876,7 @@ async fn tracking_replacement_clears_signature_and_history_and_fences_old_scans(
             current.revision,
             UpdateShipment {
                 tracking: Patch {
-                    value: Some(Some(Tracking {
+                    value: Some(Some(InputTracking {
                         carrier: Some("usps".parse().unwrap()),
                         number: "NEW-HISTORY".into(),
                     })),
@@ -1928,7 +1915,7 @@ async fn tracking_replacement_clears_signature_and_history_and_fences_old_scans(
             replaced.revision,
             UpdateShipment {
                 tracking: Patch {
-                    value: Some(Some(Tracking {
+                    value: Some(Some(InputTracking {
                         carrier: Some("usps".parse().unwrap()),
                         number: "ANOTHER-HISTORY".into(),
                     })),
@@ -2052,7 +2039,14 @@ async fn native_error_codes_preserve_http_status_and_retry_advice_on_all_error_r
         let error = task.await.unwrap().unwrap_err();
         assert_eq!(error.provider_status(), Some(status));
         assert_eq!(error.provider_error_code(), Some("CREDENTIALS_NOT_FOUND"));
-        assert_eq!(error.error_code(), "tracking_carrier_credentials_required");
+        assert_eq!(
+            error.error_code(),
+            match status {
+                429 => "tracking_verification_rate_limited",
+                503 => "provider_http",
+                _ => "tracking_carrier_credentials_required",
+            }
+        );
         assert!(matches!(
             error.kind,
             ErrorKind::ProviderRejected {
@@ -2070,5 +2064,60 @@ async fn native_error_codes_preserve_http_status_and_retry_advice_on_all_error_r
             })
         ));
         assert!(provider.incoming.try_recv().is_err());
+    }
+}
+
+#[tokio::test]
+async fn transient_http_statuses_take_precedence_over_hard_tracking_rejection_codes() {
+    let mut provider = Provider::start();
+    for (native, rejection) in [
+        (
+            "TRACKER.NO_CARRIER_FOR_CODE",
+            TrackerRejection::NoCarrierForCode,
+        ),
+        ("TRACKER.INVALID_PARAMS", TrackerRejection::InvalidParams),
+    ] {
+        for status in [401, 403, 408, 425, 429, 500, 502, 503, 504] {
+            let client = provider.client();
+            let task = tokio::spawn(async move { client.register("TRANSIENT123", None).await });
+            provider.request().await.reply(Reply {
+                status,
+                headers: Vec::new(),
+                body: tracker_error_body(native),
+            });
+            let error = task.await.unwrap().unwrap_err();
+            assert!(
+                !error.rejects_registration(),
+                "HTTP {status} must not permanently reject tracking"
+            );
+            assert_eq!(error.provider_status(), Some(status));
+            assert_eq!(error.provider_error_code(), Some(native));
+            assert_eq!(
+                error.to_string(),
+                format!("EasyPost returned HTTP {status}")
+            );
+            assert_eq!(
+                error.error_code(),
+                match status {
+                    401 | 403 => "tracking_provider_credentials",
+                    429 => "tracking_verification_rate_limited",
+                    _ => "provider_http",
+                }
+            );
+        }
+        for status in [400, 404, 422] {
+            let client = provider.client();
+            let task = tokio::spawn(async move { client.register("REJECTED123", None).await });
+            provider.request().await.reply(Reply {
+                status,
+                headers: Vec::new(),
+                body: tracker_error_body(native),
+            });
+            let error = task.await.unwrap().unwrap_err();
+            assert!(error.rejects_registration());
+            assert_eq!(error.error_code(), rejection.error_code());
+            assert_eq!(error.provider_status(), Some(status));
+            assert_eq!(error.provider_error_code(), Some(native));
+        }
     }
 }

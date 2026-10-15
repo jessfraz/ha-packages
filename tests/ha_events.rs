@@ -18,8 +18,8 @@ use serde::Serialize;
 use shipments::{
     api,
     models::{
-        CarrierTracking, CreateShipment, DeliveryEstimate, Direction, Patch, SetOverride, Shipment,
-        StateEventPage, StateEventType, Status, Tracking, UpdateShipment,
+        CarrierTracking, CreateShipment, DeliveryEstimate, Direction, InputTracking, Patch,
+        SetOverride, Shipment, StateEventPage, StateEventType, Status, UpdateShipment,
     },
     store::Store,
     sync::SyncWorker,
@@ -56,7 +56,7 @@ impl Fixture {
                     merchant: None,
                     order_reference: None,
                     signature_required: None,
-                    tracking: Tracking {
+                    tracking: InputTracking {
                         carrier: Some("usps".parse().unwrap()),
                         number: number.into(),
                     },
@@ -686,7 +686,7 @@ async fn create_estimate(
                 merchant: None,
                 order_reference: None,
                 signature_required: None,
-                tracking: Tracking {
+                tracking: InputTracking {
                     carrier: Some(carrier),
                     number: number.into(),
                 },
@@ -1093,4 +1093,37 @@ async fn event_feed_and_atomic_trigger_use_real_indexed_queries() {
     }
     drop(connection);
     fixture.store.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn native_adapter_fixture_uses_the_real_store() {
+    let Ok(path) = std::env::var("SHIPMENTS_TEST_NATIVE_DATABASE") else {
+        return;
+    };
+    let store = Store::open(std::path::Path::new(&path)).await.unwrap();
+    for (index, title, direction, number) in [
+        (0, "Office supplies", Direction::Inbound, "TEST123"),
+        (1, "Second parcel", Direction::Outbound, "TEST456"),
+    ] {
+        store
+            .create(
+                CreateShipment {
+                    title: title.into(),
+                    direction,
+                    merchant: None,
+                    order_reference: None,
+                    signature_required: None,
+                    tracking: InputTracking {
+                        carrier: Some(shipments::carrier::Carrier::Usps),
+                        number: number.into(),
+                    },
+                    source: None,
+                },
+                "fixture",
+                &format!("native-adapter-{index}"),
+                None,
+            )
+            .await
+            .unwrap();
+    }
 }

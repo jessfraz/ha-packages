@@ -6,8 +6,8 @@ use shipments::{
     api,
     carrier::Carrier,
     models::{
-        CarrierEvent, CarrierTracking, CreateShipment, SetOverride, Shipment, Source, Status,
-        Tracking,
+        CarrierEvent, CarrierTracking, CreateShipment, InputTracking, SetOverride, Shipment,
+        Source, Status,
     },
     shipping_api::types::Tracker,
     store::Store,
@@ -57,7 +57,7 @@ impl App {
         expected: Option<&str>,
         delivered: Option<&str>,
     ) -> Shipment {
-        let tracking = Tracking {
+        let tracking = InputTracking {
             carrier: Some("usps".parse().unwrap()),
             number: key.to_ascii_uppercase(),
         };

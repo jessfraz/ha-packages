@@ -2,14 +2,26 @@
 
 ## 0.5.2
 
-- Explain unsupported tracking as a provider capability issue, without claiming
-  the tracking number is invalid. Clarify existing rejected records on upgrade
-  while preserving their native errors, identity and retry state.
-- Put tracking behind a shared shipping API trait, with EasyPost's protocol,
-  pacing and recovery policy in its own implementation module. Preserve tracker
-  ownership and report the provider in API responses and redacted logs.
-- Keep reconciliation, cancellation and provider recovery deadlines intact.
-  EasyPost remains the only configured backend.
+- Verify tracking before saving a shipment or changing its tracking identity.
+  Carrier input may be auto-detected, but every saved shipment has a canonical
+  carrier enum and tracking number. Remove incomplete legacy imports with
+  their sources, history and create replays.
+- Persist verification intent separately, recover existing trackers after
+  uncertain responses or restarts, and reserve imported sources before paid
+  registration. Failed verification saves no new shipment; normal endpoint
+  retries honor durable backoff and idempotency.
+- Stop automatic retries for missing carrier accounts, credentials and test
+  keys. Show actionable setup errors and allow an explicit refresh after
+  configuration. Preserve transient HTTP failures as retryable even when a
+  provider returns a misleading native rejection code.
+- Add a linkable Tracking issues view and consistent table/detail error
+  badges. Add an inbound Delivered today sensor and filtered view using
+  actual carrier delivery timestamps and Home Assistant's local day,
+  including daylight-saving changes.
+- Keep provider wire formats and recovery policy behind the shipping API
+  trait. EasyPost remains the configured backend. Include safe native request
+  IDs in redacted error logs, and keep filtered pagination within its cursor
+  limit.
 
 ## 0.5.1
 

@@ -2,8 +2,8 @@ use std::{sync::Arc, time::Duration};
 
 use shipments::{
     models::{
-        CarrierEvent, CarrierTracking, CreateShipment, Direction, EventKind, RegistrationState,
-        SetOverride, Shipment, Status, Tracking,
+        CarrierEvent, CarrierTracking, CreateShipment, Direction, EventKind, InputTracking,
+        RegistrationState, SetOverride, Shipment, Status,
     },
     shipping_api::{
         PreparedRegistration, ShippingApi,
@@ -191,7 +191,7 @@ impl Fixture {
                 CreateShipment {
                     title: "Provider contract parcel".into(),
                     direction: Direction::Inbound,
-                    tracking: Tracking {
+                    tracking: InputTracking {
                         number: NUMBER.into(),
                         carrier: Some("USPS".parse().unwrap()),
                     },

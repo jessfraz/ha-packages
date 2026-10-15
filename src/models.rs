@@ -29,11 +29,24 @@ impl Status {
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-pub struct Tracking {
-    pub carrier: Option<crate::carrier::Carrier>,
+pub struct Tracking<C = crate::carrier::Carrier> {
+    pub carrier: C,
     #[serde(default)]
     #[schemars(required)]
     pub number: String,
+}
+
+/// Carrier detection is allowed at admission. Persisted shipments always use
+/// the concrete carrier returned by the tracking provider.
+pub type InputTracking = Tracking<Option<crate::carrier::Carrier>>;
+
+impl From<Tracking> for InputTracking {
+    fn from(tracking: Tracking) -> Self {
+        Self {
+            carrier: Some(tracking.carrier),
+            number: tracking.number,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
@@ -81,18 +94,16 @@ pub struct CreateShipment {
     pub order_reference: Option<String>,
     /// Known from the order or carrier; missing means the requirement is unknown.
     pub signature_required: Option<bool>,
-    // Route missing/null values through the API's actionable tracking_required
-    // error. The OpenAPI contract still declares tracking as required.
     #[serde(default, deserialize_with = "required_tracking")]
     #[schemars(required)]
-    pub tracking: Tracking,
+    pub tracking: InputTracking,
     pub source: Option<Source>,
 }
 
 fn required_tracking<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
-) -> Result<Tracking, D::Error> {
-    Ok(Option::<Tracking>::deserialize(deserializer)?.unwrap_or_default())
+) -> Result<InputTracking, D::Error> {
+    Ok(Option::<InputTracking>::deserialize(deserializer)?.unwrap_or_default())
 }
 
 // Missing fields preserve their value; explicit null clears optional fields.
@@ -148,8 +159,8 @@ pub struct UpdateShipment {
     #[schemars(with = "Option<bool>")]
     pub signature_required: Patch<bool>,
     #[serde(default, skip_serializing_if = "Patch::is_missing")]
-    #[schemars(with = "Tracking")]
-    pub tracking: Patch<Tracking>,
+    #[schemars(with = "InputTracking")]
+    pub tracking: Patch<InputTracking>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
@@ -174,6 +185,7 @@ pub enum RegistrationState {
     Pending,
     Registered,
     Rejected,
+    ConfigurationRequired,
 }
 
 #[derive(Clone, Debug, Serialize, JsonSchema)]
@@ -387,25 +399,46 @@ pub struct Event {
     pub actor_id: String,
     pub at: String,
     pub detail: String,
-    // Historical snapshots can predate the requirement for tracking numbers.
-    pub snapshot: Option<Shipment<Option<Tracking>>>,
+    // Historical snapshots can predate required tracking numbers and carriers.
+    pub snapshot: Option<Shipment<Option<Tracking<Option<crate::carrier::Carrier>>>>>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema)]
 pub struct Filters {
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub direction: Option<Direction>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub tracking_number: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub carrier: Option<crate::carrier::Carrier>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub order_reference: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub source_namespace: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub source_key: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub search: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub archived: Option<bool>,
     /// Filter by whether the effective status is nonterminal.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub active: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub status: Option<Status>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub exceptions: Option<bool>,
+    /// Filter by whether a shipment has a stored tracking failure, including retries.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tracking_issues: Option<bool>,
+    /// Inclusive and exclusive UTC bounds over actual carrier delivery scans.
+    /// Supply both bounds together.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub delivered_after: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub delivered_before: Option<i64>,
     /// Expected delivery first, or most recent actual delivery first. Unknown dates sort last.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub sort: Option<ShipmentSort>,
 }
 
@@ -448,6 +481,7 @@ pub struct System {
     pub pending_syncs: i64,
     pub sync_errors: i64,
     pub credential_role: String,
+    pub delivery_day: Option<crate::delivery::DeliveryDay>,
 }
 
 #[derive(Deserialize, Serialize, JsonSchema)]

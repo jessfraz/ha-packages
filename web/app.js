@@ -28,6 +28,7 @@ let loadingMore = false;
 let loadingEvents = false;
 let savingEditor = false;
 let appliedSearch = "";
+let shownDeliveryWindow = null;
 let activeDirection = "all";
 let routeGeneration = 0;
 let applyingRoute = false;
@@ -79,14 +80,33 @@ function signatureLabel(shipment) {
   return "Signature not reported";
 }
 
+function configurationIssue(sync) {
+  if (sync.registration_state !== "configuration_required") return null;
+  if (["tracking_carrier_account_required", "tracking_carrier_credentials_required"].includes(sync.error_code))
+    return {
+      label: "Carrier setup required",
+      instruction: "Your shipment is saved. Configure this carrier account in the tracking provider, then choose Refresh tracking. Automatic retries are paused.",
+    };
+  return {
+    label: "Provider setup required",
+    instruction: "Your shipment is saved. Update the tracking provider API key in the app configuration, then choose Refresh tracking. Automatic retries are paused.",
+  };
+}
+
 function shipmentBadges(shipment, className) {
   const badges = element("div", undefined, className);
   const direction = shipment.direction === "outbound" ? "outbound" : "inbound";
   badges.append(element("span", direction === "inbound" ? "Inbound" : "Outbound", `badge direction-${direction}`));
   badges.append(statusBadge(shipment.status));
-  if (shipment.sync.registration_state === "pending")
+  if (shipment.sync.last_error) {
+    const configuration = configurationIssue(shipment.sync);
+    const retrying = !configuration && providerEnabled && shipment.sync.next_attempt_at != null;
+    const issue = element("span", configuration?.label || (retrying ? "Tracking retry scheduled" : "Tracking needs attention"), `badge tracking-issue${retrying ? " retrying" : ""}`);
+    issue.title = shipment.sync.last_error;
+    badges.append(issue);
+  } else if (shipment.sync.registration_state === "pending")
     badges.append(element("span", "Registration pending", "badge registration-pending"));
-  if (shipment.sync.registration_state === "rejected")
+  else if (shipment.sync.registration_state === "rejected")
     badges.append(element("span", "Registration needs attention", "badge registration-rejected"));
   if (shipment.signature_required === true || shipment.carrier_tracking?.signed_by)
     badges.append(element("span", signatureLabel(shipment), "badge signature-badge"));
@@ -179,7 +199,8 @@ async function applyRoute(initial = false) {
     const section = params.get("section");
     for (const sectionId of ["correction", "activity", "source-details", "connection"]) {
       const disclosure = byId(sectionId);
-      if (disclosure) disclosure.open = section === sectionId;
+      if (disclosure) disclosure.open = section === sectionId ||
+        (!section && sectionId === "connection" && Boolean(selected?.sync.last_error));
     }
     if (section && byId("detail").open && ["history", "correction", "activity", "source-details", "connection"].includes(section))
       byId(section)?.scrollIntoView({ block: "start" });
@@ -245,8 +266,8 @@ async function connect() {
   byId("add").hidden = false;
   setOwnerAccess(system.credential_role === "owner", true);
   byId("health").textContent = system.provider_enabled
-    ? `${system.pending_syncs} tracking checks scheduled · ${system.sync_errors} sync errors`
-    : "Shipments save locally. Set the EasyPost API key to register them and receive tracking updates.";
+    ? `${system.pending_syncs} tracking checks scheduled · ${system.sync_errors} tracking issues`
+    : "Set the EasyPost API key before adding shipments or changing tracking. Existing records remain available.";
   connected = true;
   try {
     await applyRoute(true);
@@ -329,32 +350,51 @@ async function load(append = false) {
     byId("more").disabled = false;
     if (activeDirection !== "all") query.set("direction", activeDirection);
     query.set("archived", String(view === "archived"));
-    query.set("sort", view === "delivered" ? "delivered" : "expected");
+    query.set("sort", ["delivered", "delivered_today"].includes(view) ? "delivered" : "expected");
     if (view === "active") query.set("active", "true");
     if (view === "delivered") query.set("status", "delivered");
     if (view === "out_for_delivery") query.set("status", "out_for_delivery");
     if (view === "exceptions") query.set("exceptions", "true");
+    if (view === "tracking_issues") query.set("tracking_issues", "true");
     if (search) query.set("search", search);
   }
 
   try {
+    const systemRequest = api("v1/system", { signal: controller.signal }).then(system => {
+      if (!controller.signal.aborted && generation === listGeneration)
+        setOwnerAccess(system.credential_role === "owner");
+      return system;
+    });
+    // Home Assistant supplies its own day window, including timezone and DST.
+    // A remote browser must not substitute a different local calendar day.
+    const deliveryDay = view === "delivered_today" ? (await systemRequest).delivery_day : null;
+    if (controller.signal.aborted || generation !== listGeneration) return;
+    const deliveryWindow = deliveryDay ? `${deliveryDay.delivered_after}:${deliveryDay.delivered_before}` : null;
+    if (append && view === "delivered_today" && deliveryWindow !== shownDeliveryWindow)
+      return load();
+    if (deliveryDay && !append) {
+      query.set("delivered_after", deliveryDay.delivered_after);
+      query.set("delivered_before", deliveryDay.delivered_before);
+    }
     const [summary, page, system] = await Promise.all([
       api(activeDirection === "all" ? "v1/summary" : `v1/summary?direction=${activeDirection}`, { signal: controller.signal }),
-      api(`v1/shipments?${query}`, { signal: controller.signal }),
-      api("v1/system", { signal: controller.signal }).then(system => {
-        if (!controller.signal.aborted && generation === listGeneration)
-          setOwnerAccess(system.credential_role === "owner");
-        return system;
-      }),
+      view === "delivered_today" && !deliveryDay ? { items: [], next_page: null }
+        : api(`v1/shipments?${query}`, { signal: controller.signal }),
+      systemRequest,
     ]);
     // A search or archive-filter change owns its whole result, including any
     // pagination requests already in flight for the previous list.
     if (generation !== listGeneration) return;
+    shownDeliveryWindow = deliveryWindow;
+    byId("view-note").hidden = !deliveryDay;
+    byId("view-note").textContent = deliveryDay
+      ? `Delivered today, ${new Date(`${deliveryDay.date}T12:00:00Z`).toLocaleDateString([], { timeZone: "UTC", month: "short", day: "numeric", year: "numeric" })} · ${deliveryDay.time_zone}`
+      : "";
     providerEnabled = system.provider_enabled;
     if (showInstallation) refreshInstallation(generation, controller.signal);
     byId("health").textContent = system.provider_enabled
-      ? `${system.pending_syncs} tracking checks scheduled · ${system.sync_errors} sync errors`
-      : "Shipments save locally. Set the EasyPost API key to register them and receive tracking updates.";
+      ? `${system.pending_syncs} tracking checks scheduled · ${system.sync_errors} tracking issues`
+      : "Set the EasyPost API key before adding shipments or changing tracking. Existing records remain available.";
     byId("health").append(
       ` Last checked ${new Date().toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}.`,
     );
@@ -368,15 +408,25 @@ async function load(append = false) {
       ["out_for_delivery", "OUT FOR DELIVERY"],
       ["delivered", "DELIVERED"],
       ["exceptions", "EXCEPTIONS"],
+      ["tracking_issues", "TRACKING ISSUES"],
     ]) {
-      const card = element("button", undefined, `stat stat-${key}`);
+      const count = key === "tracking_issues" ? system.sync_errors : summary[key];
+      const card = element("button", undefined, `stat stat-${key}${key === "tracking_issues" && count > 0 ? " has-issues" : ""}`);
       card.type = "button";
       card.dataset.stat = key;
       card.setAttribute("aria-pressed", String(view === key));
-      card.setAttribute("aria-label", `${summary[key]} ${label.toLowerCase()} shipments`);
-      card.append(element("strong", summary[key]), element("span", label));
+      card.setAttribute("aria-label", key === "tracking_issues"
+        ? `${count} shipments with tracking issues, all directions`
+        : `${count} ${label.toLowerCase()} shipments`);
+      card.append(element("strong", count), element("span", label));
+      if (key === "tracking_issues") card.append(element("small", "All directions"));
       card.addEventListener("click", guarded(() => {
         byId("view").value = key;
+        if (key === "tracking_issues") {
+          activeDirection = "all";
+          appliedSearch = "";
+          byId("query").value = "";
+        }
         saveListRoute();
         return load();
       }));
@@ -392,14 +442,13 @@ async function load(append = false) {
       const description = [
         shipment.merchant,
         shipment.order_reference,
-        shipment.sync.last_error ? "Tracking needs attention" : null,
       ]
         .filter(Boolean)
         .join(" · ");
       copy.append(element("h2", shipment.title));
       if (description) copy.append(element("p", description));
       copy.append(element("p", `${shipment.tracking.carrier || "Carrier not identified"} · ${shipment.tracking.number}`, "shipment-tracking"));
-      const delivered = shipment.status === "delivered";
+      const delivered = shipment.status === "delivered" || view === "delivered_today";
       const deliveryDate = delivered
         ? deliveredDate(shipment)
         : shipment.carrier_tracking?.estimated_delivery_at;
@@ -410,7 +459,14 @@ async function load(append = false) {
       row.append(copy, badges);
       row.addEventListener(
         "click",
-        guarded(() => { userNavigation(); return show(shipment.id); }),
+        guarded(async () => {
+          userNavigation();
+          const generation = await show(shipment.id, false, shipment.sync.last_error ? "connection" : null);
+          if (shipment.sync.last_error && currentDetail(shipment.id, generation)) {
+            byId("connection").open = true;
+            byId("connection").scrollIntoView({ block: "start" });
+          }
+        }),
       );
       list.append(row);
     }
@@ -425,8 +481,12 @@ async function load(append = false) {
           "No delivered shipments yet.",
           "Received a parcel? Open it from All and mark it delivered.",
         ],
+        delivered_today: deliveryDay
+          ? ["Nothing delivered today.", "Deliveries appear here when the carrier reports a delivery or you confirm one."]
+          : ["Today's deliveries are unavailable.", "Connect Home Assistant to use its timezone and delivery-day window."],
         out_for_delivery: ["Nothing out for delivery.", "Shipments appear here when the carrier starts the delivery run."],
-        exceptions: ["No delivery exceptions.", "Shipments with delivery or tracking problems appear here."],
+        exceptions: ["No delivery exceptions.", "Carrier-reported exceptions and returns appear here."],
+        tracking_issues: ["No tracking issues.", "Tracking errors appear here. New registrations in progress are not errors."],
         all: [
           "No shipments yet.",
           "Use Add shipment when you have a tracking number. New labels do not need a carrier scan.",
@@ -436,7 +496,7 @@ async function load(append = false) {
           "Archived shipments are kept here and can be restored from their details.",
         ],
       };
-      const [heading, description] = search
+      const [heading, description] = search && !(view === "delivered_today" && !deliveryDay)
         ? [
             "No shipments match your search.",
             "Try a different title, merchant, or order reference in this view.",
@@ -932,8 +992,8 @@ function renderCarrierHistory(tracking) {
   }
 }
 
-async function show(id, preserveView = false) {
-  writeRoute({ shipment: id, edit: null });
+async function show(id, preserveView = false, section = route().get("section")) {
+  writeRoute({ shipment: id, edit: null, section });
   const generation = ++detailGeneration;
   if (!preserveView) selected = null;
   let shipment;
@@ -1001,20 +1061,36 @@ async function show(id, preserveView = false) {
 
   const provider = element("details", undefined, "detail-disclosure");
   provider.id = "connection";
-  const providerState = !providerEnabled ? "Not configured" : shipment.sync.last_error
-    ? "Needs attention" : shipment.sync.last_success_at ? "Connected" : "Waiting for first check";
+  const configuration = configurationIssue(shipment.sync);
+  const retrying = !configuration && providerEnabled && shipment.sync.last_error && shipment.sync.next_attempt_at != null;
+  const providerState = configuration?.label || (shipment.sync.last_error ? retrying ? "Retry scheduled" : "Needs attention"
+    : !providerEnabled ? "Not configured" : shipment.sync.last_success_at ? "Connected" : "Waiting for first check");
   provider.append(element("summary", `Tracking connection · ${providerState}`));
+  if (shipment.sync.last_error) {
+    const issue = element("div", undefined, `tracking-problem${retrying ? " retrying" : ""}`);
+    issue.append(element("strong", configuration?.label || (retrying ? "Tracking will retry automatically" : "Tracking needs attention")),
+      element("p", shipment.sync.last_error));
+    const next = shipment.sync.next_attempt_at;
+    issue.append(element("p", configuration
+      ? configuration.instruction
+      : !providerEnabled
+      ? "Your shipment is saved. Configure the tracking provider to resume updates."
+      : retrying
+        ? next * 1000 > Date.now() ? `Your shipment is saved. Next retry ${dateLabel(next * 1000)}.`
+          : "Your shipment is saved. Waiting for the next retry."
+        : "Your shipment is saved. Review the carrier and provider support before retrying.", "retry-timing"));
+    provider.append(issue);
+  }
   const fields = element("dl", undefined, "shipment-details");
   const detail = (label, value) => fields.append(element("dt", label), element("dd", value));
   detail("Provider", shipment.sync.provider === "easypost" ? "EasyPost" : "Tracking provider");
-  detail("Registration", shipment.sync.registration_state === "registered" ? "Registered" : shipment.sync.registration_state === "rejected" ? "Needs attention; review provider error" : "Pending registration; saved locally");
+  detail("Registration", shipment.sync.registration_state === "registered" ? "Registered" : shipment.sync.registration_state === "configuration_required" ? "Configuration required; saved locally" : shipment.sync.registration_state === "rejected" ? "Needs attention; review provider error" : "Pending registration; saved locally");
   if (shipment.sync.error_code) detail("Error code", shipment.sync.error_code);
   if (shipment.sync.provider_error_code) detail("Provider error code", shipment.sync.provider_error_code);
   if (shipment.sync.provider_status) detail("Provider response", `HTTP ${shipment.sync.provider_status}`);
   detail("Last successful sync", dateLabel(shipment.sync.last_success_at, "Not checked"));
   detail("Next check", shipment.sync.next_attempt_at == null ? "Not scheduled"
     : dateLabel(shipment.sync.next_attempt_at * 1000));
-  if (shipment.sync.last_error) detail("Last error", shipment.sync.last_error);
   if (shipment.sync.tracker_id) detail("Tracker ID", shipment.sync.tracker_id);
   provider.append(fields);
   provider.open = Boolean(shipment.sync.last_error);

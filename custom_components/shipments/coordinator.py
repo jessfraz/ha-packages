@@ -17,10 +17,18 @@ from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.hassio import is_hassio
 from homeassistant.helpers.storage import Store
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
+from homeassistant.util import dt as dt_util
 
 from .client import ResponseTooLarge, ShipmentsClient
 from .const import CONF_ADDON_SLUG, DIRECTION_SUMMARY_KEYS, DOMAIN, SUMMARY_KEYS
-from .models import DeliveryEstimate, Direction, ShipmentStatusEvent, delivery_estimate
+from .models import (
+    DeliveryDay,
+    DeliveryDayReport,
+    DeliveryEstimate,
+    Direction,
+    ShipmentStatusEvent,
+    delivery_estimate,
+)
 
 _LOGGER = logging.getLogger(__name__)
 _BACKUP_TIMEOUT_SECONDS = 10
@@ -41,6 +49,7 @@ class PresenceReport(TypedDict):
     version: str
     backup: BackupReport
     administrator_ids: list[str]
+    delivery_day: DeliveryDayReport
 
 
 class EventCheckpoint(TypedDict):
@@ -90,8 +99,11 @@ class ShipmentsCoordinator(DataUpdateCoordinator[dict[str, int]]):
             for direction, keys in DIRECTION_SUMMARY_KEYS.items():
                 counts = await self._async_summary(direction)
                 summary.update({f"{direction}_{key}": counts[key] for key in keys})
+            day = DeliveryDay.at(dt_util.utcnow(), self.hass.config.time_zone)
+            delivered = await self._async_summary(Direction.INBOUND, day)
+            summary["inbound_delivered_today"] = delivered["delivered"]
             estimates = await self._async_estimates()
-            await self._async_report_presence()
+            await self._async_report_presence(day)
         except (ClientError, TimeoutError, ResponseTooLarge, ValueError) as err:
             raise UpdateFailed("Cannot read the backend state") from err
         try:
@@ -280,14 +292,20 @@ class ShipmentsCoordinator(DataUpdateCoordinator[dict[str, int]]):
                 return
 
     async def _async_summary(
-        self, direction: Direction | None = None
+        self, direction: Direction | None = None, day: DeliveryDay | None = None
     ) -> dict[str, int]:
         """Validate every summary before publishing a complete refresh."""
         path = "/v1/summary"
         label = "summary"
+        query: dict[str, str] = {}
         if direction is not None:
-            path += f"?direction={direction}"
+            query["direction"] = direction
             label = f"{direction} summary"
+        if day is not None:
+            query.update(day.query())
+            label += " for the local delivery day"
+        if query:
+            path += f"?{urlencode(query)}"
         response = await self.client.request("GET", path)
         if response.status in {401, 403}:
             raise ConfigEntryAuthFailed("The backend rejected its credential")
@@ -300,7 +318,7 @@ class ShipmentsCoordinator(DataUpdateCoordinator[dict[str, int]]):
             raise UpdateFailed(f"The backend returned an invalid {label}")
         return {key: data[key] for key in SUMMARY_KEYS}
 
-    async def _async_report_presence(self) -> None:
+    async def _async_report_presence(self, day: DeliveryDay) -> None:
         """Check in only after summary authentication and complete entry setup."""
         if self._entry.state is not ConfigEntryState.LOADED or not self._entry.data.get(
             CONF_ADDON_SLUG
@@ -316,6 +334,7 @@ class ShipmentsCoordinator(DataUpdateCoordinator[dict[str, int]]):
         report: PresenceReport = {
             "version": self._version,
             "backup": backup,
+            "delivery_day": day.presence(),
             "administrator_ids": [
                 user.id for user in users if user.is_active and user.is_admin
             ],

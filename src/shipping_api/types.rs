@@ -48,7 +48,7 @@ pub struct Registration {
 
 /// Normalized observation. IDs are opaque to the worker; implementations must
 /// validate identity and URLs before returning an observation.
-#[derive(Debug)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Tracker {
     pub id: String,
     pub tracking_code: String,

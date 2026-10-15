@@ -234,7 +234,7 @@ label {
 }
 .summary {
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
+  grid-template-columns: repeat(5, minmax(0, 1fr));
   gap: 16px;
   margin: 8px 0 30px;
 }
@@ -255,6 +255,13 @@ label {
   color: var(--muted);
   font-size: 12px;
   margin-top: 8px;
+}
+.stat small {
+  display: block;
+  color: var(--muted);
+  font-size: 11px;
+  margin-top: 5px;
+  font-weight: 400;
 }
 .toolbar {
   display: flex;
@@ -285,6 +292,7 @@ label {
   width: auto;
   min-width: 130px;
 }
+.view-note { margin: 0 0 18px; font-size: 13px; }
 .shipments {
   display: grid;
   gap: 10px;
@@ -490,6 +498,10 @@ dialog::backdrop {
 [hidden] {
   display: none !important;
 }
+@media (max-width: 900px) {
+  .summary { grid-template-columns: 1fr 1fr; }
+  .stat-tracking_issues { grid-column: 1 / -1; }
+}
 @media (max-width: 650px) {
   header,
   main {
@@ -605,6 +617,16 @@ dialog::backdrop {
 .status-error,
 .status-return_to_sender,
 .stat-exceptions {
+  --status-ink: var(--red-ink);
+  --status-fill: var(--red-fill);
+  --status-line: var(--red-line);
+}
+.stat-tracking_issues {
+  --status-ink: var(--neutral-ink);
+  --status-fill: var(--neutral-fill);
+  --status-line: var(--neutral-line);
+}
+.stat-tracking_issues.has-issues {
   --status-ink: var(--red-ink);
   --status-fill: var(--red-fill);
   --status-line: var(--red-line);
@@ -818,8 +840,25 @@ dialog::backdrop {
 .direction-tabs button[aria-pressed="true"] { background: var(--green); color: var(--paper); }
 .direction-inbound { background: #d5eee9; color: #155d50; }
 .direction-outbound { background: #f5dce9; color: #852b58; }
-.registration-pending { background: var(--amber-fill); color: var(--amber-ink); }
+.registration-pending { background: var(--neutral-fill); color: var(--neutral-ink); }
 .registration-rejected { background: var(--red-fill); color: var(--red-ink); }
+.tracking-issue { background: var(--red-fill); color: var(--red-ink); }
+.tracking-issue.retrying { background: var(--amber-fill); color: var(--amber-ink); }
+.tracking-problem {
+  border-left: 3px solid var(--red-line);
+  background: var(--red-fill);
+  color: var(--red-ink);
+  padding: 16px 18px;
+  border-radius: 6px;
+  margin-top: 18px;
+}
+.tracking-problem p { margin: 10px 0 0; line-height: 1.6; }
+.tracking-problem .retry-timing { font-size: 13px; }
+.tracking-problem.retrying {
+  border-color: var(--amber-line);
+  background: var(--amber-fill);
+  color: var(--amber-ink);
+}
 @media (prefers-color-scheme: dark) {
   .direction-inbound { background: #153e38; color: #9ddfce; }
   .direction-outbound { background: #502439; color: #efb2d1; }

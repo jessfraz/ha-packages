@@ -45,7 +45,7 @@ struct Claim {
     id: String,
     tracking_generation: i64,
     tracking_number: String,
-    tracking_carrier: Option<String>,
+    tracking_carrier: String,
     tracker_id: Option<String>,
     lease_token: String,
 }
@@ -98,14 +98,11 @@ impl SyncWorker {
         let Some(claim) = claim else { return Ok(false) };
 
         let client = self.client.for_request(&claim.lease_token, Some(&claim.id));
-        let carrier = claim
-            .tracking_carrier
-            .as_deref()
-            .map(str::parse)
-            .transpose()
-            .map_err(|error: crate::carrier::UnsupportedCarrier| {
+        let carrier = claim.tracking_carrier.parse().map_err(
+            |error: crate::carrier::UnsupportedCarrier| {
                 Error::Database(sqlx::Error::Decode(Box::new(error)))
-            })?;
+            },
+        )?;
         let observation = match &claim.tracker_id {
             Some(id) => client.retrieve(id, &claim.tracking_number).await,
             None => {
@@ -124,7 +121,7 @@ impl SyncWorker {
                 };
                 let registration = Registration {
                     tracking_number: claim.tracking_number.clone(),
-                    carrier,
+                    carrier: Some(carrier),
                     started_at: started,
                 };
                 match client.reconcile_registration(&registration).await {
@@ -309,7 +306,8 @@ impl SyncWorker {
                 let terminal =
                     override_terminal || previous_status.is_some_and(Status::is_terminal);
                 let rejected = claim.tracker_id.is_none() && error.rejects_registration();
-                let delay = (!terminal && !rejected)
+                let configuration = error.requires_configuration();
+                let delay = (!terminal && !rejected && !configuration)
                     .then_some(exponential.clamp(60, MAX_RETRY_SECONDS).max(retry_after));
                 sqlx::query(
                     "UPDATE shipments SET last_error = ?, last_error_code = ?, last_provider_status = ?, last_provider_error_code = ?,
@@ -321,7 +319,7 @@ impl SyncWorker {
                 .bind(error.error_code())
                 .bind(error.provider_status().map(i64::from))
                 .bind(error.provider_error_code())
-                .bind(if claim.tracker_id.is_some() { "registered" } else if rejected { "rejected" } else { "pending" })
+                .bind(if configuration { "rejected" } else if claim.tracker_id.is_some() { "registered" } else if rejected { "rejected" } else { "pending" })
                 .bind(attempts)
                 .bind(delay)
                 .bind(&claim.id)
@@ -342,7 +340,7 @@ mod tests {
         types::ProviderId,
     };
     use crate::{
-        models::{CreateShipment, SetOverride, Status, Tracking},
+        models::{CreateShipment, InputTracking, SetOverride, Status},
         store::Store,
         sync::{Claim, SyncWorker, poll_delay},
     };
@@ -375,9 +373,9 @@ mod tests {
                     merchant: None,
                     order_reference: None,
                     signature_required: None,
-                    tracking: Tracking {
+                    tracking: InputTracking {
                         number: "TERMINAL-TRACK".into(),
-                        carrier: None,
+                        carrier: Some("USPS".parse().unwrap()),
                     },
                     source: None,
                 },
@@ -391,7 +389,7 @@ mod tests {
             id: shipment.id.to_string(),
             tracking_generation: 0,
             tracking_number: shipment.tracking.number,
-            tracking_carrier: None,
+            tracking_carrier: "usps".into(),
             tracker_id: None,
             lease_token: "test-claim".into(),
         };

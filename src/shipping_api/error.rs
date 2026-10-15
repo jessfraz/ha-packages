@@ -7,6 +7,7 @@ use crate::shipping_api::types::ProviderId;
 pub struct Error {
     pub provider: ProviderId,
     pub kind: ErrorKind,
+    pub provider_request_id: Option<uuid::Uuid>,
 }
 
 #[derive(Debug)]
@@ -48,11 +49,18 @@ pub enum Rejection {
 
 impl Error {
     pub fn new(provider: ProviderId, kind: ErrorKind) -> Self {
-        Self { provider, kind }
+        Self {
+            provider,
+            kind,
+            provider_request_id: None,
+        }
     }
 
     pub fn error_code(&self) -> &'static str {
         match &self.kind {
+            ErrorKind::ProviderRejected { status, .. } if !matches!(status, 400 | 404 | 422) => {
+                http_error_code(*status)
+            }
             ErrorKind::Rejected(rejection) | ErrorKind::ProviderRejected { rejection, .. } => {
                 rejection.error_code()
             }
@@ -61,11 +69,7 @@ impl Error {
             ErrorKind::Configuration => "provider_configuration",
             ErrorKind::Timeout => "provider_timeout",
             ErrorKind::Connection => "provider_connection",
-            ErrorKind::Http {
-                status: 401 | 403, ..
-            } => "tracking_provider_credentials",
-            ErrorKind::Http { status: 429, .. } => "tracking_verification_rate_limited",
-            ErrorKind::Http { .. } => "provider_http",
+            ErrorKind::Http { status, .. } => http_error_code(*status),
             ErrorKind::Throttled { .. } => "provider_throttled",
             ErrorKind::ResponseTooLarge => "provider_response_too_large",
             ErrorKind::InvalidResponse | ErrorKind::InvalidConnectionResponse => {
@@ -108,6 +112,10 @@ impl Error {
     }
 
     pub fn rejects_registration(&self) -> bool {
+        if matches!(self.kind, ErrorKind::ProviderRejected { status, .. } if !matches!(status,400|404|422))
+        {
+            return false;
+        }
         matches!(
             self.kind,
             ErrorKind::Rejected(
@@ -124,6 +132,28 @@ impl Error {
             } | ErrorKind::RegistrationAmbiguous
                 | ErrorKind::RegistrationExpired
         )
+    }
+
+    pub fn requires_configuration(&self) -> bool {
+        configuration_error_code(self.error_code())
+    }
+}
+
+pub fn configuration_error_code(code: &str) -> bool {
+    matches!(
+        code,
+        "tracking_provider_credentials"
+            | "tracking_carrier_account_required"
+            | "tracking_carrier_credentials_required"
+            | "tracking_test_key"
+    )
+}
+
+fn http_error_code(status: u16) -> &'static str {
+    match status {
+        401 | 403 => "tracking_provider_credentials",
+        429 => "tracking_verification_rate_limited",
+        _ => "provider_http",
     }
 }
 
@@ -167,6 +197,9 @@ impl fmt::Display for Error {
                 f,
                 "{provider} returned an invalid connection-check response"
             ),
+            ErrorKind::ProviderRejected { status, .. } if !matches!(status, 400 | 404 | 422) => {
+                write!(f, "{provider} returned HTTP {status}")
+            }
             ErrorKind::Rejected(rejection) | ErrorKind::ProviderRejected { rejection, .. } => {
                 format_rejection(*rejection, provider, f)
             }
@@ -183,6 +216,7 @@ impl fmt::Debug for Error {
             .field("error_code", &self.error_code())
             .field("status", &self.provider_status())
             .field("retry_after", &self.retry_after())
+            .field("provider_request_id", &self.provider_request_id)
             .finish()
     }
 }
@@ -193,7 +227,7 @@ fn format_rejection(
     f: &mut fmt::Formatter<'_>,
 ) -> fmt::Result {
     match rejection {
-                Rejection::NoCarrierForCode => write!(f, "Tracking is unavailable from the configured provider ({provider}): no supported carrier was found. This does not mean the tracking number is invalid. Check provider support and the selected carrier before changing the number."),
+                Rejection::NoCarrierForCode => write!(f, "{provider} could not match this tracking number to an available carrier. Select the carrier shown on the shipping notice and confirm its carrier account is configured in {provider}. This does not mean the tracking number is invalid."),
                 Rejection::CarrierCodeMismatch => f.write_str("The tracking number does not match the selected carrier. Check the number and carrier."),
                 Rejection::MultipleCarriersForCode => f.write_str("The tracking number matches multiple carriers. Specify its carrier."),
                 Rejection::InvalidParams => write!(f, "{provider} could not accept this tracking number and carrier. Check both values."),

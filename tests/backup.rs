@@ -24,7 +24,7 @@ async fn cold_backup_restores_records_history_and_replay_without_wal() {
         merchant: None,
         order_reference: Some("TEST-123".into()),
         signature_required: None,
-        tracking: Tracking {
+        tracking: InputTracking {
             carrier: Some("usps".parse().unwrap()),
             number: "BACKUP123".into(),
         },
