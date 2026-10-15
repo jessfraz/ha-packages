@@ -222,7 +222,8 @@ tracking updates. It cannot make manual status corrections, archive records,
 run installation checks, or manage credentials. Credential hashes are saved
 in SQLite and survive restarts.
 
-Ingestion clients can use the [API error codes and retry guidance](../README.md#agents-and-human-corrections)
+Ingestion clients can use the [API error codes and retry
+guidance](../README.md#agents-and-human-corrections)
 to distinguish invalid input from a provider or configuration failure.
 
 For clients on another machine, enable the app's optional `8080/tcp` network
@@ -295,7 +296,8 @@ docker run --detach --name shipments --restart unless-stopped \
 
 Open `http://127.0.0.1:8080` and enter the owner API token. Save both tokens in
 your password manager before closing the shell. They must be distinct and
-contain 32–256 printable ASCII characters without whitespace. Tracker registration can incur EasyPost
+contain 32–256 printable ASCII characters without whitespace. Tracker
+registration can incur EasyPost
 charges. The image supports amd64 and arm64 and runs the service as an
 unprivileged user.
 

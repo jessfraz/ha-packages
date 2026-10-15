@@ -106,7 +106,8 @@ Replace `YOUR_TRACKING_NUMBER` with the carrier's tracking number. Each record
 represents one parcel or expected delivery. Several parcels can share an order
 reference. A tracking number and `direction` (`inbound` or `outbound`) are
 required; merchant, order reference, source, and carrier are optional. Existing
-records migrate to inbound. Direction can be edited but cannot be cleared. There is no hard-delete endpoint; archive unwanted
+records migrate to inbound. Direction can be edited but cannot be cleared. There
+is no hard-delete endpoint; archive unwanted
 records.
 
 Create returns `201` only after provider verification and an atomic commit of
@@ -234,7 +235,8 @@ patch the record, and attach new evidence. The app handles tracking afterward.
 An email claiming delivery is evidence, not a human confirmation.
 
 Malformed or empty tracking is rejected at the API before saving. API errors
-include `error_code`, a readable `message`, and a request ID. Creation failures save no shipment; existing tracking failures appear on
+include `error_code`, a readable `message`, and a request ID. Creation failures
+save no shipment; existing tracking failures appear on
 the shipment with the same safe error codes:
 
 | Where | Code | Action |
@@ -249,8 +251,10 @@ the shipment with the same safe error codes:
 
 Inspect `sync.provider_status`, `sync.provider_error_code`, `sync.attempts`,
 and `sync.next_attempt_at` for provider failures and retry timing. Known native
-provider codes are retained without storing arbitrary provider error text. Use GET to read the current state: an
-idempotency replay returns the original committed create response, which reflects the original committed state. Retry an uncertain local
+provider codes are retained without storing arbitrary provider error text. Use
+GET to read the current state: an
+idempotency replay returns the original committed create response, which
+reflects the original committed state. Retry an uncertain local
 create with its original idempotency key. Do not create a fresh record or key
 because a provider response was uncertain.
 
@@ -302,7 +306,8 @@ pre-transit labels that keep the same status slow to two-hour checks after two
 days and six-hour checks after a week. A status change restores its normal
 schedule. Missing carrier accounts, credentials, test keys, and rejected provider
 credentials stop automatic retries and show **Setup required**. Configure the
-provider, then select **Refresh tracking** to retry explicitly. Terminal carrier states and terminal manual corrections stop polling.
+provider, then select **Refresh tracking** to retry explicitly. Terminal carrier
+states and terminal manual corrections stop polling.
 
 All EasyPost operations share one outbound slot, with at least one second
 between request starts. Rate limits pause registration, polling and connection
@@ -336,7 +341,8 @@ status, allowlisted native provider codes, and retry timing when available.
 Saved-registration events include the
 API request ID and shipment ID; background attempts include their own request
 ID and the same local shipment ID. Find the request ID in the `X-Request-ID`
-response header or an error response's `request_id` field. Logs exclude credentials, tracking numbers,
+response header or an error response's `request_id` field. Logs exclude
+credentials, tracking numbers,
 raw URLs, request bodies, and provider messages. Successful dashboard reads
 stay quiet.
 
