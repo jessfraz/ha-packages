@@ -344,6 +344,11 @@
               "number": {
                 "default": "",
                 "type": "string"
+              },
+              "recipient_url": {
+                "description": "Original recipient link. Required for DoorDash; omitted for other carriers.",
+                "nullable": true,
+                "type": "string"
               }
             },
             "type": "object"
@@ -628,7 +633,9 @@
       "ProviderId": {
         "description": "Durable tracker ownership, separate from the package carrier. Add providers only when an implementation and configuration are available.",
         "enum": [
-          "easypost"
+          "easypost",
+          "doordash",
+          "aftership"
         ],
         "type": "string"
       },
@@ -1144,6 +1151,13 @@
             ],
             "nullable": true
           },
+          "enabled_providers": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/ProviderId"
+            },
+            "type": "array"
+          },
           "pending_syncs": {
             "format": "int64",
             "type": "integer"
@@ -1202,6 +1216,11 @@
           "number": {
             "default": "",
             "type": "string"
+          },
+          "recipient_url": {
+            "description": "Original recipient link. Required for DoorDash; omitted for other carriers.",
+            "nullable": true,
+            "type": "string"
           }
         },
         "required": [
@@ -1222,6 +1241,11 @@
           },
           "number": {
             "default": "",
+            "type": "string"
+          },
+          "recipient_url": {
+            "description": "Original recipient link. Required for DoorDash; omitted for other carriers.",
+            "nullable": true,
             "type": "string"
           }
         },
@@ -1260,7 +1284,7 @@
   "info": {
     "description": "Persistent local shipment records, manual corrections, and carrier synchronization. Use a Bearer owner or ingestion token. Creates require Idempotency-Key; writes to an existing shipment require its quoted revision in If-Match.",
     "title": "Shipments API",
-    "version": "0.5.4"
+    "version": "0.5.5"
   },
   "openapi": "3.0.3",
   "paths": {

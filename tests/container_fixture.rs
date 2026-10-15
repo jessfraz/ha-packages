@@ -40,6 +40,7 @@ async fn export_container_fixture() {
     ] {
         let carrier = carrier.parse().unwrap();
         let tracker = Tracker {
+            provider: shipments::shipping_api::types::ProviderId::EasyPost,
             id: tracker_id.into(),
             tracking_code: number.into(),
             carrier,
@@ -56,6 +57,7 @@ async fn export_container_fixture() {
                     order_reference: None,
                     signature_required: None,
                     tracking: InputTracking {
+                        recipient_url: None,
                         number: number.into(),
                         carrier: Some(carrier),
                     },

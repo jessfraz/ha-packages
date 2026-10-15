@@ -122,6 +122,7 @@ async fn missing_carrier_migration_deletes_incomplete_imports_and_preserves_reso
     {
         let mut snapshot = legacy_shipment(
             Some(InputTracking {
+                recipient_url: None,
                 number: format!("MIGRATION{index}123"),
                 // A resolved record can still have a carrier-less old event.
                 carrier: if index == 4 {
@@ -214,6 +215,7 @@ async fn missing_carrier_migration_deletes_incomplete_imports_and_preserves_reso
         signature_required: None,
         source: None,
         tracking: InputTracking {
+            recipient_url: None,
             number: "MIGRATION0123".into(),
             carrier: Some("USPS".parse().unwrap()),
         },
@@ -410,6 +412,7 @@ fn legacy_shipment(
 
 fn tracking(number: &str) -> InputTracking {
     InputTracking {
+        recipient_url: None,
         number: number.into(),
         carrier: Some("usps".parse().unwrap()),
     }

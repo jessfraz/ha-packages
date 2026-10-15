@@ -116,6 +116,16 @@ def async_register_services(hass: HomeAssistant) -> None:
 
         payload: dict[str, object] | None = None
         if call.service == "add":
+            recipient_url = call.data.get("recipient_url") or None
+            if (
+                call.data.get("carrier", "").strip().casefold() == "doordash"
+                and not recipient_url
+            ):
+                raise ServiceValidationError(
+                    "DoorDash requires its original recipient tracking link. "
+                    "Copy the link from the merchant's shipping email into "
+                    "recipient_url."
+                )
             payload = {
                 "title": call.data["title"],
                 "direction": call.data["direction"],
@@ -124,6 +134,7 @@ def async_register_services(hass: HomeAssistant) -> None:
                 "tracking": {
                     "number": call.data["tracking_number"],
                     "carrier": call.data.get("carrier") or None,
+                    "recipient_url": recipient_url,
                 },
             }
         elif call.service == "set_override":
@@ -177,6 +188,7 @@ def async_register_services(hass: HomeAssistant) -> None:
                     str, str.strip, vol.Length(min=1)
                 ),
                 vol.Optional("carrier"): str,
+                vol.Optional("recipient_url"): vol.All(str, str.strip),
                 vol.Optional("idempotency_key"): str,
             }
         else:

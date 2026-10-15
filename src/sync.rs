@@ -7,7 +7,7 @@ use crate::{
     shipping_api::{
         ShippingApi,
         error::{Error as SyncError, ErrorKind},
-        types::{Registration, Tracker},
+        types::{ProviderId, Registration, Tracker},
     },
 };
 use sha2::{Digest, Sha256};
@@ -46,6 +46,7 @@ struct Claim {
     tracking_generation: i64,
     tracking_number: String,
     tracking_carrier: String,
+    recipient_url: Option<String>,
     tracker_id: Option<String>,
     lease_token: String,
 }
@@ -88,7 +89,7 @@ impl SyncWorker {
                  ORDER BY next_attempt_at, id LIMIT 1
              )
              RETURNING id, tracking_generation, tracking_number, tracking_carrier,
-                       tracker_id, lease_token",
+                       tracker_id, recipient_url, lease_token",
         )
         .bind(Uuid::now_v7().to_string())
         .bind(LEASE_SECONDS)
@@ -122,6 +123,7 @@ impl SyncWorker {
                 let registration = Registration {
                     tracking_number: claim.tracking_number.clone(),
                     carrier: Some(carrier),
+                    recipient_url: claim.recipient_url.clone(),
                     started_at: started,
                 };
                 match client.reconcile_registration(&registration).await {
@@ -154,6 +156,16 @@ impl SyncWorker {
                 }
             }
         };
+        let observation = observation.and_then(|tracker| {
+            if tracker.provider != client.id()
+                || tracker.tracking_code != claim.tracking_number
+                || ProviderId::for_carrier(Some(tracker.carrier)) != client.id()
+            {
+                Err(SyncError::new(client.id(), ErrorKind::InvalidResponse))
+            } else {
+                Ok(tracker)
+            }
+        });
         self.complete(&claim, observation).await?;
         Ok(true)
     }
@@ -376,6 +388,7 @@ mod tests {
                     tracking: InputTracking {
                         number: "TERMINAL-TRACK".into(),
                         carrier: Some("USPS".parse().unwrap()),
+                        recipient_url: None,
                     },
                     source: None,
                 },
@@ -390,6 +403,7 @@ mod tests {
             tracking_generation: 0,
             tracking_number: shipment.tracking.number,
             tracking_carrier: "usps".into(),
+            recipient_url: None,
             tracker_id: None,
             lease_token: "test-claim".into(),
         };

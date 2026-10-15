@@ -52,6 +52,7 @@ impl Fixture {
                     order_reference: None,
                     signature_required: None,
                     tracking: InputTracking {
+                        recipient_url: None,
                         number: NUMBER.into(),
                         carrier: Some("USPS".parse().unwrap()),
                     },
@@ -763,6 +764,7 @@ async fn changed_tracking_during_reconciliation_cannot_post_the_old_identity() {
             UpdateShipment {
                 tracking: Patch {
                     value: Some(Some(InputTracking {
+                        recipient_url: None,
                         number: REPLACEMENT.into(),
                         carrier: Some("USPS".parse().unwrap()),
                     })),
@@ -969,6 +971,7 @@ async fn legacy_fedex_configuration_block_is_cleared_by_a_verified_carrier_corre
                 signature_required: None,
                 source: None,
                 tracking: InputTracking {
+                    recipient_url: None,
                     number: NUMBER.into(),
                     carrier: Some("FedEx".parse().unwrap()),
                 },
@@ -1044,6 +1047,7 @@ async fn legacy_fedex_configuration_block_is_cleared_by_a_verified_carrier_corre
             .json(&UpdateShipment {
                 tracking: Patch {
                     value: Some(Some(InputTracking {
+                        recipient_url: None,
                         number: NUMBER.into(),
                         carrier: Some("FedExDefault".parse().unwrap()),
                     })),

@@ -59,6 +59,7 @@ async fn persistence_requires_a_resolved_carrier_and_applies_reverification() {
         signature_required: None,
         source: None,
         tracking: InputTracking {
+            recipient_url: None,
             number: "9400100000000000000001".into(),
             carrier: None,
         },
@@ -75,6 +76,7 @@ async fn persistence_requires_a_resolved_carrier_and_applies_reverification() {
     .unwrap();
     assert_eq!(counts, (0, 0));
     let tracker = Tracker {
+        provider: shipments::shipping_api::types::ProviderId::EasyPost,
         id: "trk_detected".into(),
         tracking_code: input.tracking.number.clone(),
         carrier: "USPS".parse().unwrap(),
@@ -91,6 +93,7 @@ async fn persistence_requires_a_resolved_carrier_and_applies_reverification() {
     let update = UpdateShipment {
         tracking: Patch {
             value: Some(Some(InputTracking {
+                recipient_url: None,
                 carrier: None,
                 number: "9400100000000000000002".into(),
             })),
@@ -120,6 +123,7 @@ async fn persistence_requires_a_resolved_carrier_and_applies_reverification() {
             UpdateShipment {
                 tracking: Patch {
                     value: Some(Some(InputTracking {
+                        recipient_url: None,
                         number: saved.tracking.number.clone(),
                         carrier: None,
                     })),

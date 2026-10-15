@@ -35,6 +35,7 @@ async fn exception_filter_uses_effective_status_search_and_keyset_pagination() {
                     order_reference: None,
                     signature_required: None,
                     tracking: InputTracking {
+                        recipient_url: None,
                         carrier: Some("usps".parse().unwrap()),
                         number: format!("FILTER{index}"),
                     },

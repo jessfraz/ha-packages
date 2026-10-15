@@ -20,6 +20,8 @@ pub struct Config {
     pub integration_token: Option<String>,
     #[arg(long, env = "EASYPOST_API_KEY", hide_env_values = true)]
     pub easypost_api_key: Option<String>,
+    #[arg(long, env = "AFTERSHIP_API_KEY", hide_env_values = true)]
+    pub aftership_api_key: Option<String>,
     #[arg(long, env = "SHIPMENTS_INGRESS_BIND")]
     pub ingress_bind: Option<SocketAddr>,
     #[arg(long, default_value = "172.30.32.2")]
@@ -35,6 +37,7 @@ pub struct Config {
 #[serde(deny_unknown_fields)]
 struct Options {
     easypost_api_key: Option<String>,
+    aftership_api_key: Option<String>,
 }
 
 impl Config {
@@ -51,6 +54,9 @@ impl Config {
             config.easypost_api_key = config
                 .easypost_api_key
                 .or(options.easypost_api_key.filter(|value| !value.is_empty()));
+            config.aftership_api_key = config
+                .aftership_api_key
+                .or(options.aftership_api_key.filter(|value| !value.is_empty()));
         }
         if config.openapi.is_none() {
             let token = config

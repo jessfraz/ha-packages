@@ -24,6 +24,7 @@ impl Fixture {
                     order_reference: None,
                     signature_required: None,
                     tracking: InputTracking {
+                        recipient_url: None,
                         number: "9400111899560000000000".into(),
                         carrier: Some("usps".parse().unwrap()),
                     },

@@ -10,6 +10,14 @@ pub enum Error {
         "Tracking number must contain 6..100 letters or digits, include at least one digit, and use only letters, digits, spaces, or hyphens."
     )]
     TrackingInvalid,
+    #[error(
+        "DoorDash requires its original recipient tracking link in tracking.recipient_url. Copy the link from the merchant's shipping email."
+    )]
+    RecipientLinkRequired,
+    #[error(
+        "tracking.recipient_url must be the original HTTPS DoorDash recipient link (https://www.doordash.com/orders/drive?urlCode=...). Use it only with carrier DoorDash."
+    )]
+    InvalidRecipientLink,
     #[error("{0}")]
     Invalid(String),
     #[error("shipment not found")]
@@ -29,9 +37,11 @@ pub enum Error {
 impl From<Error> for dropshot::HttpError {
     fn from(error: Error) -> Self {
         let status = match error {
-            Error::TrackingRequired | Error::TrackingInvalid | Error::CarrierRequired => {
-                dropshot::ClientErrorStatusCode::BAD_REQUEST
-            }
+            Error::TrackingRequired
+            | Error::TrackingInvalid
+            | Error::CarrierRequired
+            | Error::RecipientLinkRequired
+            | Error::InvalidRecipientLink => dropshot::ClientErrorStatusCode::BAD_REQUEST,
             Error::Invalid(_) => dropshot::ClientErrorStatusCode::BAD_REQUEST,
             Error::NotFound => dropshot::ClientErrorStatusCode::NOT_FOUND,
             Error::Conflict(_) => dropshot::ClientErrorStatusCode::CONFLICT,
@@ -42,6 +52,8 @@ impl From<Error> for dropshot::HttpError {
             Error::CarrierRequired => "carrier_required",
             Error::TrackingRequired => "tracking_required",
             Error::TrackingInvalid => "tracking_invalid",
+            Error::RecipientLinkRequired => "tracking_recipient_url_required",
+            Error::InvalidRecipientLink => "tracking_recipient_url_invalid",
             Error::Invalid(_) => "invalid_input",
             Error::NotFound => "not_found",
             Error::Conflict(_) => "conflict",

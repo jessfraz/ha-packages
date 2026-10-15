@@ -46,6 +46,7 @@ fn input(number: &str) -> CreateShipment {
         order_reference: None,
         signature_required: None,
         tracking: InputTracking {
+            recipient_url: None,
             carrier: Some("usps".parse().unwrap()),
             number: number.into(),
         },
@@ -93,6 +94,7 @@ async fn verified_create_replays_preserve_sources_history_and_make_no_provider_r
         .unwrap();
     let request = input("9400111899223856926381");
     let verified = shipments::shipping_api::types::Tracker {
+        provider: shipments::shipping_api::types::ProviderId::EasyPost,
         id: "trk_verified_fixture".into(),
         tracking_code: request.tracking.number.clone(),
         carrier: "USPS".parse().unwrap(),
@@ -274,6 +276,7 @@ async fn local_validation_rejects_garbage_and_tracking_edits_reset_durable_rejec
             UpdateShipment {
                 tracking: Patch {
                     value: Some(Some(InputTracking {
+                        recipient_url: None,
                         carrier: Some("USPS".parse().unwrap()),
                         number: "9400111899223856926384".into(),
                     })),

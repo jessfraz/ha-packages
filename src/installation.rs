@@ -200,8 +200,8 @@ impl Installation {
         };
         let easypost = if !provider_enabled {
             Check {
-                status: CheckStatus::Attention,
-                message: "Configure the EasyPost API key before adding shipments or changing tracking numbers. Existing records remain available.".into(),
+                status: CheckStatus::NotApplicable,
+                message: "EasyPost is not configured. Add its API key to track EasyPost carriers. DoorDash and configured AfterShip carriers use their own providers.".into(),
                 checked_at: None,
             }
         } else {
@@ -349,7 +349,7 @@ mod tests {
         assert_eq!(observed.checked_at, Some(1_700_000_000));
 
         let disabled = installation.report(false).await;
-        assert_eq!(disabled.easypost.status, CheckStatus::Attention);
+        assert_eq!(disabled.easypost.status, CheckStatus::NotApplicable);
         let observed: DiagnosticTime =
             serde_json::from_slice(&serde_json::to_vec(&disabled.easypost).unwrap()).unwrap();
         assert_eq!(observed.checked_at, None);

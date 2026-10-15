@@ -38,6 +38,15 @@ add:
       example: USPS
       selector:
         text:
+    recipient_url:
+      name: DoorDash tracking link
+      description: >-
+        Required for DoorDash. Copy the original recipient tracking link from the
+        merchant's shipping email; the tracking number cannot recreate this link.
+        Leave blank for other carriers.
+      selector:
+        text:
+          type: url
     advanced:
       collapsed: true
       fields:

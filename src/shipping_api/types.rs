@@ -22,18 +22,33 @@ pub enum ProviderId {
     #[default]
     #[serde(rename = "easypost")]
     EasyPost,
+    #[serde(rename = "doordash")]
+    DoorDash,
+    #[serde(rename = "aftership")]
+    AfterShip,
 }
 
 impl ProviderId {
+    pub const fn for_carrier(carrier: Option<Carrier>) -> Self {
+        match carrier {
+            Some(Carrier::DoorDash) => Self::DoorDash,
+            Some(Carrier::SpeedX | Carrier::Sway) => Self::AfterShip,
+            _ => Self::EasyPost,
+        }
+    }
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::EasyPost => "easypost",
+            Self::DoorDash => "doordash",
+            Self::AfterShip => "aftership",
         }
     }
 
     pub const fn name(self) -> &'static str {
         match self {
             Self::EasyPost => "EasyPost",
+            Self::DoorDash => "DoorDash",
+            Self::AfterShip => "AfterShip",
         }
     }
 }
@@ -42,6 +57,7 @@ impl ProviderId {
 pub struct Registration {
     pub tracking_number: String,
     pub carrier: Option<Carrier>,
+    pub recipient_url: Option<String>,
     /// Durable first attempt, preserved across uncertain results and restarts.
     pub started_at: i64,
 }
@@ -50,6 +66,8 @@ pub struct Registration {
 /// validate identity and URLs before returning an observation.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Tracker {
+    #[serde(default)]
+    pub provider: ProviderId,
     pub id: String,
     pub tracking_code: String,
     pub carrier: Carrier,

@@ -14,7 +14,7 @@ use crate::{
     shipping_api::{
         ShippingApi,
         error::Error as ProviderError,
-        types::{Registration, Tracker},
+        types::{ProviderId, Registration, Tracker},
     },
     store::Store,
 };
@@ -24,6 +24,7 @@ const LEASE_SECONDS: i64 = 120;
 #[derive(FromRow)]
 struct Attempt {
     requested_carrier: Option<String>,
+    requested_recipient_url: Option<String>,
     started_at: i64,
     lease_until: Option<i64>,
     attempts: i64,
@@ -185,8 +186,9 @@ pub async fn verify(
     request_id: &str,
 ) -> Result<Tracker, HttpError> {
     let Some(provider) = provider else {
+        let expected = ProviderId::for_carrier(tracking.carrier);
         return Err(Failure { code: "tracking_provider_unconfigured".into(),
-            message: "Tracking cannot be verified because no provider is configured. Configure the EasyPost production key, then retry. No shipment was saved.".into(), rejected: false }.http(60));
+            message: format!("Tracking cannot be verified because {} is not configured. Enable this provider and retry. No shipment was saved.", expected.name()), rejected: false }.http(60));
     };
     let provider = provider.for_request(request_id, None);
     let provider_id = provider.id().as_str();
@@ -209,7 +211,7 @@ pub async fn verify(
         .fetch_one(&mut *tx)
         .await
         .map_err(crate::error::Error::from)?;
-    let attempt = sqlx::query_as::<_, Attempt>("SELECT requested_carrier,started_at,lease_until,attempts,next_attempt_at,tracker,verified_at,failure FROM tracking_verifications WHERE provider=? AND tracking_number=?")
+    let attempt = sqlx::query_as::<_, Attempt>("SELECT requested_carrier,requested_recipient_url,started_at,lease_until,attempts,next_attempt_at,tracker,verified_at,failure FROM tracking_verifications WHERE provider=? AND tracking_number=?")
         .bind(provider_id).bind(&tracking.number).fetch_one(&mut *tx).await.map_err(crate::error::Error::from)?;
     let cached = attempt
         .tracker
@@ -218,9 +220,17 @@ pub async fn verify(
         .transpose()
         .map_err(crate::error::Error::from)?;
     let cached = cached.filter(|tracker| {
-        tracking
-            .carrier
-            .is_none_or(|carrier| carrier == tracker.carrier)
+        tracker.provider == provider.id()
+            && ProviderId::for_carrier(Some(tracker.carrier)) == provider.id()
+            && tracker.tracking_code == tracking.number
+            && attempt.requested_recipient_url == tracking.recipient_url
+            && tracking
+                .recipient_url
+                .as_ref()
+                .is_none_or(|url| tracker.public_url.as_ref() == Some(url))
+            && tracking
+                .carrier
+                .is_none_or(|carrier| carrier == tracker.carrier)
     });
     if let Some(tracker) = cached
         .as_ref()
@@ -231,7 +241,10 @@ pub async fn verify(
     if let Some(until) = attempt.lease_until.filter(|until| *until > now) {
         return Err(busy(until - now));
     }
-    if requested_carrier == attempt.requested_carrier && attempt.next_attempt_at > now {
+    if requested_carrier == attempt.requested_carrier
+        && tracking.recipient_url == attempt.requested_recipient_url
+        && attempt.next_attempt_at > now
+    {
         return Err(match attempt.failure {
             Some(value) => serde_json::from_str::<Failure>(&value)
                 .map_err(crate::error::Error::from)?
@@ -239,13 +252,14 @@ pub async fn verify(
             None => busy(attempt.next_attempt_at - now),
         });
     }
-    sqlx::query("UPDATE tracking_verifications SET requested_carrier=?,lease_token=?,lease_until=unixepoch()+? WHERE provider=? AND tracking_number=?")
-        .bind(requested_carrier).bind(&token).bind(LEASE_SECONDS).bind(provider_id).bind(&tracking.number)
+    sqlx::query("UPDATE tracking_verifications SET requested_carrier=?,requested_recipient_url=?,lease_token=?,lease_until=unixepoch()+? WHERE provider=? AND tracking_number=?")
+        .bind(requested_carrier).bind(&tracking.recipient_url).bind(&token).bind(LEASE_SECONDS).bind(provider_id).bind(&tracking.number)
         .execute(&mut *tx).await.map_err(crate::error::Error::from)?;
     tx.commit().await.map_err(crate::error::Error::from)?;
     let registration = Registration {
         tracking_number: tracking.number.clone(),
         carrier: tracking.carrier,
+        recipient_url: tracking.recipient_url.clone(),
         started_at: attempt.started_at,
     };
     let result = async {
@@ -265,7 +279,18 @@ pub async fn verify(
                 prepared.register().await
             }
         }
-    }.await;
+    }.await.and_then(|tracker| {
+        if tracker.provider != provider.id()
+            || ProviderId::for_carrier(Some(tracker.carrier)) != provider.id()
+            || tracker.tracking_code != tracking.number
+            || tracking.carrier.is_some_and(|carrier| carrier != tracker.carrier)
+            || tracking.recipient_url.as_ref().is_some_and(|url| tracker.public_url.as_ref() != Some(url))
+        {
+            Err(crate::shipping_api::error::Error::new(provider.id(), crate::shipping_api::error::ErrorKind::InvalidResponse))
+        } else {
+            Ok(tracker)
+        }
+    });
     match result {
         Ok(tracker) => {
             let affected = sqlx::query("UPDATE tracking_verifications SET tracker=?,verified_at=unixepoch(),failure=NULL,attempts=0,next_attempt_at=0,lease_token=NULL,lease_until=NULL WHERE provider=? AND tracking_number=? AND lease_token=? AND lease_until>unixepoch()")

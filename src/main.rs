@@ -2,7 +2,9 @@ use anyhow::{Context as _, Result};
 use shipments::{
     api,
     config::Config,
-    shipping_api::{ShippingApi, easypost::EasyPostClient},
+    shipping_api::{
+        aftership::AfterShipClient, doordash::DoorDashClient, easypost::EasyPostClient,
+    },
     store::Store,
     supervisor::Supervisor,
     sync::SyncWorker,
@@ -22,14 +24,18 @@ async fn main() -> Result<()> {
         .api_token
         .as_deref()
         .context("missing owner credential")?;
-    let provider: Option<Arc<dyn ShippingApi>> = config
-        .easypost_api_key
-        .map(|key| {
-            EasyPostClient::new(key)
-                .map(|client| Arc::new(client.with_logger(log.clone())) as Arc<dyn ShippingApi>)
-        })
-        .transpose()?;
-    let mut context = api::Context::new(store.clone(), token, None, provider.clone());
+    let mut context = api::Context::new(store.clone(), token, None, None)
+        .with_provider(Arc::new(DoorDashClient::new()?.with_logger(log.clone())));
+    if let Some(key) = config.easypost_api_key {
+        context =
+            context.with_provider(Arc::new(EasyPostClient::new(key)?.with_logger(log.clone())));
+    }
+    if let Some(key) = config.aftership_api_key {
+        context = context.with_provider(Arc::new(
+            AfterShipClient::new(key)?.with_logger(log.clone()),
+        ));
+    }
+    let providers = context.providers().to_vec();
     if let Some(token) = &config.integration_token {
         context = context.with_integration(token);
     }
@@ -43,7 +49,7 @@ async fn main() -> Result<()> {
     } else {
         None
     };
-    let (stop_tx, mut stop_rx) = tokio::sync::watch::channel(false);
+    let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
     let discovery = if let (Some(supervisor), Some(integration_token)) =
         (Supervisor::from_environment()?, config.integration_token)
     {
@@ -66,43 +72,62 @@ async fn main() -> Result<()> {
     } else {
         None
     };
-    let worker = if let Some(provider) = provider {
+    let workers: Vec<_> = providers.into_iter().map(|provider| {
         let worker = SyncWorker::new(store.pool().clone(), provider);
         let log = log.clone();
-        Some(tokio::spawn(async move {
+        let mut worker_stop = stop_rx.clone();
+        tokio::spawn(async move {
             loop {
                 tokio::select! {
-                    _=stop_rx.changed()=>break,
-                    result=worker.tick()=>{
-                        let delay=match result {Ok(true)=>std::time::Duration::from_millis(100),Ok(false)=>std::time::Duration::from_secs(5),Err(_)=>{slog::error!(log, "tracking_sync"; "operation" => "sync", "outcome" => "error", "error_code" => "database_error");std::time::Duration::from_secs(30)}};
-                        tokio::select! {_=stop_rx.changed()=>break,_=tokio::time::sleep(delay)=>{}}
+                    _ = worker_stop.changed() => break,
+                    result = worker.tick() => {
+                        let delay = match result {
+                            Ok(true) => std::time::Duration::from_millis(100),
+                            Ok(false) => std::time::Duration::from_secs(5),
+                            Err(_) => {
+                                slog::error!(log, "tracking_sync"; "operation" => "sync", "outcome" => "error", "error_code" => "database_error");
+                                std::time::Duration::from_secs(30)
+                            }
+                        };
+                        tokio::select! {
+                            _ = worker_stop.changed() => break,
+                            _ = tokio::time::sleep(delay) => {}
+                        }
                     }
                 }
             }
-        }))
-    } else {
-        None
-    };
-    shutdown().await?;
-    // Stop accepting mutations and drain active handlers before closing SQLite.
-    server
-        .close()
-        .await
-        .map_err(|error| anyhow::anyhow!("close API: {error}"))?;
-    if let Some(ingress) = ingress {
-        ingress
-            .close()
-            .await
-            .map_err(|error| anyhow::anyhow!("close ingress: {error}"))?;
+        })
+    }).collect();
+    let mut shutdown_error = shutdown().await.err();
+    // Stop accepting mutations and drain active handlers before stopping the
+    // workers. Every provider task must finish before SQLite closes, even when
+    // another task or server reports an error during shutdown.
+    if let Err(error) = server.close().await {
+        shutdown_error.get_or_insert_with(|| anyhow::anyhow!("close API: {error}"));
+    }
+    if let Some(ingress) = ingress
+        && let Err(error) = ingress.close().await
+    {
+        shutdown_error.get_or_insert_with(|| anyhow::anyhow!("close ingress: {error}"));
     }
     let _ = stop_tx.send(true);
-    if let Some(worker) = worker {
-        worker.await?;
+    for worker in workers {
+        if let Err(error) = worker.await {
+            shutdown_error.get_or_insert_with(|| anyhow::anyhow!("join tracking worker: {error}"));
+        }
     }
-    if let Some(discovery) = discovery {
-        discovery.await?;
+    if let Some(discovery) = discovery
+        && let Err(error) = discovery.await
+    {
+        shutdown_error.get_or_insert_with(|| anyhow::anyhow!("join discovery: {error}"));
     }
-    store.close().await?;
+    if let Err(error) = store.close().await {
+        shutdown_error.get_or_insert_with(|| error.into());
+    }
+    if let Some(error) = shutdown_error {
+        return Err(error);
+    }
+
     Ok(())
 }
 

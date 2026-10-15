@@ -82,6 +82,7 @@ async fn actual_delivery_window_is_half_open_inbound_and_independent_of_manual_s
                     order_reference: None,
                     signature_required: None,
                     tracking: InputTracking {
+                        recipient_url: None,
                         carrier: Some(Carrier::Usps),
                         number: format!("DAYBOUNDARY{index}"),
                     },

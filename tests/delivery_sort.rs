@@ -58,10 +58,12 @@ impl App {
         delivered: Option<&str>,
     ) -> Shipment {
         let tracking = InputTracking {
+            recipient_url: None,
             carrier: Some("usps".parse().unwrap()),
             number: key.to_ascii_uppercase(),
         };
         let tracker = Tracker {
+            provider: shipments::shipping_api::types::ProviderId::EasyPost,
             id: format!("trk_{key}"),
             tracking_code: tracking.number.clone(),
             carrier: "usps".parse().unwrap(),

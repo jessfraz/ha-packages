@@ -150,6 +150,7 @@ impl Drop for Reservation {
 
 fn observation(status: Status) -> Tracker {
     Tracker {
+        provider: shipments::shipping_api::types::ProviderId::EasyPost,
         id: OPAQUE_ID.into(),
         tracking_code: NUMBER.into(),
         carrier: "USPS".parse().unwrap(),
@@ -192,6 +193,7 @@ impl Fixture {
                     title: "Provider contract parcel".into(),
                     direction: Direction::Inbound,
                     tracking: InputTracking {
+                        recipient_url: None,
                         number: NUMBER.into(),
                         carrier: Some("USPS".parse().unwrap()),
                     },
