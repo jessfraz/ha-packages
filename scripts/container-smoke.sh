@@ -112,6 +112,8 @@ check_credentials() {
 }
 
 wait_for_api
+jq --exit-status '.provider_enabled == true and .enabled_providers == ["doordash"]' \
+    "$scratch/system.json" >/dev/null
 check_process_user
 request GET /v1/system 401
 request POST /v1/shipments 400 \
@@ -188,7 +190,7 @@ request POST /v1/installation/check 403 --header "Authorization: Bearer $integra
 request POST /v1/installation/check 200 --header "Authorization: Bearer $token"
 jq --exit-status \
     '.backend.status == "pass" and .integration.status == "attention" and
-     .authentication.status == "attention" and .easypost.status == "attention" and
+     .authentication.status == "attention" and .easypost.status == "not_applicable" and
      .backup.status == "unavailable" and .last_backup == null' \
     "$scratch/response.json" >/dev/null
 check_shipment
