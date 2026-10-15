@@ -328,7 +328,7 @@ async fn registers_retrieves_and_only_revises_changed_observations() {
     assert_eq!(first.status, Status::InTransit);
     assert_eq!(first.revision, shipment.revision + 1);
     assert_eq!(first.sync.tracker_id.as_deref(), Some("trk_test"));
-    assert!((1799..=1800).contains(&delay(&fixture.store, shipment.id).await.unwrap()));
+    assert!((1799..=1980).contains(&delay(&fixture.store, shipment.id).await.unwrap()));
     due(&fixture.store, shipment.id).await;
     let request = observe(&mut provider, &worker, "TRACK1", Status::InTransit).await;
     assert_eq!(request.method, "GET");
@@ -349,7 +349,7 @@ async fn registers_retrieves_and_only_revises_changed_observations() {
 
     due(&fixture.store, shipment.id).await;
     observe(&mut provider, &worker, "TRACK1", Status::OutForDelivery).await;
-    assert!((299..=300).contains(&delay(&fixture.store, shipment.id).await.unwrap()));
+    assert!((299..=330).contains(&delay(&fixture.store, shipment.id).await.unwrap()));
     due(&fixture.store, shipment.id).await;
     observe(&mut provider, &worker, "TRACK1", Status::Delivered).await;
     assert_eq!(delay(&fixture.store, shipment.id).await, None);
@@ -441,7 +441,7 @@ async fn verified_creates_preserve_poll_cadence_and_retrieve_without_registering
         assert_eq!(shipment.status, status);
         let remaining = delay(&fixture.store, shipment.id).await.unwrap();
         assert!(
-            (interval - 1..=interval).contains(&remaining),
+            (interval - 1..=interval + interval / 10).contains(&remaining),
             "{status:?}: next poll in {remaining}s, expected {interval}s"
         );
         let worker = provider.worker(&fixture.store);
@@ -700,7 +700,9 @@ async fn an_expired_claim_cannot_overwrite_a_newer_claim_for_the_same_generation
         .execute(fixture.store.pool())
         .await
         .unwrap();
-    let second = start_tick(&worker);
+    // A separate process may reclaim an expired lease. One client's shared
+    // outbound slot prevents overlapping requests inside the same process.
+    let second = start_tick(&provider.worker(&fixture.store));
     provider
         .request()
         .await
@@ -755,6 +757,8 @@ async fn terminal_refresh_permits_one_probe_and_a_failure_does_not_restart_polli
         .refresh(shipment.id, delivered.revision, "owner")
         .await
         .unwrap();
+    assert!(!worker.tick().await.unwrap());
+    due(&fixture.store, shipment.id).await;
     let task = start_tick(&worker);
     provider.request().await.reply(Reply::error(503));
     assert!(task.await.unwrap().unwrap());
@@ -768,6 +772,8 @@ async fn terminal_refresh_permits_one_probe_and_a_failure_does_not_restart_polli
         .refresh(shipment.id, failed.revision, "owner")
         .await
         .unwrap();
+    assert!(!worker.tick().await.unwrap());
+    due(&fixture.store, shipment.id).await;
     observe(&mut provider, &worker, "TRACK8", Status::Delivered).await;
     assert_eq!(
         fixture.store.get(shipment.id).await.unwrap().revision,
@@ -1250,5 +1256,114 @@ async fn connection_check_rejects_invalid_and_oversized_success_responses() {
             task.await.unwrap(),
             Err(SyncError::ResponseTooLarge)
         ));
+    }
+}
+
+#[tokio::test]
+async fn rate_limit_pauses_all_provider_operations_and_leaves_other_shipments_due() {
+    let fixture = Fixture::new().await;
+    let shipment = fixture.shipment("WAITING-TRACK").await;
+    let mut provider = Provider::start();
+    let client = provider.client();
+    let worker = SyncWorker::new(fixture.store.pool().clone(), client.clone());
+    let task_client = client.clone();
+    let task = tokio::spawn(async move { task_client.register("LIMITED-TRACK", None).await });
+    let mut reply = Reply::error(429);
+    reply.headers.push(("Retry-After".into(), "600".into()));
+    provider.request().await.reply(reply);
+    assert!(matches!(
+        task.await.unwrap(),
+        Err(SyncError::Http {
+            status: 429,
+            retry_after: Some(600)
+        })
+    ));
+
+    let error = tokio::time::timeout(Duration::from_secs(1), client.register("NEW-TRACK", None))
+        .await
+        .expect("the shared cooldown must reject without another provider request")
+        .unwrap_err();
+    assert!(error.to_string().contains("paused"));
+    assert!(client.retrieve("trk_test", "WAITING-TRACK").await.is_err());
+    assert!(client.check_connection().await.is_err());
+    assert!(!worker.tick().await.unwrap());
+    let waiting = fixture.store.get(shipment.id).await.unwrap();
+    assert_eq!(waiting.sync.attempts, 0);
+    assert!(waiting.sync.last_error.is_none());
+    assert!(provider.incoming.try_recv().is_err());
+
+    // Move only the monotonic provider clock; the real HTTP server still runs.
+    tokio::time::pause();
+    tokio::time::advance(Duration::from_secs(601)).await;
+    tokio::time::resume();
+    observe(&mut provider, &worker, "WAITING-TRACK", Status::Unknown).await;
+
+    let task_client = client.clone();
+    let task = tokio::spawn(async move { task_client.register("LIMITED-AGAIN", None).await });
+    provider.request().await.reply(Reply::error(429));
+    assert!(matches!(
+        task.await.unwrap(),
+        Err(SyncError::Http {
+            status: 429,
+            retry_after: Some(60)
+        })
+    ));
+    assert!(client.check_connection().await.is_err());
+    assert!(provider.incoming.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn shared_provider_slot_bounds_concurrency_spaces_starts_and_releases_after_cancellation() {
+    let mut provider = Provider::start();
+    let client = provider.client();
+    let task_client = client.clone();
+    let first = tokio::spawn(async move { task_client.register("FIRST-TRACK", None).await });
+    let request = provider.request().await;
+    assert!(client.register("SECOND-TRACK", None).await.is_err());
+    assert!(client.check_connection().await.is_err());
+    assert!(provider.incoming.try_recv().is_err());
+    first.abort();
+    assert!(first.await.unwrap_err().is_cancelled());
+    drop(request);
+
+    let task_client = client.clone();
+    let second = tokio::spawn(async move { task_client.register("SECOND-TRACK", None).await });
+    let request = provider.request().await;
+    let at = std::time::Instant::now();
+    request.tracker("SECOND-TRACK", Status::Unknown);
+    second.await.unwrap().unwrap();
+    let third = tokio::spawn(async move { client.retrieve("trk_test", "SECOND-TRACK").await });
+    provider
+        .request()
+        .await
+        .tracker("SECOND-TRACK", Status::Unknown);
+    third.await.unwrap().unwrap();
+    assert!(at.elapsed() >= Duration::from_millis(900));
+}
+
+#[tokio::test]
+async fn unscanned_labels_slow_down_until_carrier_status_changes() {
+    let fixture = Fixture::new().await;
+    let shipment = fixture.shipment("UNSCANNED-TRACK").await;
+    let mut provider = Provider::start();
+    let worker = provider.worker(&fixture.store);
+    observe(&mut provider, &worker, "UNSCANNED-TRACK", Status::Unknown).await;
+    for (age, status, base) in [
+        (2 * 86400 - 10, Status::Unknown, 1800),
+        (2 * 86400, Status::Unknown, 7200),
+        (7 * 86400, Status::Unknown, 21600),
+        (8 * 86400, Status::PreTransit, 1800),
+        (8 * 86400, Status::PreTransit, 21600),
+        (8 * 86400, Status::InTransit, 1800),
+        (8 * 86400, Status::OutForDelivery, 300),
+    ] {
+        sqlx::query("UPDATE shipments SET status_since = datetime('now', '-' || ? || ' seconds'), next_attempt_at = unixepoch() WHERE id = ?")
+            .bind(age).bind(shipment.id.to_string()).execute(fixture.store.pool()).await.unwrap();
+        observe(&mut provider, &worker, "UNSCANNED-TRACK", status).await;
+        let remaining = delay(&fixture.store, shipment.id).await.unwrap();
+        assert!(
+            (base - 1..=base + base / 10).contains(&remaining),
+            "{status:?} after {age}s: {remaining}s"
+        );
     }
 }

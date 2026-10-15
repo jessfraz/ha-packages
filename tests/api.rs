@@ -356,7 +356,29 @@ async fn duplicate_sources_tracking_archive_and_pagination_use_real_http() {
             .json(&body)
             .send()
     );
-    let mut responses = vec![one.unwrap(), two.unwrap()];
+    let mut responses = Vec::new();
+    for (key, response) in [("a", one), ("b", two)] {
+        let mut response = response.unwrap();
+        if response.status() == StatusCode::SERVICE_UNAVAILABLE {
+            // Concurrent verification is backpressured by the shared slot.
+            // Once the winning request completes, retry reaches the durable
+            // duplicate check rather than creating a second shipment.
+            assert_eq!(response.headers()["retry-after"], "1");
+            let error: ApiFailure = response.json().await.unwrap();
+            assert_eq!(
+                error.error_code.as_deref(),
+                Some("tracking_verification_rate_limited")
+            );
+            response = app
+                .request(Method::POST, "/v1/shipments")
+                .header("Idempotency-Key", key)
+                .json(&body)
+                .send()
+                .await
+                .unwrap();
+        }
+        responses.push(response);
+    }
     responses.sort_by_key(|r| r.status().as_u16());
     assert_eq!(responses[1].status(), StatusCode::CONFLICT);
     let created: Shipment = responses.remove(0).json().await.unwrap();
@@ -1479,8 +1501,6 @@ async fn provider_failures_have_actionable_codes_and_never_save_unverified_recor
     );
     assert!(error.message.contains("Configure the EasyPost API key"));
     unconfigured.close().await;
-    let app = App::new(None).await;
-    let provider = app.provider_fixture.as_ref().unwrap();
     for (status, body, code, expected_status) in [
         (
             422,
@@ -1531,13 +1551,83 @@ async fn provider_failures_have_actionable_codes_and_never_save_unverified_recor
             StatusCode::SERVICE_UNAVAILABLE,
         ),
     ] {
+        // Each upstream response is independent; a 429 now correctly pauses
+        // every operation sharing that provider client.
+        let app = App::new(None).await;
+        let provider = app.provider_fixture.as_ref().unwrap();
         provider.reply(status, body);
         let response = app.create("Parcel", "retryable-input").await;
         assert_eq!(response.status(), expected_status);
         let error: ApiFailure = response.json().await.unwrap();
         assert_eq!(error.error_code.as_deref(), Some(code));
         assert!(!error.message.contains("private-provider-detail"));
+        let summary: Summary = app
+            .request(Method::GET, "/v1/summary")
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(summary.active, 0);
+        app.close().await;
     }
+    // The same key remains usable after validation or provider failure.
+    let app = App::new(None).await;
+    app.provider_fixture
+        .as_ref()
+        .unwrap()
+        .reply(503, "unavailable");
+    assert_eq!(
+        app.create("Parcel", "retryable-input").await.status(),
+        StatusCode::SERVICE_UNAVAILABLE
+    );
+    assert_eq!(
+        app.create("Parcel", "retryable-input").await.status(),
+        StatusCode::CREATED
+    );
+    app.close().await;
+}
+
+#[tokio::test]
+async fn shared_provider_cooldown_returns_retry_time_to_every_api_role_without_saving() {
+    let app = App::new(None).await;
+    let provider = app.provider_fixture.as_ref().unwrap();
+    provider.reply(429, "private-provider-detail");
+    let response = app.create("Limited parcel", "limited").await;
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(response.headers()["retry-after"], "60");
+    assert_eq!(provider.calls(), 1);
+
+    for credential in [OWNER, &app.agent, INTEGRATION] {
+        let response = app
+            .request(Method::POST, "/v1/shipments")
+            .bearer_auth(credential)
+            .header("Idempotency-Key", "queued-during-provider-pause")
+            .json(&input("Valid unscanned parcel"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let wait: u64 = response.headers()["retry-after"]
+            .to_str()
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert!((1..=60).contains(&wait));
+        let error: ApiFailure = response.json().await.unwrap();
+        assert_eq!(
+            error.error_code.as_deref(),
+            Some("tracking_verification_rate_limited")
+        );
+        assert!(
+            error
+                .message
+                .contains("does not mean the tracking number is invalid")
+        );
+        assert!(!error.message.contains("private-provider-detail"));
+    }
+    assert_eq!(provider.calls(), 1);
     let summary: Summary = app
         .request(Method::GET, "/v1/summary")
         .send()
@@ -1547,10 +1637,5 @@ async fn provider_failures_have_actionable_codes_and_never_save_unverified_recor
         .await
         .unwrap();
     assert_eq!(summary.active, 0);
-    // The same key remains usable after validation or provider failure.
-    assert_eq!(
-        app.create("Parcel", "retryable-input").await.status(),
-        StatusCode::CREATED
-    );
     app.close().await;
 }

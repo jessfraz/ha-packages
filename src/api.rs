@@ -372,6 +372,10 @@ async fn verify_tracking(
     ))?;
     provider.register(&tracking.number, tracking.carrier.as_deref()).await.map_err(|error| {
         let unavailable = dropshot::ErrorStatusCode::SERVICE_UNAVAILABLE;
+        let error = match error {
+            SyncError::Throttled { retry_after } => SyncError::Http { status: 429, retry_after: Some(retry_after) },
+            error => error,
+        };
         match error {
             SyncError::Rejected(rejection) => {
                 let code = match rejection {
@@ -387,7 +391,7 @@ async fn verify_tracking(
             }
             SyncError::Http { status: 401 | 403, .. } => tracking_error("tracking_provider_credentials", unavailable, "EasyPost rejected the configured API key. Check the key in app settings; no changes were saved."),
             SyncError::Http { status: 429, retry_after } => {
-                let mut error = tracking_error("tracking_verification_rate_limited", unavailable, "EasyPost is rate limiting tracking verification. Wait and retry; no changes were saved.");
+                let mut error = tracking_error("tracking_verification_rate_limited", unavailable, "EasyPost tracking requests are temporarily paused to respect rate limits. Wait and retry; no changes were saved. This does not mean the tracking number is invalid.");
                 if let Some(seconds) = retry_after.and_then(|seconds| HeaderValue::from_str(&seconds.to_string()).ok()) {
                     let mut headers = http::HeaderMap::new();
                     headers.insert(http::header::RETRY_AFTER, seconds);
