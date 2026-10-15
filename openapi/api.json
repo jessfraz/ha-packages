@@ -75,8 +75,193 @@
         ],
         "type": "string"
       },
+      "Carrier": {
+        "enum": [
+          "Accurate",
+          "AmazonMws",
+          "AmazonShipping",
+          "APC",
+          "AsendiaUsa",
+          "AustraliaPost",
+          "AxlehireV3",
+          "BetterTrucks",
+          "Bluestreak",
+          "CanadaPost",
+          "Canpar",
+          "ColumbusLastMile",
+          "CourierExpress",
+          "CouriersPlease",
+          "CSLogistics",
+          "DaiPost",
+          "DeutschePostUK",
+          "DeutschePost",
+          "DHLEcommerceAsia",
+          "DhlEcs",
+          "DHLExpress",
+          "DHLExpressDefault",
+          "DHLPaket",
+          "DoorDash",
+          "Douglas",
+          "DPD",
+          "DPDNL",
+          "DPDUK",
+          "eHub",
+          "EPostGlobal",
+          "EPostGlobalV2",
+          "Estafeta",
+          "Evri",
+          "FedEx",
+          "FedExCrossBorder",
+          "FedExDefault",
+          "FedexSmartPost",
+          "FirstChoice",
+          "FirstMileConcise",
+          "Flexport",
+          "Gio",
+          "Gori",
+          "GSO",
+          "Hailify",
+          "Henry",
+          "InterlinkExpress",
+          "Jet",
+          "Jitsu",
+          "KuronekoYamato",
+          "LaserShipV2",
+          "LoomisExpress",
+          "LSO",
+          "Maersk",
+          "OmniParcel",
+          "OnTrac",
+          "OntracV3",
+          "Optima",
+          "OsmWorldwide",
+          "OsmWorldwideV2",
+          "P2P",
+          "Parcelforce",
+          "Parcll",
+          "PassportGlobal",
+          "PostNL",
+          "Purolator",
+          "Quick",
+          "Roadie",
+          "Rover",
+          "RoyalMail",
+          "RoyalMailV3",
+          "SFExpress",
+          "SmartKargo",
+          "Sonic",
+          "SpeedX",
+          "SpeeDee",
+          "Sway",
+          "Swyft",
+          "Tcc",
+          "TforceConcise",
+          "UDS",
+          "UniUni",
+          "UPSDAP",
+          "UPSIparcel",
+          "UPSMailInnovations",
+          "UPS",
+          "UsaExportPba",
+          "USPS",
+          "UspsShip",
+          "Veho"
+        ],
+        "type": "string"
+      },
+      "CarrierEvent": {
+        "properties": {
+          "carrier_code": {
+            "default": null,
+            "nullable": true,
+            "type": "string"
+          },
+          "datetime": {
+            "default": null,
+            "nullable": true,
+            "type": "string"
+          },
+          "description": {
+            "default": null,
+            "nullable": true,
+            "type": "string"
+          },
+          "message": {
+            "default": null,
+            "nullable": true,
+            "type": "string"
+          },
+          "source": {
+            "default": null,
+            "nullable": true,
+            "type": "string"
+          },
+          "status": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Status"
+              }
+            ],
+            "default": null,
+            "nullable": true
+          },
+          "status_detail": {
+            "default": null,
+            "nullable": true,
+            "type": "string"
+          },
+          "tracking_location": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/TrackingLocation"
+              }
+            ],
+            "default": null,
+            "nullable": true
+          }
+        },
+        "type": "object"
+      },
+      "CarrierTracking": {
+        "properties": {
+          "delivered_at": {
+            "default": null,
+            "description": "Actual delivery scan time, independent of an estimated delivery date.",
+            "nullable": true,
+            "type": "string"
+          },
+          "estimated_delivery_at": {
+            "default": null,
+            "nullable": true,
+            "type": "string"
+          },
+          "events": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/CarrierEvent"
+            },
+            "type": "array"
+          },
+          "events_truncated": {
+            "default": false,
+            "type": "boolean"
+          },
+          "signed_by": {
+            "default": null,
+            "nullable": true,
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
       "Check": {
         "properties": {
+          "checked_at": {
+            "format": "uint64",
+            "minimum": 0,
+            "nullable": true,
+            "type": "integer"
+          },
           "message": {
             "type": "string"
           },
@@ -114,6 +299,9 @@
       "CreateShipment": {
         "additionalProperties": false,
         "properties": {
+          "direction": {
+            "$ref": "#/components/schemas/Direction"
+          },
           "merchant": {
             "nullable": true,
             "type": "string"
@@ -121,6 +309,11 @@
           "order_reference": {
             "nullable": true,
             "type": "string"
+          },
+          "signature_required": {
+            "description": "Known from the order or carrier; missing means the requirement is unknown.",
+            "nullable": true,
+            "type": "boolean"
           },
           "source": {
             "allOf": [
@@ -141,8 +334,12 @@
             },
             "properties": {
               "carrier": {
-                "nullable": true,
-                "type": "string"
+                "allOf": [
+                  {
+                    "$ref": "#/components/schemas/Carrier"
+                  }
+                ],
+                "nullable": true
               },
               "number": {
                 "default": "",
@@ -153,6 +350,7 @@
           }
         },
         "required": [
+          "direction",
           "title"
         ],
         "type": "object"
@@ -172,6 +370,13 @@
           "token"
         ],
         "type": "object"
+      },
+      "Direction": {
+        "enum": [
+          "inbound",
+          "outbound"
+        ],
+        "type": "string"
       },
       "Error": {
         "description": "Error information from a response.",
@@ -316,6 +521,14 @@
         ],
         "type": "object"
       },
+      "RegistrationState": {
+        "enum": [
+          "pending",
+          "registered",
+          "rejected"
+        ],
+        "type": "string"
+      },
       "SetOverride": {
         "additionalProperties": false,
         "properties": {
@@ -332,6 +545,14 @@
         ],
         "type": "object"
       },
+      "ShipmentSort": {
+        "enum": [
+          "id",
+          "expected",
+          "delivered"
+        ],
+        "type": "string"
+      },
       "Shipment_for_Nullable_Tracking": {
         "properties": {
           "archived": {
@@ -345,8 +566,30 @@
             ],
             "nullable": true
           },
+          "carrier_tracking": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/CarrierTracking"
+              }
+            ],
+            "default": {
+              "delivered_at": null,
+              "estimated_delivery_at": null,
+              "events": [],
+              "events_truncated": false,
+              "signed_by": null
+            }
+          },
           "created_at": {
             "type": "string"
+          },
+          "direction": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Direction"
+              }
+            ],
+            "default": "inbound"
           },
           "id": {
             "format": "uuid",
@@ -363,6 +606,11 @@
           "revision": {
             "format": "int64",
             "type": "integer"
+          },
+          "signature_required": {
+            "default": null,
+            "nullable": true,
+            "type": "boolean"
           },
           "sources": {
             "items": {
@@ -425,8 +673,30 @@
             ],
             "nullable": true
           },
+          "carrier_tracking": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/CarrierTracking"
+              }
+            ],
+            "default": {
+              "delivered_at": null,
+              "estimated_delivery_at": null,
+              "events": [],
+              "events_truncated": false,
+              "signed_by": null
+            }
+          },
           "created_at": {
             "type": "string"
+          },
+          "direction": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Direction"
+              }
+            ],
+            "default": "inbound"
           },
           "id": {
             "format": "uuid",
@@ -443,6 +713,11 @@
           "revision": {
             "format": "int64",
             "type": "integer"
+          },
+          "signature_required": {
+            "default": null,
+            "nullable": true,
+            "type": "boolean"
           },
           "sources": {
             "items": {
@@ -612,6 +887,10 @@
             "format": "int64",
             "type": "integer"
           },
+          "error_code": {
+            "nullable": true,
+            "type": "string"
+          },
           "last_error": {
             "nullable": true,
             "type": "string"
@@ -625,6 +904,24 @@
             "nullable": true,
             "type": "integer"
           },
+          "provider_error_code": {
+            "nullable": true,
+            "type": "string"
+          },
+          "provider_status": {
+            "format": "uint16",
+            "minimum": 0,
+            "nullable": true,
+            "type": "integer"
+          },
+          "registration_started_at": {
+            "format": "int64",
+            "nullable": true,
+            "type": "integer"
+          },
+          "registration_state": {
+            "$ref": "#/components/schemas/RegistrationState"
+          },
           "tracker_id": {
             "nullable": true,
             "type": "string"
@@ -635,7 +932,8 @@
           }
         },
         "required": [
-          "attempts"
+          "attempts",
+          "registration_state"
         ],
         "type": "object"
       },
@@ -672,8 +970,12 @@
         "additionalProperties": false,
         "properties": {
           "carrier": {
-            "nullable": true,
-            "type": "string"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Carrier"
+              }
+            ],
+            "nullable": true
           },
           "number": {
             "default": "",
@@ -682,9 +984,37 @@
         },
         "type": "object"
       },
+      "TrackingLocation": {
+        "properties": {
+          "city": {
+            "default": null,
+            "nullable": true,
+            "type": "string"
+          },
+          "country": {
+            "default": null,
+            "nullable": true,
+            "type": "string"
+          },
+          "state": {
+            "default": null,
+            "nullable": true,
+            "type": "string"
+          },
+          "zip": {
+            "default": null,
+            "nullable": true,
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
       "UpdateShipment": {
         "additionalProperties": false,
         "properties": {
+          "direction": {
+            "$ref": "#/components/schemas/Direction"
+          },
           "merchant": {
             "nullable": true,
             "type": "string"
@@ -692,6 +1022,10 @@
           "order_reference": {
             "nullable": true,
             "type": "string"
+          },
+          "signature_required": {
+            "nullable": true,
+            "type": "boolean"
           },
           "title": {
             "nullable": true,
@@ -708,7 +1042,7 @@
   "info": {
     "description": "Persistent local shipment records, manual corrections, and carrier synchronization. Use a Bearer owner or ingestion token. Creates require Idempotency-Key; writes to an existing shipment require its quoted revision in If-Match.",
     "title": "Shipments API",
-    "version": "0.3.1"
+    "version": "0.4.0"
   },
   "openapi": "3.0.3",
   "paths": {
@@ -901,6 +1235,37 @@
         ]
       }
     },
+    "/v1/carriers": {
+      "get": {
+        "operationId": "carriers_list",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/Carrier"
+                  },
+                  "title": "Array_of_Carrier",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "successful operation"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "List EasyPost's canonical tracking carriers. Omit carrier when automatic detection is preferred.",
+        "tags": [
+          "shipments"
+        ]
+      }
+    },
     "/v1/installation": {
       "get": {
         "operationId": "installation",
@@ -1010,8 +1375,22 @@
             "in": "query",
             "name": "carrier",
             "schema": {
+              "$ref": "#/components/schemas/Carrier"
+            }
+          },
+          {
+            "in": "query",
+            "name": "direction",
+            "schema": {
+              "$ref": "#/components/schemas/Direction"
+            }
+          },
+          {
+            "in": "query",
+            "name": "exceptions",
+            "schema": {
               "nullable": true,
-              "type": "string"
+              "type": "boolean"
             }
           },
           {
@@ -1048,6 +1427,14 @@
             "schema": {
               "nullable": true,
               "type": "string"
+            }
+          },
+          {
+            "description": "Expected delivery first, or most recent actual delivery first. Unknown dates sort last.",
+            "in": "query",
+            "name": "sort",
+            "schema": {
+              "$ref": "#/components/schemas/ShipmentSort"
             }
           },
           {
@@ -1147,7 +1534,7 @@
             "$ref": "#/components/responses/Error"
           }
         },
-        "summary": "Verify tracking with EasyPost before creating a durable local record.",
+        "summary": "Save a durable pending registration before contacting the tracking provider.",
         "tags": [
           "shipments"
         ]
@@ -1608,6 +1995,15 @@
     "/v1/summary": {
       "get": {
         "operationId": "summary",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "direction",
+            "schema": {
+              "$ref": "#/components/schemas/Direction"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "content": {
