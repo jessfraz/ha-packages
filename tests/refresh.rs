@@ -1,5 +1,5 @@
 use shipments::{
-    models::{CreateShipment, Shipment, Tracking},
+    models::{CreateShipment, InputTracking, Shipment},
     store::Store,
 };
 
@@ -23,7 +23,7 @@ impl Fixture {
                     merchant: None,
                     order_reference: None,
                     signature_required: None,
-                    tracking: Tracking {
+                    tracking: InputTracking {
                         number: "9400111899560000000000".into(),
                         carrier: Some("usps".parse().unwrap()),
                     },

@@ -1,9 +1,11 @@
 """Validate the small backend projections consumed by native entities."""
 
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, time, timedelta
 from enum import StrEnum
+from typing import TypedDict
 from uuid import UUID
+from zoneinfo import ZoneInfo
 
 from homeassistant.components.calendar import CalendarEvent
 from homeassistant.util import dt as dt_util
@@ -94,6 +96,49 @@ class ShipmentStatusEvent:
             "direction": self.direction,
             "status": self.status,
             "at": self.at.isoformat(),
+        }
+
+
+class DeliveryDayReport(TypedDict):
+    """The authenticated local-day projection shared with the app UI."""
+
+    date: str
+    time_zone: str
+    delivered_after: int
+    delivered_before: int
+
+
+@dataclass(frozen=True, slots=True)
+class DeliveryDay:
+    """UTC bounds for one civil day in Home Assistant's configured timezone."""
+
+    date: date
+    time_zone: str
+    delivered_after: int
+    delivered_before: int
+
+    @classmethod
+    def at(cls, now: datetime, time_zone: str) -> DeliveryDay:
+        if now.tzinfo is None:
+            raise ValueError("A delivery day requires an aware timestamp")
+        zone = ZoneInfo(time_zone)
+        day = now.astimezone(zone).date()
+        start = datetime.combine(day, time.min, zone)
+        end = datetime.combine(day + timedelta(days=1), time.min, zone)
+        return cls(day, time_zone, int(start.timestamp()), int(end.timestamp()))
+
+    def query(self) -> dict[str, str]:
+        return {
+            "delivered_after": str(self.delivered_after),
+            "delivered_before": str(self.delivered_before),
+        }
+
+    def presence(self) -> DeliveryDayReport:
+        return {
+            "date": self.date.isoformat(),
+            "time_zone": self.time_zone,
+            "delivered_after": self.delivered_after,
+            "delivered_before": self.delivered_before,
         }
 
 

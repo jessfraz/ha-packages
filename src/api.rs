@@ -283,7 +283,7 @@ async fn shipments_list(
     }))
 }
 
-/// List EasyPost's canonical tracking carriers. Omit carrier when automatic detection is preferred.
+/// List canonical carriers. Omit the input carrier to request provider detection.
 #[endpoint {method=GET,path="/v1/carriers",tags=["shipments"]}]
 async fn carriers_list(
     request: RequestContext<Arc<Context>>,
@@ -292,7 +292,8 @@ async fn carriers_list(
     Ok(HttpResponseOk(crate::carrier::Carrier::ALL.to_vec()))
 }
 
-/// Save a durable pending registration before contacting the tracking provider.
+/// Resolve and verify tracking before saving a shipment. Uncertain provider
+/// attempts remain durable so retries can recover without duplicate trackers.
 #[endpoint {method=POST,path="/v1/shipments",tags=["shipments"]}]
 async fn shipments_create(
     request: RequestContext<Arc<Context>>,
@@ -310,7 +311,35 @@ async fn shipments_create(
     let shipment = if let Some(saved) = store.replay_create(&input, &principal.actor, key).await? {
         saved
     } else {
-        store.create(input, &principal.actor, key, None).await?
+        crate::admission::bind_request(store, &principal.actor, &format!("create:{key}"), &input)
+            .await?;
+        if let Some(saved) = store
+            .preflight_create(&input, &principal.actor, key)
+            .await?
+        {
+            saved
+        } else {
+            let claim =
+                crate::admission::claim_source(store, input.source.as_ref(), &principal.actor, key)
+                    .await?;
+            let result = async {
+                let verified = crate::admission::verify(
+                    store,
+                    request.context().provider.clone(),
+                    &input.tracking,
+                    &request.log,
+                    &request.request_id,
+                )
+                .await?;
+                store
+                    .create(input, &principal.actor, key, Some(&verified))
+                    .await
+                    .map_err(HttpError::from)
+            }
+            .await;
+            crate::admission::release_source(store, claim).await?;
+            result?
+        }
     };
     slog::info!(request.log, "tracking_registration";
         "request_id" => request.request_id.clone(), "shipment_id" => shipment.id.to_string(),
@@ -346,6 +375,7 @@ async fn shipment_update(
     let expected_revision = revision(&request)?;
     let mut input = body.into_inner();
     validate_update(&mut input).map_err(|error| log_validation_error(&request, error, "update"))?;
+    let mut verified = None;
     if let Some(value) = &mut input.tracking.value {
         let tracking = value
             .as_mut()
@@ -354,15 +384,43 @@ async fn shipment_update(
         if current.revision != expected_revision {
             return Err(crate::error::Error::Precondition.into());
         }
-        if *tracking != current.tracking {
+        if tracking.number != current.tracking.number
+            || tracking.carrier != Some(current.tracking.carrier)
+        {
             validate_admission(tracking)
                 .map_err(|error| log_validation_error(&request, error, "update"))?;
+            request
+                .context()
+                .store
+                .preflight_update(id, expected_revision, tracking)
+                .await?;
+            verified = Some(
+                crate::admission::verify(
+                    &request.context().store,
+                    request.context().provider.clone(),
+                    input
+                        .tracking
+                        .value
+                        .as_ref()
+                        .and_then(Option::as_ref)
+                        .ok_or(crate::error::Error::TrackingRequired)?,
+                    &request.log,
+                    &request.request_id,
+                )
+                .await?,
+            );
         }
     }
     let shipment = request
         .context()
         .store
-        .update(id, expected_revision, input, &principal.actor, None)
+        .update(
+            id,
+            expected_revision,
+            input,
+            &principal.actor,
+            verified.as_ref(),
+        )
         .await?;
     slog::info!(request.log, "tracking_registration";
         "request_id" => request.request_id.clone(), "shipment_id" => shipment.id.to_string(),
@@ -370,7 +428,7 @@ async fn shipment_update(
     Ok(shipment_response(shipment))
 }
 
-fn validate_admission(tracking: &Tracking) -> Result<(), crate::error::Error> {
+fn validate_admission(tracking: &InputTracking) -> Result<(), crate::error::Error> {
     let alphanumeric = tracking
         .number
         .bytes()
@@ -643,11 +701,16 @@ async fn summary(
     query: Query<SummaryFilter>,
 ) -> Result<HttpResponseOk<Summary>, HttpError> {
     authenticate(&request, false).await?;
+    let query = query.into_inner();
+    let window = crate::delivery::DeliveryWindow::from_bounds(
+        query.delivered_after,
+        query.delivered_before,
+    )?;
     Ok(HttpResponseOk(
         request
             .context()
             .store
-            .summary(query.into_inner().direction)
+            .summary_in_window(query.direction, window)
             .await?,
     ))
 }
@@ -655,6 +718,8 @@ async fn summary(
 #[derive(Deserialize, JsonSchema)]
 struct SummaryFilter {
     direction: Option<Direction>,
+    delivered_after: Option<i64>,
+    delivered_before: Option<i64>,
 }
 
 #[endpoint {method=GET,path="/v1/system",tags=["system"]}]
@@ -677,6 +742,7 @@ async fn system(
         "agent"
     }
     .into();
+    system.delivery_day = request.context().installation.delivery_day().await;
     Ok(HttpResponseOk(system))
 }
 

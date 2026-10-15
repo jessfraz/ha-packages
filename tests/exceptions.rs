@@ -4,7 +4,7 @@ use dropshot::ResultsPage;
 use reqwest::Client;
 use shipments::{
     api,
-    models::{CreateShipment, SetOverride, Shipment, Status, Tracking},
+    models::{CreateShipment, InputTracking, SetOverride, Shipment, Status},
     store::Store,
 };
 
@@ -34,7 +34,7 @@ async fn exception_filter_uses_effective_status_search_and_keyset_pagination() {
                     merchant: None,
                     order_reference: None,
                     signature_required: None,
-                    tracking: Tracking {
+                    tracking: InputTracking {
                         carrier: Some("usps".parse().unwrap()),
                         number: format!("FILTER{index}"),
                     },

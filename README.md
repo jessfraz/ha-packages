@@ -6,8 +6,8 @@ better. Carrier updates never undo a manual correction.
 
 One Rust process, a SQLite database, and a small Home Assistant adapter. Records
 and history stay local. Every shipment needs a tracking number and an inbound
-or outbound direction. Shipments are saved locally before EasyPost registers
-them in the background. New labels do not need a carrier scan.
+or outbound direction. EasyPost must resolve a carrier and accept tracking
+before a shipment is saved. New labels do not need a carrier scan.
 
 ## Install on Home Assistant
 
@@ -38,6 +38,14 @@ describes the current registry. The delivered count is not a deliveries-per-week
 counter. **Awaiting pickup** keeps the API key `expected` and combines expected,
 unknown, and pre-transit states; an unknown carrier state does not establish
 that a label exists or that pickup is pending.
+
+**Inbound delivered today** (`sensor.shipments_inbound_delivered_today`) counts
+actual carrier delivery timestamps within Home Assistant's configured local
+day. It excludes outbound shipments and unknown timestamps, respects daylight
+saving, and links to `#view=delivered_today&direction=inbound` in the dashboard.
+The dashboard uses the same day boundaries even if your browser is elsewhere.
+The **Tracking issues** card opens `#view=tracking_issues`, matching the combined
+sync-error count across both directions.
 
 Two native problem entities flag delivery exceptions and synchronization
 errors. The read-only **Inbound deliveries** calendar includes active inbound
@@ -73,11 +81,12 @@ The tokens must be distinct and each contain 32–256 printable ASCII characters
 without whitespace. The integration token is optional when running without
 Home Assistant.
 
-`EASYPOST_API_KEY` enables background registration and tracking updates.
-Creates and tracking edits are saved even when the key is missing or EasyPost
-is unavailable; registration remains pending until tracking can run. Tracker registration can incur EasyPost
-charges, and some carriers require their own credentials. The provider key
-belongs to the server alone.
+`EASYPOST_API_KEY` enables tracking verification and background updates.
+Creates and tracking edits require successful provider verification. A missing
+key, failed detection, or provider outage saves no new shipment and leaves an
+existing tracking identity unchanged. Tracker registration can incur EasyPost
+charges, and some carriers require their own accounts and credentials. The
+provider key belongs to the server alone.
 
 ## API
 
@@ -100,14 +109,20 @@ required; merchant, order reference, source, and carrier are optional. Existing
 records migrate to inbound. Direction can be edited but cannot be cleared. There is no hard-delete endpoint; archive unwanted
 records.
 
-Create returns `201` after committing the shipment, history and idempotency
-response together. `sync.registration_state` starts as `pending`; a worker
-registers the number and sets it to `registered` after provider acceptance.
-Unknown and pre-transit statuses are accepted without scans. An explicit
-unsupported-number response becomes `rejected` with a safe `sync.error_code`
-and readable `sync.last_error`; the record remains available to correct.
-Tracking-number edits follow the same save-first process and clear the old
-carrier history. Pending registration is never presented as verified tracking.
+Create returns `201` only after provider verification and an atomic commit of
+the shipment, history and idempotency response. The response has
+`sync.registration_state: "registered"` and a canonical, required carrier.
+Omitting the input carrier requests auto-detection; failed detection saves
+nothing. Unknown and pre-transit statuses are accepted without scans.
+Tracking-number edits use the same verification, preserving the original
+shipment and history if verification fails.
+
+Verification intent is stored separately from shipments before network I/O.
+If a provider response is lost, retry the normal endpoint with the same input
+and idempotency key. The app checks for an existing tracker before registering,
+including after restart. It returns `503` with `Retry-After` while verification
+is unavailable or backing off; a retry never bypasses provider verification.
+There is no separate recovery endpoint.
 
 | Method | Path | Operation |
 | --- | --- | --- |
@@ -219,26 +234,31 @@ patch the record, and attach new evidence. The app handles tracking afterward.
 An email claiming delivery is evidence, not a human confirmation.
 
 Malformed or empty tracking is rejected at the API before saving. API errors
-include `error_code`, a readable `message`, and a request ID. Registration
-failures are stored on the shipment instead of losing the create request:
+include `error_code`, a readable `message`, and a request ID. Creation failures save no shipment; existing tracking failures appear on
+the shipment with the same safe error codes:
 
 | Where | Code | Action |
 | --- | --- | --- |
 | HTTP 400 | `tracking_required` | Supply a tracking number; tracking cannot be cleared. |
 | HTTP 400 | `tracking_invalid` | Check the number's format; unsupported carrier values are also rejected by the enum. |
-| Shipment sync | `tracking_unsupported` | The configured provider could not identify a supported carrier. Check carrier support and account requirements; this does not establish that the tracking number is invalid. |
-| Shipment sync | `tracking_invalid`, `tracking_carrier_mismatch`, `tracking_carrier_ambiguous` | Correct the number or specify the right carrier. |
-| Shipment sync | `tracking_test_key`, `tracking_carrier_account_required`, `tracking_carrier_credentials_required` | Fix the EasyPost key, select the appropriate carrier choice, or configure its account. |
-| Shipment sync | `provider_http`, `provider_timeout`, `provider_connection`, `provider_invalid_response` | The app retries with backoff; these do not establish that a number is invalid. |
+| HTTP 400 / tracking issue | `tracking_unsupported` | The provider could not match the number to an available carrier. Select the carrier from the shipping notice and check its account setup. This does not establish that the number is invalid. |
+| HTTP 400 / tracking issue | `tracking_invalid`, `tracking_carrier_mismatch`, `tracking_carrier_ambiguous` | Correct the number or specify the right carrier. |
+| HTTP 400 / setup required | `tracking_test_key`, `tracking_carrier_account_required`, `tracking_carrier_credentials_required` | Fix the EasyPost key, select the appropriate carrier choice, or configure its account. |
+| HTTP 503 / tracking issue | `provider_http`, `provider_timeout`, `provider_connection`, `provider_invalid_response` | Retry the same admission request after `Retry-After`; saved shipments retry with backoff. These errors do not establish that a number is invalid. |
 | Shipment sync | `registration_ambiguous`, `registration_expired` | Registration needs review; the app will not risk another paid registration automatically. |
 
 Inspect `sync.provider_status`, `sync.provider_error_code`, `sync.attempts`,
 and `sync.next_attempt_at` for provider failures and retry timing. Known native
 provider codes are retained without storing arbitrary provider error text. Use GET to read the current state: an
-idempotency replay returns the original committed create response, which may
-still say pending even after registration succeeds. Retry an uncertain local
+idempotency replay returns the original committed create response, which reflects the original committed state. Retry an uncertain local
 create with its original idempotency key. Do not create a fresh record or key
-just because registration is pending.
+because a provider response was uncertain.
+
+List and summary queries accept paired `delivered_after` (inclusive) and
+`delivered_before` (exclusive) UTC epoch seconds. These filter actual carrier
+delivery timestamps, independently of manual status corrections. Use
+`direction=inbound` for incoming deliveries. The list also supports
+`tracking_issues=true`, filtering stored tracking failures before pagination.
 
 ### Retry old failed attempts
 
@@ -247,18 +267,19 @@ without saving the shipment or idempotency key. Submit those parcels through
 normal creation with a stable idempotency key and the correct canonical
 carrier, or omit the carrier when it is uncertain.
 
-Every unregistered shipment first looks for an existing matching EasyPost
+Every admission and legacy unregistered shipment first looks for an existing matching EasyPost
 tracker, including on its first attempt. A single confirmed match is adopted
 without another paid registration. Only a complete, empty lookup permits a
-registration request. Failed lookups retain the pending shipment and back off;
-ambiguous results need attention and never fall through to registration.
+registration request. Failed lookups preserve the verification intent and back
+off without adding a shipment; ambiguous results need attention and never fall
+through to registration.
 
 Lookup and duplicate protection cover the previous three calendar months for
 the selected carrier and tracking number. They do not establish that every
 older tracker or a tracker under another carrier is unrelated. Review the
 provider inventory for historical attempts outside that window or uncertain
 carrier choices. Retry the same local create key and read the saved shipment's
-current state rather than generating new keys because registration is pending.
+current state rather than generating new keys after an uncertain response.
 
 Home Assistant tokens grant access beyond this integration. Give agents the
 restricted shipment credential through a constrained tool boundary rather than
@@ -279,16 +300,18 @@ one minute to six hours. Ordinary polling is every 30 minutes, or five minutes
 when out for delivery, with up to 10% added per-shipment jitter. Unknown and
 pre-transit labels that keep the same status slow to two-hour checks after two
 days and six-hour checks after a week. A status change restores its normal
-schedule. Terminal carrier states and terminal manual corrections stop polling.
+schedule. Missing carrier accounts, credentials, test keys, and rejected provider
+credentials stop automatic retries and show **Setup required**. Configure the
+provider, then select **Refresh tracking** to retry explicitly. Terminal carrier states and terminal manual corrections stop polling.
 
 All EasyPost operations share one outbound slot, with at least one second
 between request starts. Rate limits pause registration, polling and connection
-checks together. New local records can still be saved during a pause. Provider
+checks together. New shipments wait for verified tracking before they can be saved. Provider
 cooldowns honor bounded `Retry-After` values with exponential backoff. The
 shared pause lasts for the process; shipment retries and refresh cooldowns
 survive restarts.
 
-Before its first registration POST, the worker persists its intent. If that
+Before any registration POST, admission or the worker persists its intent. If that
 outcome is uncertain, including a crash after EasyPost may have created a
 tracker, the next attempt first looks up matching trackers and reuses the
 existing one. An incomplete or ambiguous lookup never triggers another POST.
@@ -302,6 +325,9 @@ Manual refreshes coalesce and wait at least one minute after the last provider
 attempt, respecting longer pending error backoff and earlier scheduled checks.
 An explicit terminal refresh allows one further check. Repeated failed terminal
 checks also respect the cooldown.
+
+Upgrades remove legacy records missing a carrier or tracking number, together
+with their sources, history and create replays. Complete records are retained.
 
 The app writes JSON logs to stderr, visible in the Home Assistant app log or
 container logs. Entries include UTC timestamps, request IDs, safe route

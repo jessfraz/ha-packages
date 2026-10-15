@@ -1,6 +1,6 @@
 add:
   name: Add shipment
-  description: Save a shipment with its tracking number and register tracking in the background.
+  description: Verify tracking with the provider before saving a shipment; an omitted carrier must be auto-detected.
   fields:
     title:
       name: Title

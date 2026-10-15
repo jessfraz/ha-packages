@@ -1,7 +1,7 @@
 use sha2::{Digest, Sha256};
 use shipments::{
     error::Error,
-    models::{CreateShipment, EventKind, Shipment, Source, Status, SyncState, Tracking},
+    models::{CreateShipment, EventKind, InputTracking, Shipment, Source, Status, SyncState},
     store::Store,
 };
 use sqlx::{
@@ -10,6 +10,248 @@ use sqlx::{
     sqlite::{SqliteConnectOptions, SqlitePoolOptions},
 };
 use uuid::Uuid;
+
+#[tokio::test]
+async fn configuration_migration_stops_setup_failures_but_keeps_outage_retries() {
+    let directory = tempfile::tempdir().unwrap();
+    let old_migrations = directory.path().join("configuration-old-migrations");
+    std::fs::create_dir(&old_migrations).unwrap();
+    for entry in
+        std::fs::read_dir(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("migrations"))
+            .unwrap()
+    {
+        let entry = entry.unwrap();
+        let name = entry.file_name();
+        if name
+            .to_str()
+            .unwrap()
+            .split_once('_')
+            .unwrap()
+            .0
+            .parse::<i64>()
+            .unwrap()
+            < 13
+        {
+            std::fs::copy(entry.path(), old_migrations.join(name)).unwrap();
+        }
+    }
+    let database = directory.path().join("configuration-upgrade.sqlite3");
+    let old = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(
+            SqliteConnectOptions::new()
+                .filename(&database)
+                .create_if_missing(true)
+                .foreign_keys(true),
+        )
+        .await
+        .unwrap();
+    Migrator::new(old_migrations.as_path())
+        .await
+        .unwrap()
+        .run(&old)
+        .await
+        .unwrap();
+    let mut ids = Vec::new();
+    for (index, status) in [404, 503].into_iter().enumerate() {
+        let id = Uuid::now_v7();
+        sqlx::query("INSERT INTO shipments(id,title,tracking_number,tracking_carrier,registration_state,last_error,last_error_code,last_provider_status,last_provider_error_code,attempts,next_attempt_at,lease_token,lease_until) VALUES(?,'Setup migration',?,'usps','pending','Setup failure','tracking_carrier_credentials_required',?,'CREDENTIALS_NOT_FOUND',3,unixepoch()+600,'previous-lease',unixepoch()+60)")
+            .bind(id.to_string()).bind(format!("CONFIG{index}123")).bind(status).execute(&old).await.unwrap();
+        ids.push(id);
+    }
+    old.close().await;
+    let store = Store::open(&database).await.unwrap();
+    let configuration = store.get(ids[0]).await.unwrap();
+    assert_eq!(
+        configuration.sync.registration_state,
+        shipments::models::RegistrationState::ConfigurationRequired
+    );
+    assert_eq!(configuration.sync.attempts, 3);
+    assert!(configuration.sync.next_attempt_at.is_none());
+    let lease: Option<String> = sqlx::query_scalar("SELECT lease_token FROM shipments WHERE id=?")
+        .bind(ids[0].to_string())
+        .fetch_one(store.pool())
+        .await
+        .unwrap();
+    assert!(lease.is_none());
+    let outage = store.get(ids[1]).await.unwrap();
+    assert_eq!(
+        outage.sync.registration_state,
+        shipments::models::RegistrationState::Pending
+    );
+    assert!(outage.sync.next_attempt_at.is_some());
+    assert_eq!(outage.sync.provider_status, Some(503));
+    store.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn missing_carrier_migration_deletes_incomplete_imports_and_preserves_resolved_records() {
+    let directory = tempfile::tempdir().unwrap();
+    let old_migrations = directory.path().join("carrier-old-migrations");
+    std::fs::create_dir(&old_migrations).unwrap();
+    let source = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("migrations");
+    for entry in std::fs::read_dir(source).unwrap() {
+        let entry = entry.unwrap();
+        let name = entry.file_name();
+        let name = name.to_str().unwrap();
+        if name.split_once('_').unwrap().0.parse::<i64>().unwrap() < 11 {
+            std::fs::copy(entry.path(), old_migrations.join(name)).unwrap();
+        }
+    }
+    let database = directory.path().join("carrier-upgrade.sqlite3");
+    let legacy = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(
+            SqliteConnectOptions::new()
+                .filename(&database)
+                .create_if_missing(true)
+                .foreign_keys(true),
+        )
+        .await
+        .unwrap();
+    Migrator::new(old_migrations.as_path())
+        .await
+        .unwrap()
+        .run(&legacy)
+        .await
+        .unwrap();
+    let mut ids = Vec::new();
+    for (index, carrier) in [None, Some(""), Some("\u{2003}"), Some("usps"), Some("ups")]
+        .into_iter()
+        .enumerate()
+    {
+        let mut snapshot = legacy_shipment(
+            Some(InputTracking {
+                number: format!("MIGRATION{index}123"),
+                // A resolved record can still have a carrier-less old event.
+                carrier: if index == 4 {
+                    Some("UPS".parse().unwrap())
+                } else {
+                    None
+                },
+            }),
+            index == 1,
+        );
+        snapshot.status = Status::OutForDelivery;
+        snapshot.sync.tracker_id = Some(format!("trk_preserve_{index}"));
+        snapshot.sync.registration_state = shipments::models::RegistrationState::Registered;
+        let number = &snapshot.tracking.as_ref().unwrap().number;
+        sqlx::query("INSERT INTO shipments (id,title,tracking_carrier,tracking_number,archived,tracker_id,registration_state) VALUES (?,?,?,?,?,?,'registered')")
+            .bind(snapshot.id.to_string()).bind(&snapshot.title).bind(carrier).bind(number)
+            .bind(snapshot.archived).bind(&snapshot.sync.tracker_id).execute(&legacy).await.unwrap();
+        sqlx::query("INSERT INTO sources(namespace,key,shipment_id) VALUES('upgrade',?,?)")
+            .bind(index.to_string())
+            .bind(snapshot.id.to_string())
+            .execute(&legacy)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO events(shipment_id,kind,actor_id,detail,snapshot) VALUES(?,'\"created\"','owner','Old import',?)")
+            .bind(snapshot.id.to_string()).bind(serde_json::to_string(&snapshot).unwrap()).execute(&legacy).await.unwrap();
+        seed_replay(&legacy, &format!("carrier-{index}"), "legacy", &snapshot).await;
+        ids.push(snapshot.id);
+    }
+    legacy.close().await;
+    let store = Store::open(&database).await.unwrap();
+    for id in &ids[..3] {
+        assert!(matches!(store.get(*id).await, Err(Error::NotFound)));
+        let references: (i64, i64, i64, i64) = sqlx::query_as(
+            "SELECT (SELECT count(*) FROM sources WHERE shipment_id=?),
+             (SELECT count(*) FROM events WHERE shipment_id=?),
+             (SELECT count(*) FROM state_events WHERE shipment_id=?),
+             (SELECT count(*) FROM idempotency WHERE json_extract(response,'$.id')=?)",
+        )
+        .bind(id.to_string())
+        .bind(id.to_string())
+        .bind(id.to_string())
+        .bind(id.to_string())
+        .fetch_one(store.pool())
+        .await
+        .unwrap();
+        assert_eq!(references, (0, 0, 0, 0));
+    }
+    for (index, carrier) in [(3, "USPS"), (4, "UPS")] {
+        let preserved = store.get(ids[index]).await.unwrap();
+        assert_eq!(preserved.tracking.carrier.as_str(), carrier);
+        assert_eq!(
+            preserved.sync.tracker_id,
+            Some(format!("trk_preserve_{index}"))
+        );
+        let events = store.events(preserved.id, 0, 100).await.unwrap();
+        assert_eq!(events.len(), 1);
+        let old_carrier = events[0]
+            .snapshot
+            .as_ref()
+            .unwrap()
+            .tracking
+            .as_ref()
+            .unwrap()
+            .carrier;
+        assert_eq!(old_carrier.is_some(), index == 4);
+    }
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM idempotency")
+        .fetch_one(store.pool())
+        .await
+        .unwrap();
+    assert_eq!(count, 1);
+    for carrier in [None, Some(""), Some("\u{2003}"), Some(" \t\n")] {
+        assert!(sqlx::query("INSERT INTO shipments(id,title,tracking_number,tracking_carrier) VALUES(?,'Invalid carrier',?,?)")
+            .bind(Uuid::now_v7().to_string()).bind(Uuid::now_v7().to_string()).bind(carrier)
+            .execute(store.pool()).await.is_err());
+        assert!(
+            sqlx::query("UPDATE shipments SET tracking_carrier=? WHERE id=?")
+                .bind(carrier)
+                .bind(ids[3].to_string())
+                .execute(store.pool())
+                .await
+                .is_err()
+        );
+    }
+    let retry = CreateShipment {
+        title: "Corrected import".into(),
+        direction: Default::default(),
+        merchant: None,
+        order_reference: None,
+        signature_required: None,
+        source: None,
+        tracking: InputTracking {
+            number: "MIGRATION0123".into(),
+            carrier: Some("USPS".parse().unwrap()),
+        },
+    };
+    assert!(
+        store
+            .replay_create(&retry, "owner", "carrier-0")
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let new_record = store
+        .create(retry, "owner", "carrier-0", None)
+        .await
+        .unwrap();
+    assert_ne!(new_record.id, ids[0]);
+    assert!(
+        sqlx::query("PRAGMA foreign_key_check")
+            .fetch_all(store.pool())
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    store.close().await.unwrap();
+    let reopened = Store::open(&database).await.unwrap();
+    assert_eq!(
+        reopened
+            .get(ids[3])
+            .await
+            .unwrap()
+            .tracking
+            .carrier
+            .as_str(),
+        "USPS"
+    );
+    assert!(matches!(reopened.get(ids[0]).await, Err(Error::NotFound)));
+    reopened.close().await.unwrap();
+}
 
 #[tokio::test]
 async fn provider_migration_clarifies_unsupported_errors_without_changing_registration_state() {
@@ -109,7 +351,7 @@ async fn provider_migration_clarifies_unsupported_errors_without_changing_regist
         assert!(migrated.sync.next_attempt_at.is_none());
         assert!(migrated.sync.tracker_id.is_none());
         assert_eq!(migrated.tracking.number, "9400100000000000000001");
-        assert_eq!(migrated.tracking.carrier, Some("USPS".parse().unwrap()));
+        assert_eq!(migrated.tracking.carrier, "USPS".parse().unwrap());
         assert_eq!(
             store
                 .get(other_error)
@@ -124,7 +366,10 @@ async fn provider_migration_clarifies_unsupported_errors_without_changing_regist
     }
 }
 
-fn legacy_shipment(tracking: Option<Tracking>, archived: bool) -> Shipment<Option<Tracking>> {
+fn legacy_shipment(
+    tracking: Option<InputTracking>,
+    archived: bool,
+) -> Shipment<Option<InputTracking>> {
     let id = Uuid::now_v7();
     Shipment {
         id,
@@ -163,8 +408,8 @@ fn legacy_shipment(tracking: Option<Tracking>, archived: bool) -> Shipment<Optio
     }
 }
 
-fn tracking(number: &str) -> Tracking {
-    Tracking {
+fn tracking(number: &str) -> InputTracking {
+    InputTracking {
         number: number.into(),
         carrier: Some("usps".parse().unwrap()),
     }
@@ -174,7 +419,7 @@ async fn seed_replay(
     pool: &SqlitePool,
     key: &str,
     fingerprint: &str,
-    snapshot: &Shipment<Option<Tracking>>,
+    snapshot: &Shipment<Option<InputTracking>>,
 ) {
     sqlx::query(
         "INSERT INTO idempotency (actor_id, key, fingerprint, response) VALUES (?, ?, ?, ?)",
@@ -190,8 +435,8 @@ async fn seed_replay(
 
 async fn seed_legacy_record(
     pool: &SqlitePool,
-    current: &Shipment<Option<Tracking>>,
-    original: &Shipment<Option<Tracking>>,
+    current: &Shipment<Option<InputTracking>>,
+    original: &Shipment<Option<InputTracking>>,
     key: &str,
     fingerprint: &str,
 ) {
@@ -377,7 +622,10 @@ async fn required_tracking_migration_preserves_valid_records_and_historical_snap
         }
         for retained in [&valid, &now_tracked] {
             let current = store.get(retained.id).await.unwrap();
-            assert_eq!(Some(current.tracking), retained.tracking);
+            assert_eq!(
+                Some(InputTracking::from(current.tracking)),
+                retained.tracking
+            );
             assert_eq!(current.sources, retained.sources);
             assert!(!current.archived);
         }
@@ -405,7 +653,7 @@ async fn required_tracking_migration_preserves_valid_records_and_historical_snap
             .unwrap();
         assert_eq!(replay.id, valid.id);
         assert_eq!(replay.revision, 1);
-        assert_eq!(Some(replay.tracking), valid.tracking);
+        assert_eq!(Some(InputTracking::from(replay.tracking)), valid.tracking);
         assert_eq!(store.agent_identity(&digest).await.unwrap(), Some(agent_id));
         let agents = store.agents().await.unwrap();
         assert_eq!(agents.items.len(), 1);
@@ -421,7 +669,7 @@ async fn required_tracking_migration_preserves_valid_records_and_historical_snap
         if opening == 0 {
             for number in [None, Some(""), Some(" \t\r\n"), Some("\u{a0}\u{2003}")] {
                 let inserted = sqlx::query(
-                    "INSERT INTO shipments (id, title, tracking_number) VALUES (?, ?, ?)",
+                    "INSERT INTO shipments (id, title, tracking_number, tracking_carrier) VALUES (?, ?, ?, 'usps')",
                 )
                 .bind(Uuid::now_v7().to_string())
                 .bind("Rejected test parcel")

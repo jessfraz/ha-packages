@@ -1,5 +1,9 @@
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
+    #[error(
+        "A carrier is required before saving. The tracking provider must identify a supported carrier."
+    )]
+    CarrierRequired,
     #[error("A tracking number is required. Add one before saving; tracking cannot be cleared.")]
     TrackingRequired,
     #[error(
@@ -25,7 +29,7 @@ pub enum Error {
 impl From<Error> for dropshot::HttpError {
     fn from(error: Error) -> Self {
         let status = match error {
-            Error::TrackingRequired | Error::TrackingInvalid => {
+            Error::TrackingRequired | Error::TrackingInvalid | Error::CarrierRequired => {
                 dropshot::ClientErrorStatusCode::BAD_REQUEST
             }
             Error::Invalid(_) => dropshot::ClientErrorStatusCode::BAD_REQUEST,
@@ -35,6 +39,7 @@ impl From<Error> for dropshot::HttpError {
             _ => return Self::for_internal_error(error.to_string()),
         };
         let code = match error {
+            Error::CarrierRequired => "carrier_required",
             Error::TrackingRequired => "tracking_required",
             Error::TrackingInvalid => "tracking_invalid",
             Error::Invalid(_) => "invalid_input",

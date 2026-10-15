@@ -28,7 +28,7 @@ struct Record {
     order_reference: Option<String>,
     signature_required: Option<bool>,
     carrier_tracking: String,
-    tracking_carrier: Option<String>,
+    tracking_carrier: String,
     tracking_number: String,
     carrier_status: Option<String>,
     override_status: Option<String>,
@@ -92,14 +92,11 @@ impl Record {
             order_reference: self.order_reference,
             signature_required: self.signature_required,
             tracking: Tracking {
-                carrier: self
-                    .tracking_carrier
-                    .as_deref()
-                    .map(str::parse)
-                    .transpose()
-                    .map_err(|error: crate::carrier::UnsupportedCarrier| {
+                carrier: self.tracking_carrier.parse().map_err(
+                    |error: crate::carrier::UnsupportedCarrier| {
                         Error::Database(sqlx::Error::Decode(Box::new(error)))
-                    })?,
+                    },
+                )?,
                 number: self.tracking_number,
             },
             status,
@@ -115,6 +112,14 @@ impl Record {
                 registration_state: match self.registration_state.as_str() {
                     "pending" => RegistrationState::Pending,
                     "registered" => RegistrationState::Registered,
+                    "rejected"
+                        if self
+                            .last_error_code
+                            .as_deref()
+                            .is_some_and(crate::shipping_api::error::configuration_error_code) =>
+                    {
+                        RegistrationState::ConfigurationRequired
+                    }
                     "rejected" => RegistrationState::Rejected,
                     _ => {
                         return Err(Error::Invalid(
@@ -150,7 +155,7 @@ fn valid_text(value: &str, field: &str, max: usize) -> Result<(), Error> {
     Ok(())
 }
 
-pub fn normalize_tracking(tracking: &mut Tracking) -> Result<(), Error> {
+pub fn normalize_tracking<C>(tracking: &mut Tracking<C>) -> Result<(), Error> {
     if tracking.number.trim().is_empty() {
         return Err(Error::TrackingRequired);
     }
@@ -459,20 +464,21 @@ impl Store {
         let tracking = Tracking {
             carrier: verified
                 .map(|tracker| tracker.carrier)
-                .or(input.tracking.carrier),
+                .or(input.tracking.carrier)
+                .ok_or(Error::CarrierRequired)?,
             number: input.tracking.number.clone(),
         };
         Self::check_tracking(&mut tx, id, &tracking).await?;
         sqlx::query("INSERT INTO shipments (id,title,direction,merchant,order_reference,signature_required,tracking_carrier,tracking_number,next_attempt_at) VALUES (?,?,?,?,?,?,?,?,unixepoch())")
             .bind(id.to_string()).bind(&input.title).bind(input.direction.as_str()).bind(&input.merchant).bind(&input.order_reference)
             .bind(input.signature_required)
-            .bind(tracking.carrier.as_ref().map(Carrier::as_db_key)).bind(&tracking.number)
+            .bind(tracking.carrier.as_db_key()).bind(&tracking.number)
             .execute(&mut *tx).await.map_err(unique_error)?;
         if let Some(tracker) = verified {
             Self::save_verification(&mut tx, id, tracker).await?;
         }
         if let Some(source) = &input.source {
-            Self::source_in(&mut tx, id, source).await?;
+            Self::source_in(&mut tx, id, source, Some((actor, key))).await?;
         }
         Self::event_in(&mut tx, id, EventKind::Created, actor, "Shipment created").await?;
         let shipment = Self::get_in(&mut tx, id).await?;
@@ -485,6 +491,65 @@ impl Store {
             .await?;
         tx.commit().await?;
         Ok(shipment)
+    }
+
+    /// Reject known local conflicts before provider registration. The final
+    /// create repeats these checks because this transaction ends before I/O.
+    pub async fn preflight_create(
+        &self,
+        input: &CreateShipment,
+        actor: &str,
+        key: &str,
+    ) -> Result<Option<Shipment>, Error> {
+        if let Some(replay) = self.replay_create(input, actor, key).await? {
+            return Ok(Some(replay));
+        }
+        let mut tx = self.transaction().await?;
+        if let Some(source) = &input.source {
+            let exists: bool = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM sources WHERE namespace=? AND key=?)",
+            )
+            .bind(&source.namespace)
+            .bind(&source.key)
+            .fetch_one(&mut *tx)
+            .await?;
+            if exists {
+                return Err(Error::Conflict(
+                    "source already belongs to a shipment; find it before retrying".into(),
+                ));
+            }
+        }
+        if let Some(carrier) = input.tracking.carrier {
+            let tracking = Tracking {
+                carrier,
+                number: input.tracking.number.clone(),
+            };
+            Self::check_tracking(&mut tx, Uuid::now_v7(), &tracking).await?;
+        }
+        tx.commit().await?;
+        Ok(None)
+    }
+
+    pub async fn preflight_update(
+        &self,
+        id: Uuid,
+        revision: i64,
+        tracking: &InputTracking,
+    ) -> Result<(), Error> {
+        let mut tx = self.transaction().await?;
+        let current = Self::get_in(&mut tx, id).await?;
+        Self::check_revision(&current, revision)?;
+        if !current.archived
+            && let Some(carrier) = tracking.carrier
+        {
+            let tracking = Tracking {
+                carrier,
+                number: tracking.number.clone(),
+            };
+            Self::check_tracking(&mut tx, id, &tracking).await?;
+        }
+        tx.commit().await?;
+        Ok(())
     }
 
     pub async fn update(
@@ -515,11 +580,15 @@ impl Store {
         }
         let mut changed_tracking = false;
         if let Some(value) = input.tracking.value {
-            let mut tracking = value.ok_or(Error::TrackingRequired)?;
-            normalize_tracking(&mut tracking)?;
-            if let Some(tracker) = verified {
-                tracking.carrier = Some(tracker.carrier);
-            }
+            let mut input_tracking = value.ok_or(Error::TrackingRequired)?;
+            normalize_tracking(&mut input_tracking)?;
+            let tracking = Tracking {
+                number: input_tracking.number,
+                carrier: verified
+                    .map(|tracker| tracker.carrier)
+                    .or(input_tracking.carrier)
+                    .ok_or(Error::CarrierRequired)?,
+            };
             changed_tracking = tracking != shipment.tracking;
             shipment.tracking = tracking;
         }
@@ -535,14 +604,14 @@ impl Store {
         sqlx::query("UPDATE shipments SET title=?,direction=?,merchant=?,order_reference=?,signature_required=?,tracking_carrier=?,tracking_number=? WHERE id=?")
             .bind(shipment.title).bind(shipment.direction.as_str()).bind(shipment.merchant).bind(shipment.order_reference)
             .bind(shipment.signature_required)
-            .bind(shipment.tracking.carrier.as_ref().map(Carrier::as_db_key)).bind(&shipment.tracking.number)
+            .bind(shipment.tracking.carrier.as_db_key()).bind(&shipment.tracking.number)
             .bind(id.to_string()).execute(&mut *tx).await.map_err(unique_error)?;
         if changed_tracking {
             sqlx::query("UPDATE shipments SET tracking_generation=tracking_generation+1,tracker_id=NULL,tracking_url=NULL,carrier_status=NULL,carrier_tracking='{}',registration_state='pending',registration_started_at=NULL,last_error_code=NULL,last_provider_status=NULL,last_provider_error_code=NULL,status_since=NULL,last_success_at=NULL,last_attempt_at=NULL,last_error=NULL,attempts=0,lease_until=NULL,lease_token=NULL,next_attempt_at=CASE WHEN tracking_number IS NOT NULL AND archived=0 AND ? THEN unixepoch() END WHERE id=?")
                 .bind(!shipment.status_override.as_ref().is_some_and(|value|value.status.is_terminal())).bind(id.to_string()).execute(&mut *tx).await?;
-            if let Some(tracker) = verified {
-                Self::save_verification(&mut tx, id, tracker).await?;
-            }
+        }
+        if let Some(tracker) = verified {
+            Self::save_verification(&mut tx, id, tracker).await?;
         }
         Self::bump(&mut tx, id).await?;
         Self::event_in(
@@ -587,11 +656,10 @@ impl Store {
         id: Uuid,
         tracking: &Tracking,
     ) -> Result<(), Error> {
-        // Without a carrier, a number overlaps every known carrier identity.
-        // BEGIN IMMEDIATE makes this check and the subsequent write atomic.
-        let carrier = tracking.carrier.as_ref().map(Carrier::as_db_key);
-        let exists:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM shipments WHERE archived=0 AND tracking_number=? AND id<>? AND (tracking_carrier IS NULL OR ? IS NULL OR tracking_carrier=?))")
-            .bind(&tracking.number).bind(id.to_string()).bind(&carrier).bind(&carrier).fetch_one(&mut **tx).await?;
+        // BEGIN IMMEDIATE keeps the identity check and following write atomic.
+        let carrier = tracking.carrier.as_db_key();
+        let exists:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM shipments WHERE archived=0 AND tracking_number=? AND tracking_carrier=? AND id<>?)")
+            .bind(&tracking.number).bind(&carrier).bind(id.to_string()).fetch_one(&mut **tx).await?;
         if exists {
             Err(Error::Conflict(
                 "tracking identity already belongs to an active shipment".into(),
@@ -611,7 +679,16 @@ impl Store {
         tx: &mut Transaction<'_, Sqlite>,
         id: Uuid,
         source: &Source,
+        admission: Option<(&str, &str)>,
     ) -> Result<(), Error> {
+        let reservation: Option<(String,String)> = sqlx::query_as(
+            "SELECT actor_id,operation_key FROM admission_sources WHERE namespace=? AND key=? AND lease_until>unixepoch()",
+        ).bind(&source.namespace).bind(&source.key).fetch_optional(&mut **tx).await?;
+        if let Some((actor, key)) = reservation
+            && admission != Some((actor.as_str(), key.as_str()))
+        {
+            return Err(Error::Conflict("source is reserved by another shipment verification; retry that request after it completes".into()));
+        }
         let existing = sqlx::query_scalar::<_, String>(
             "SELECT shipment_id FROM sources WHERE namespace=? AND key=?",
         )
@@ -650,7 +727,7 @@ impl Store {
         let current = Self::get_in(&mut tx, id).await?;
         Self::check_revision(&current, revision)?;
         if !current.sources.contains(&source) {
-            Self::source_in(&mut tx, id, &source).await?;
+            Self::source_in(&mut tx, id, &source, None).await?;
             Self::bump(&mut tx, id).await?;
             Self::event_in(
                 &mut tx,
@@ -764,7 +841,7 @@ impl Store {
         // An earlier scheduled check stays earlier; otherwise wait at least one
         // minute after the last provider attempt, even for terminal shipments.
         sqlx::query(
-            "UPDATE shipments SET next_attempt_at=CASE
+            "UPDATE shipments SET registration_state=CASE WHEN ? THEN 'pending' ELSE registration_state END,next_attempt_at=CASE
                  WHEN lease_until>unixepoch()
                    OR (last_error IS NOT NULL AND next_attempt_at>unixepoch())
                      THEN next_attempt_at
@@ -773,6 +850,7 @@ impl Store {
                  ELSE max(unixepoch(),coalesce(last_attempt_at+60,unixepoch()))
              END WHERE id=?",
         )
+        .bind(shipment.sync.registration_state == RegistrationState::ConfigurationRequired)
         .bind(id.to_string())
         .execute(&mut *tx)
         .await?;
@@ -800,11 +878,18 @@ impl Store {
                 "source_namespace and source_key must be supplied together".into(),
             ));
         }
+        let delivery_window = crate::delivery::DeliveryWindow::from_bounds(
+            filters.delivered_after,
+            filters.delivered_before,
+        )?;
         // Date keys are indexed generated columns. Every page uses the key
         // captured when the preceding row was selected, never a mutable lookup.
         let sort_column = match filters.sort.unwrap_or_default() {
             ShipmentSort::Id => None,
             ShipmentSort::Expected => Some("expected_sort_key"),
+            ShipmentSort::Delivered if delivery_window.is_some() => {
+                Some("-unixepoch(json_extract(carrier_tracking,'$.delivered_at'))")
+            }
             ShipmentSort::Delivered => Some("delivered_sort_key"),
         };
         let mut query = QueryBuilder::<Sqlite>::new("SELECT shipments.*,");
@@ -813,6 +898,20 @@ impl Store {
         query.push_bind(filters.archived.unwrap_or(false));
         if let Some(direction) = filters.direction {
             query.push(" AND direction=").push_bind(direction.as_str());
+        }
+        if let Some(issues) = filters.tracking_issues {
+            query.push(if issues {
+                " AND last_error IS NOT NULL"
+            } else {
+                " AND last_error IS NULL"
+            });
+        }
+        if let Some(window) = delivery_window {
+            query
+                .push(" AND unixepoch(json_extract(carrier_tracking,'$.delivered_at'))>=")
+                .push_bind(window.after())
+                .push(" AND unixepoch(json_extract(carrier_tracking,'$.delivered_at'))<")
+                .push_bind(window.before());
         }
         if let Some(position) = after {
             if let Some(column) = sort_column {
@@ -829,7 +928,7 @@ impl Store {
             }
         }
         if let Some(value) = &filters.tracking_number {
-            let mut tracking = Tracking {
+            let mut tracking = InputTracking {
                 number: value.clone(),
                 carrier: None,
             };
@@ -1099,11 +1198,26 @@ impl Store {
     }
 
     pub async fn summary(&self, direction: Option<Direction>) -> Result<Summary, Error> {
+        self.summary_in_window(direction, None).await
+    }
+
+    pub async fn summary_in_window(
+        &self,
+        direction: Option<Direction>,
+        window: Option<crate::delivery::DeliveryWindow>,
+    ) -> Result<Summary, Error> {
         let mut query = QueryBuilder::<Sqlite>::new(
             "SELECT coalesce(override_status,carrier_status,'\"expected\"') AS status,count(*),count(last_error) FROM shipments WHERE archived=0",
         );
         if let Some(direction) = direction {
             query.push(" AND direction=").push_bind(direction.as_str());
+        }
+        if let Some(window) = window.as_ref() {
+            query
+                .push(" AND unixepoch(json_extract(carrier_tracking,'$.delivered_at'))>=")
+                .push_bind(window.after())
+                .push(" AND unixepoch(json_extract(carrier_tracking,'$.delivered_at'))<")
+                .push_bind(window.before());
         }
         query.push(" GROUP BY status");
         let rows = query
@@ -1114,6 +1228,11 @@ impl Store {
         for (status, count, sync_errors) in rows {
             summary.sync_errors += sync_errors;
             let status: Status = serde_json::from_str(&status)?;
+            if window.is_some() {
+                // The window is based on an actual delivery scan, independent
+                // of a subsequent manual status correction.
+                summary.delivered += count;
+            }
             if !status.is_terminal() {
                 summary.active += count;
             }
@@ -1123,7 +1242,7 @@ impl Store {
                 }
                 Status::InTransit | Status::AvailableForPickup => summary.in_transit += count,
                 Status::OutForDelivery => summary.out_for_delivery += count,
-                Status::Delivered => summary.delivered += count,
+                Status::Delivered if window.is_none() => summary.delivered += count,
                 Status::Failure | Status::Error | Status::ReturnToSender => {
                     summary.exceptions += count
                 }
@@ -1141,6 +1260,7 @@ impl Store {
             pending_syncs,
             sync_errors,
             credential_role: String::new(),
+            delivery_day: None,
         })
     }
 

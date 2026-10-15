@@ -75,6 +75,9 @@
       "sync_errors": {
         "name": "Sync errors"
       },
+      "inbound_delivered_today": {
+        "name": "Inbound delivered today"
+      },
       "inbound_active": {
         "name": "Inbound active"
       },

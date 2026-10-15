@@ -285,7 +285,15 @@ impl EasyPostClient {
         let outcome = match error.map(|error| &error.kind) {
             None => "success",
             Some(ErrorKind::Throttled { .. }) => "throttled",
-            Some(ErrorKind::Http { status: 429, .. }) => "rate_limited",
+            Some(
+                ErrorKind::Http { status: 429, .. }
+                | ErrorKind::ProviderRejected { status: 429, .. },
+            ) => "rate_limited",
+            Some(ErrorKind::ProviderRejected { status, .. })
+                if !matches!(status, 400 | 404 | 422) =>
+            {
+                "error"
+            }
             Some(
                 ErrorKind::Rejected(_)
                 | ErrorKind::ProviderRejected { .. }
@@ -298,6 +306,7 @@ impl EasyPostClient {
             "request_id" => request_id, "operation" => operation, "outcome" => outcome,
             "error_code" => error.map(SyncError::error_code), "provider_status" => error.and_then(SyncError::provider_status),
             "provider_error_code" => error.and_then(SyncError::provider_error_code),
+            "provider_request_id" => error.and_then(|error| error.provider_request_id).map(|id| id.to_string()),
             "retry_after_seconds" => error.and_then(SyncError::retry_after), "provider" => ProviderId::EasyPost.as_str(), "duration_ms" => started.elapsed().as_millis());
         result
     }
@@ -333,7 +342,17 @@ impl EasyPostClient {
     ) -> Result<Vec<u8>, SyncError> {
         schedule.next_start = Instant::now() + Duration::from_secs(1);
         let result = match request.send().await {
-            Ok(response) => Self::read_body(response).await,
+            Ok(response) => {
+                let request_id = response
+                    .headers()
+                    .get("x-ep-request-uuid")
+                    .and_then(|value| value.to_str().ok())
+                    .and_then(|value| Uuid::parse_str(value).ok());
+                Self::read_body(response).await.map_err(|mut error| {
+                    error.provider_request_id = request_id;
+                    error
+                })
+            }
             Err(error) => Err(redact_request_error(error)),
         };
         match result {

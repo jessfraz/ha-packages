@@ -117,6 +117,7 @@ async def test_loaded_presence_contains_only_matching_backup_coverage(
     freezer,
     status: str,
 ) -> None:
+    await hass.config.async_set_time_zone("UTC")
     now = datetime(2026, 10, 15, 1, 0, tzinfo=UTC)
     freezer.move_to(now - timedelta(days=3))
     entry = await setup_paired(hass, backend)
@@ -138,6 +139,7 @@ async def test_loaded_presence_contains_only_matching_backup_coverage(
         (request.path, request.query)
         for request in backend.requests
         if request.path in {"/v1/summary", PRESENCE_PATH}
+        and "delivered_after" not in request.query
     ][:7] == [
         ("/v1/summary", {}),
         ("/v1/summary", {"direction": "inbound"}),
@@ -153,6 +155,12 @@ async def test_loaded_presence_contains_only_matching_backup_coverage(
     integration = await async_get_integration(hass, DOMAIN)
     assert report == {
         "version": str(integration.version),
+        "delivery_day": {
+            "date": "2026-10-15",
+            "time_zone": hass.config.time_zone,
+            "delivered_after": int(now.replace(hour=0).timestamp()),
+            "delivered_before": int(now.replace(hour=0).timestamp()) + 86400,
+        },
         "administrator_ids": [
             user.id
             for user in await hass.auth.async_get_users()

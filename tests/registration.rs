@@ -15,7 +15,7 @@ use std::{
 use serde::{Deserialize, Serialize};
 use shipments::{
     models::{
-        CreateShipment, Direction, Patch, RegistrationState, Shipment, Status, Tracking,
+        CreateShipment, Direction, InputTracking, Patch, RegistrationState, Shipment, Status,
         UpdateShipment,
     },
     store::Store,
@@ -51,7 +51,7 @@ impl Fixture {
                     merchant: None,
                     order_reference: None,
                     signature_required: None,
-                    tracking: Tracking {
+                    tracking: InputTracking {
                         number: NUMBER.into(),
                         carrier: Some("USPS".parse().unwrap()),
                     },
@@ -379,6 +379,110 @@ async fn unavailable_first_lookup_keeps_intent_and_restart_adopts_without_a_post
 }
 
 #[tokio::test]
+async fn unavailable_registration_with_a_rejection_code_retries_and_adopts_after_restart() {
+    let fixture = Fixture::new().await;
+    let shipment = fixture.shipment().await;
+    let mut provider = Provider::new();
+    let task = spawn(provider.worker(&fixture.store));
+    provider.empty_lookup().await;
+    let registration = provider.request().await;
+    assert_eq!(registration.method, "POST");
+    registration.respond(503, r#"{"error":{"code":"TRACKER.NO_CARRIER_FOR_CODE","message":"private upstream diagnostic"}}"#.into());
+    assert!(task.await.unwrap().unwrap());
+    let pending = fixture.store.get(shipment.id).await.unwrap();
+    assert_eq!(pending.sync.registration_state, RegistrationState::Pending);
+    assert_eq!(pending.sync.error_code.as_deref(), Some("provider_http"));
+    assert_eq!(pending.sync.provider_status, Some(503));
+    assert_eq!(
+        pending.sync.provider_error_code.as_deref(),
+        Some("TRACKER.NO_CARRIER_FOR_CODE")
+    );
+    assert_eq!(
+        pending.sync.last_error.as_deref(),
+        Some("EasyPost returned HTTP 503")
+    );
+    assert!(pending.sync.next_attempt_at.is_some());
+    assert!(pending.sync.tracker_id.is_none());
+    fixture.store.close().await.unwrap();
+    let reopened = Store::open(&fixture.path).await.unwrap();
+    sqlx::query("UPDATE shipments SET next_attempt_at=0,lease_until=0 WHERE id=?")
+        .bind(shipment.id.to_string())
+        .execute(reopened.pool())
+        .await
+        .unwrap();
+    let task = spawn(provider.worker(&reopened));
+    let lookup = provider.request().await;
+    assert_eq!(lookup.method, "GET");
+    lookup.page(vec![tracker(NUMBER)], false);
+    assert!(task.await.unwrap().unwrap());
+    provider.no_request();
+    let adopted = reopened.get(shipment.id).await.unwrap();
+    assert_eq!(adopted.sync.tracker_id.as_deref(), Some("trk_registration"));
+    assert_eq!(
+        adopted.sync.registration_state,
+        RegistrationState::Registered
+    );
+    assert_eq!(
+        adopted.sync.registration_started_at,
+        pending.sync.registration_started_at
+    );
+    assert!(adopted.sync.last_error.is_none());
+    reopened.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn carrier_configuration_failure_stops_until_an_explicit_refresh() {
+    let fixture = Fixture::new().await;
+    let shipment = fixture.shipment().await;
+    let mut provider = Provider::new();
+    let worker = provider.worker(&fixture.store);
+    let task = spawn(worker.clone());
+    provider.empty_lookup().await;
+    provider.request().await.respond(
+        404,
+        r#"{"error":{"code":"CREDENTIALS_NOT_FOUND","message":"private diagnostic"}}"#.into(),
+    );
+    assert!(task.await.unwrap().unwrap());
+    let blocked = fixture.store.get(shipment.id).await.unwrap();
+    assert_eq!(
+        blocked.sync.registration_state,
+        RegistrationState::ConfigurationRequired
+    );
+    assert_eq!(
+        blocked.sync.error_code.as_deref(),
+        Some("tracking_carrier_credentials_required")
+    );
+    assert!(blocked.sync.next_attempt_at.is_none());
+    assert!(!worker.tick().await.unwrap());
+    provider.no_request();
+    let retry = fixture
+        .store
+        .refresh(blocked.id, blocked.revision, "owner")
+        .await
+        .unwrap();
+    assert_eq!(retry.sync.registration_state, RegistrationState::Pending);
+    assert!(retry.sync.next_attempt_at.is_some());
+    sqlx::query("UPDATE shipments SET next_attempt_at=0 WHERE id=?")
+        .bind(retry.id.to_string())
+        .execute(fixture.store.pool())
+        .await
+        .unwrap();
+    let task = spawn(worker);
+    let lookup = provider.request().await;
+    assert_eq!(lookup.method, "GET");
+    lookup.page(vec![tracker(NUMBER)], false);
+    assert!(task.await.unwrap().unwrap());
+    provider.no_request();
+    let restored = fixture.store.get(retry.id).await.unwrap();
+    assert_eq!(
+        restored.sync.registration_state,
+        RegistrationState::Registered
+    );
+    assert!(restored.sync.last_error.is_none());
+    fixture.store.close().await.unwrap();
+}
+
+#[tokio::test]
 async fn ambiguous_or_incomplete_first_lookup_never_registers() {
     for has_more in [false, true] {
         let fixture = Fixture::new().await;
@@ -547,7 +651,7 @@ async fn unsupported_provider_preserves_tracking_number_and_explains_support_wit
     assert_eq!(
         rejected.sync.last_error.as_deref(),
         Some(
-            "Tracking is unavailable from the configured provider (EasyPost): no supported carrier was found. This does not mean the tracking number is invalid. Check provider support and the selected carrier before changing the number."
+            "EasyPost could not match this tracking number to an available carrier. Select the carrier shown on the shipping notice and confirm its carrier account is configured in EasyPost. This does not mean the tracking number is invalid."
         )
     );
     fixture.due(shipment.id).await;
@@ -557,7 +661,7 @@ async fn unsupported_provider_preserves_tracking_number_and_explains_support_wit
 }
 
 #[tokio::test]
-async fn key_and_carrier_account_configuration_errors_keep_valid_parcels_pending() {
+async fn key_and_carrier_account_configuration_errors_preserve_parcels_and_pause_retries() {
     for (status, body, code) in [
         (401, "private key details", "tracking_provider_credentials"),
         (
@@ -580,10 +684,13 @@ async fn key_and_carrier_account_configuration_errors_keep_valid_parcels_pending
         lookup.respond(status, body.into());
         assert!(task.await.unwrap().unwrap());
         let pending = fixture.store.get(shipment.id).await.unwrap();
-        assert_eq!(pending.sync.registration_state, RegistrationState::Pending);
+        assert_eq!(
+            pending.sync.registration_state,
+            RegistrationState::ConfigurationRequired
+        );
         assert_eq!(pending.sync.provider_status, Some(status));
         assert_eq!(pending.sync.error_code.as_deref(), Some(code));
-        assert!(pending.sync.next_attempt_at.is_some());
+        assert!(pending.sync.next_attempt_at.is_none());
         assert!(pending.sync.registration_started_at.is_some());
         fixture.store.close().await.unwrap();
     }
@@ -655,7 +762,7 @@ async fn changed_tracking_during_reconciliation_cannot_post_the_old_identity() {
             shipment.revision,
             UpdateShipment {
                 tracking: Patch {
-                    value: Some(Some(Tracking {
+                    value: Some(Some(InputTracking {
                         number: REPLACEMENT.into(),
                         carrier: Some("USPS".parse().unwrap()),
                     })),
@@ -848,38 +955,30 @@ async fn terminal_correction_cancels_a_reconciled_post_and_releases_its_lease_fo
 }
 
 #[tokio::test]
-async fn fedex_credentials_error_stays_pending_until_explicit_fedex_default_correction() {
+async fn legacy_fedex_configuration_block_is_cleared_by_a_verified_carrier_correction() {
     use shipments::api;
     let fixture = Fixture::new().await;
-    let owner = "carrier-routing-owner-credential-at-least-32-bytes";
-    let server = api::start(
-        "127.0.0.1:0".parse().unwrap(),
-        Arc::new(api::Context::new(fixture.store.clone(), owner, None, None)),
-    )
-    .unwrap();
-    let endpoint = format!("http://{}/v1/shipments", server.local_addr());
-    let client = reqwest::Client::new();
-    let response = client
-        .post(&endpoint)
-        .bearer_auth(owner)
-        .header("Idempotency-Key", "fedex-routing")
-        .json(&CreateShipment {
-            direction: Direction::Inbound,
-            title: "Carrier route regression parcel".into(),
-            merchant: None,
-            order_reference: None,
-            signature_required: None,
-            tracking: Tracking {
-                number: NUMBER.into(),
-                carrier: Some("FedEx".parse().unwrap()),
+    let shipment = fixture
+        .store
+        .create(
+            CreateShipment {
+                direction: Direction::Inbound,
+                title: "Legacy carrier route regression parcel".into(),
+                merchant: None,
+                order_reference: None,
+                signature_required: None,
+                source: None,
+                tracking: InputTracking {
+                    number: NUMBER.into(),
+                    carrier: Some("FedEx".parse().unwrap()),
+                },
             },
-            source: None,
-        })
-        .send()
+            "owner",
+            "legacy-fedex-routing",
+            None,
+        )
         .await
         .unwrap();
-    assert_eq!(response.status(), reqwest::StatusCode::CREATED);
-    let shipment: Shipment = response.json().await.unwrap();
     let mut provider = Provider::new();
     let worker = provider.worker(&fixture.store);
     let task = spawn(worker.clone());
@@ -890,19 +989,18 @@ async fn fedex_credentials_error_stays_pending_until_explicit_fedex_default_corr
     assert_eq!(submitted.tracker.carrier, "FedEx");
     request.respond(404, r#"{"error":{"code":"CREDENTIALS_NOT_FOUND","message":"private carrier account and tracking details"}}"#.into());
     assert!(task.await.unwrap().unwrap());
-    let pending = fixture.store.get(shipment.id).await.unwrap();
-    assert_eq!(pending.sync.registration_state, RegistrationState::Pending);
-    assert_eq!(pending.sync.provider_status, Some(404));
+    let blocked = fixture.store.get(shipment.id).await.unwrap();
     assert_eq!(
-        pending.sync.error_code.as_deref(),
-        Some("tracking_carrier_credentials_required")
+        blocked.sync.registration_state,
+        RegistrationState::ConfigurationRequired
     );
+    assert_eq!(blocked.sync.provider_status, Some(404));
     assert_eq!(
-        pending.sync.provider_error_code.as_deref(),
+        blocked.sync.provider_error_code.as_deref(),
         Some("CREDENTIALS_NOT_FOUND")
     );
     assert!(
-        pending
+        blocked
             .sync
             .last_error
             .as_ref()
@@ -910,41 +1008,52 @@ async fn fedex_credentials_error_stays_pending_until_explicit_fedex_default_corr
             .contains("Configure this carrier in EasyPost")
     );
     assert!(
-        !pending
+        !blocked
             .sync
             .last_error
             .as_ref()
             .unwrap()
             .contains("private")
     );
-    assert_eq!(pending.tracking.carrier.unwrap().as_str(), "FedEx");
+    assert_eq!(blocked.tracking.carrier.as_str(), "FedEx");
+    assert!(blocked.sync.next_attempt_at.is_none());
     assert!(!worker.tick().await.unwrap());
     provider.no_request();
-
-    let response = client
-        .patch(format!("{endpoint}/{}", shipment.id))
-        .bearer_auth(owner)
-        .header("If-Match", format!("\"{}\"", pending.revision))
-        .json(&UpdateShipment {
-            tracking: Patch {
-                value: Some(Some(Tracking {
-                    number: NUMBER.into(),
-                    carrier: Some("FedExDefault".parse().unwrap()),
-                })),
-            },
-            ..Default::default()
-        })
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(response.status(), reqwest::StatusCode::OK);
-    let changed: Shipment = response.json().await.unwrap();
-    assert_eq!(changed.id, shipment.id);
-    assert_eq!(changed.sync.registration_state, RegistrationState::Pending);
-    assert!(changed.sync.registration_started_at.is_none());
-    assert!(changed.sync.provider_error_code.is_none());
-    provider.no_request();
-    let task = spawn(provider.worker(&fixture.store));
+    let owner = "carrier-routing-owner-credential-at-least-32-bytes";
+    let client = EasyPostClient::for_loopback("registration-test-key", &provider.base).unwrap();
+    let server = api::start(
+        "127.0.0.1:0".parse().unwrap(),
+        Arc::new(api::Context::new(
+            fixture.store.clone(),
+            owner,
+            None,
+            Some(Arc::new(client)),
+        )),
+    )
+    .unwrap();
+    let endpoint = format!(
+        "http://{}/v1/shipments/{}",
+        server.local_addr(),
+        shipment.id
+    );
+    let task = tokio::spawn(async move {
+        reqwest::Client::new()
+            .patch(endpoint)
+            .bearer_auth(owner)
+            .header("If-Match", format!("\"{}\"", blocked.revision))
+            .json(&UpdateShipment {
+                tracking: Patch {
+                    value: Some(Some(InputTracking {
+                        number: NUMBER.into(),
+                        carrier: Some("FedExDefault".parse().unwrap()),
+                    })),
+                },
+                ..Default::default()
+            })
+            .send()
+            .await
+            .unwrap()
+    });
     provider.empty_lookup().await;
     let request = provider.request().await;
     assert_eq!(request.method, "POST");
@@ -954,13 +1063,12 @@ async fn fedex_credentials_error_stays_pending_until_explicit_fedex_default_corr
     accepted.carrier = "FedExDefault".into();
     accepted.status = Status::OutForDelivery;
     request.respond(201, serde_json::to_string(&accepted).unwrap());
-    assert!(task.await.unwrap().unwrap());
-    let registered = fixture.store.get(shipment.id).await.unwrap();
+    let response = task.await.unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    let registered: Shipment = response.json().await.unwrap();
+    assert_eq!(registered.id, shipment.id);
     assert_eq!(registered.status, Status::OutForDelivery);
-    assert_eq!(
-        registered.tracking.carrier.unwrap().as_str(),
-        "FedExDefault"
-    );
+    assert_eq!(registered.tracking.carrier.as_str(), "FedExDefault");
     assert_eq!(
         registered.sync.registration_state,
         RegistrationState::Registered
@@ -969,9 +1077,8 @@ async fn fedex_credentials_error_stays_pending_until_explicit_fedex_default_corr
         registered.sync.tracker_id.as_deref(),
         Some("trk_registration")
     );
-    assert!(registered.sync.provider_error_code.is_none());
-    assert!(registered.sync.provider_status.is_none());
     assert!(registered.sync.last_error.is_none());
+    provider.no_request();
     server.close().await.unwrap();
     fixture.store.close().await.unwrap();
 }

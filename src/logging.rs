@@ -51,6 +51,8 @@ struct Fields {
     #[serde(skip_serializing_if = "Option::is_none")]
     provider_error_code: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    provider_request_id: Option<Uuid>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     retry_after_seconds: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     duration_ms: Option<u64>,
@@ -95,7 +97,7 @@ impl<W: Write + Send> Drain for JsonLog<W> {
         let warning = fields.response_code.is_some_and(|status| status >= 400)
             || fields
                 .outcome
-                .is_some_and(|outcome| !matches!(outcome, "success" | "saved"))
+                .is_some_and(|outcome| !matches!(outcome, "success" | "saved" | "verified"))
             || matches!(
                 event,
                 "request_cancelled" | "request_panicked" | "server_accept_error"
@@ -163,6 +165,9 @@ impl slog::Serializer for Fields {
             "uri" => self.route = Some(route_template(&value.to_string())),
             "response_code" => self.response_code = http_status(&value.to_string()),
             "provider_status" => self.provider_status = http_status(&value.to_string()),
+            "provider_request_id" => {
+                self.provider_request_id = Uuid::parse_str(&value.to_string()).ok()
+            }
             "provider_error_code" => {
                 self.provider_error_code = allowed(
                     &value.to_string(),
@@ -202,6 +207,8 @@ impl slog::Serializer for Fields {
                     &value.to_string(),
                     &[
                         "success",
+                        "verified",
+                        "not_saved",
                         "saved",
                         "rejected",
                         "error",

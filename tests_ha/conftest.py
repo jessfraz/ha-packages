@@ -65,6 +65,9 @@ class Backend:
             },
         }
     )
+    delivery_summary: dict[str, int] = field(
+        default_factory=lambda: {**SUMMARY, "delivered": 1}
+    )
     role: str = "integration"
     version: str = ""
     delay_seconds: float = 0
@@ -96,6 +99,11 @@ class Backend:
                 {"credential_role": self.role, "version": self.version}
             )
         if request.path == "/v1/summary":
+            if (
+                "delivered_after" in request.query
+                or "delivered_before" in request.query
+            ):
+                return web.json_response(self.delivery_summary)
             return web.json_response(self.summaries[request.query.get("direction", "")])
         if request.path == "/v1/shipments" and request.method == "GET":
             return web.json_response({"items": [], "next_page": None})

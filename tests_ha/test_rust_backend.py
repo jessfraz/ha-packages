@@ -13,6 +13,7 @@ from aiohttp import ClientError, ClientTimeout
 from homeassistant.config_entries import SOURCE_HASSIO, SOURCE_USER, ConfigEntryState
 from homeassistant.core import Context, Event, HomeAssistant, callback
 from homeassistant.data_entry_flow import FlowResultType
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.event import async_track_state_change_event
 from homeassistant.helpers.service_info.hassio import HassioServiceInfo
@@ -41,19 +42,31 @@ class RustBackend:
     integration_token: str | None = field(default=None, repr=False)
 
 
-async def produce_calendar_database(database: Path) -> None:
-    """Use the real Rust Store/SyncWorker test producer, never duplicate SQL."""
+async def produce_database(database: Path, scenario: str) -> None:
+    """Use the real Rust Store/SyncWorker producers, never duplicate SQL."""
+    target, producer, environment_key = {
+        "calendar": (
+            "ha_events",
+            "calendar_projection_filters_and_pages_normalized_instants_without_tracking_history",
+            "SHIPMENTS_TEST_CALENDAR_DATABASE",
+        ),
+        "native": (
+            "ha_events",
+            "native_adapter_fixture_uses_the_real_store",
+            "SHIPMENTS_TEST_NATIVE_DATABASE",
+        ),
+    }[scenario]
     process = await asyncio.create_subprocess_exec(
         "cargo",
         "test",
         "--locked",
         "--test",
-        "ha_events",
-        "calendar_projection_filters_and_pages_normalized_instants_without_tracking_history",
+        target,
+        producer,
         "--",
         "--exact",
         cwd=Path(__file__).parents[1],
-        env={**os.environ, "SHIPMENTS_TEST_CALENDAR_DATABASE": str(database)},
+        env={**os.environ, environment_key: str(database)},
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.STDOUT,
     )
@@ -88,8 +101,8 @@ async def rust_backend(
     }
     database = tmp_path / "shipments.sqlite3"
     mode = getattr(request, "param", False)
-    if mode == "calendar":
-        await produce_calendar_database(database)
+    if mode in {"calendar", "native"}:
+        await produce_database(database, mode)
     arguments = [
         "--bind",
         f"127.0.0.1:{unused_tcp_port}",
@@ -154,6 +167,7 @@ async def rust_backend(
                 await process.wait()
 
 
+@pytest.mark.parametrize("rust_backend", ["native"], indirect=True)
 async def test_ha_to_rust_contract(
     hass: HomeAssistant,
     hass_client,
@@ -162,7 +176,7 @@ async def test_ha_to_rust_contract(
     hass_user_token: str,
     rust_backend: RustBackend,
 ) -> None:
-    """Save pending parcels through HA, then edit and confirm without a provider."""
+    """Reject unverified additions, then edit and confirm admitted records."""
     configured = await hass.config_entries.flow.async_init(
         DOMAIN,
         context={"source": SOURCE_USER},
@@ -196,34 +210,29 @@ async def test_ha_to_rust_contract(
         json={
             "title": "Office supplies",
             "direction": "inbound",
-            "tracking": {"number": "TEST123", "carrier": "USPS"},
+            "tracking": {"number": "9400111899560000000000", "carrier": "USPS"},
         },
         headers={"Idempotency-Key": "tracked-create-without-provider"},
     )
-    assert response.status == 201
-    shipment = await response.json()
-    shipment_id = shipment["id"]
-    assert shipment["status"] == "expected"
-    assert shipment["sync"]["registration_state"] == "pending"
-    assert shipment["sync"]["tracker_id"] is None
-    added = await hass.services.async_call(
-        DOMAIN,
-        "add",
-        {
-            "title": "Second parcel",
-            "direction": "outbound",
-            "tracking_number": "TEST456",
-        },
-        context=Context(user_id=hass_user.id),
-        blocking=True,
-        return_response=True,
-    )
-    assert added["status"] == "expected"
-    assert added["id"] != shipment_id
-    response = await user.get(f"{PREFIX}/shipments/{added['id']}")
-    assert (await response.json())["direction"] == "outbound"
+    assert response.status == 503
+    with pytest.raises(HomeAssistantError):
+        await hass.services.async_call(
+            DOMAIN,
+            "add",
+            {
+                "title": "Unverified parcel",
+                "direction": "outbound",
+                "tracking_number": "TEST789",
+            },
+            context=Context(user_id=hass_user.id),
+            blocking=True,
+            return_response=True,
+        )
     items = (await (await user.get(f"{PREFIX}/shipments")).json())["items"]
-    assert {item["id"] for item in items} == {shipment_id, added["id"]}
+    assert len(items) == 2
+    shipment = next(item for item in items if item["direction"] == "inbound")
+    added = next(item for item in items if item["direction"] == "outbound")
+    shipment_id = shipment["id"]
 
     response = await user.get(f"{PREFIX}/shipments/{shipment_id}")
     assert response.status == 200
@@ -294,7 +303,7 @@ async def test_ha_to_rust_contract(
     assert events_response.status == 200
     events = (await events_response.json())["items"]
     assert [event["actor_id"] for event in events] == [
-        f"ha:{hass_user.id}",
+        "fixture",
         f"ha:{hass_user.id}",
         f"ha:{hass_admin_user.id}",
     ]
@@ -372,6 +381,33 @@ async def test_ha_to_rust_contract(
     attributes = hass.states.get("event.shipments").attributes
     assert attributes["event_type"] == "delivered"
     assert attributes["event_id"] > last_event_id
+
+
+async def test_missing_provider_rejects_create_without_persisting_a_shipment(
+    hass: HomeAssistant, rust_backend: RustBackend
+) -> None:
+    """Valid input cannot bypass provider admission or leave a visible record."""
+    session = async_get_clientsession(hass)
+    headers = {
+        "Authorization": f"Bearer {rust_backend.integration_token}",
+        "Idempotency-Key": "provider-disabled-admission-regression",
+        "X-Shipments-Actor": "ha:admission-regression-user",
+    }
+    async with session.post(
+        f"{rust_backend.origin}/v1/shipments",
+        headers=headers,
+        json={
+            "title": "Unverified parcel",
+            "direction": "inbound",
+            "tracking": {"number": "9400111899560000000000", "carrier": "USPS"},
+        },
+    ) as response:
+        assert response.status == 503
+    async with session.get(
+        f"{rust_backend.origin}/v1/shipments", headers=headers
+    ) as response:
+        assert response.status == 200
+        assert (await response.json())["items"] == []
 
 
 @pytest.mark.parametrize("rust_backend", [True], indirect=True, ids=["app"])

@@ -4,7 +4,7 @@ use dropshot::ResultsPage;
 use reqwest::Client;
 use shipments::{
     api,
-    models::{CreateShipment, Direction, SetOverride, Shipment, Status, Summary, Tracking},
+    models::{CreateShipment, Direction, InputTracking, SetOverride, Shipment, Status, Summary},
     store::Store,
 };
 
@@ -36,7 +36,7 @@ async fn direction_scopes_summaries_search_and_paginated_status_filters() {
                     merchant: None,
                     order_reference: None,
                     signature_required: None,
-                    tracking: Tracking {
+                    tracking: InputTracking {
                         carrier: Some("usps".parse().unwrap()),
                         number: format!("DIRECTION{index}"),
                     },

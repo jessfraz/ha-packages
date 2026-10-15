@@ -1,6 +1,8 @@
+pub mod admission;
 pub mod api;
 pub mod carrier;
 pub mod config;
+pub mod delivery;
 pub mod error;
 pub mod installation;
 pub mod logging;

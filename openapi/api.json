@@ -371,6 +371,32 @@
         ],
         "type": "object"
       },
+      "DeliveryDay": {
+        "additionalProperties": false,
+        "properties": {
+          "date": {
+            "type": "string"
+          },
+          "delivered_after": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "delivered_before": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "time_zone": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "date",
+          "delivered_after",
+          "delivered_before",
+          "time_zone"
+        ],
+        "type": "object"
+      },
       "DeliveryEstimate": {
         "description": "Small calendar projection; polling this never transfers tracking history.",
         "properties": {
@@ -480,7 +506,7 @@
           "snapshot": {
             "allOf": [
               {
-                "$ref": "#/components/schemas/Shipment_for_Nullable_Tracking"
+                "$ref": "#/components/schemas/Shipment_for_Nullable_Tracking_for_Nullable_Carrier"
               }
             ],
             "nullable": true
@@ -580,6 +606,15 @@
           "backup": {
             "$ref": "#/components/schemas/BackupReport"
           },
+          "delivery_day": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/DeliveryDay"
+              }
+            ],
+            "default": null,
+            "nullable": true
+          },
           "version": {
             "type": "string"
           }
@@ -601,7 +636,8 @@
         "enum": [
           "pending",
           "registered",
-          "rejected"
+          "rejected",
+          "configuration_required"
         ],
         "type": "string"
       },
@@ -629,7 +665,7 @@
         ],
         "type": "string"
       },
-      "Shipment_for_Nullable_Tracking": {
+      "Shipment_for_Nullable_Tracking_for_Nullable_Carrier": {
         "properties": {
           "archived": {
             "type": "boolean"
@@ -714,7 +750,7 @@
           "tracking": {
             "allOf": [
               {
-                "$ref": "#/components/schemas/Tracking"
+                "$ref": "#/components/schemas/Tracking_for_Nullable_Carrier"
               }
             ],
             "nullable": true
@@ -736,7 +772,7 @@
         ],
         "type": "object"
       },
-      "Shipment_for_Tracking": {
+      "Shipment_for_Tracking_for_Carrier": {
         "properties": {
           "archived": {
             "type": "boolean"
@@ -819,7 +855,7 @@
             "type": "string"
           },
           "tracking": {
-            "$ref": "#/components/schemas/Tracking"
+            "$ref": "#/components/schemas/Tracking_for_Carrier"
           },
           "updated_at": {
             "type": "string"
@@ -839,13 +875,13 @@
         ],
         "type": "object"
       },
-      "Shipment_for_TrackingResultsPage": {
+      "Shipment_for_Tracking_for_CarrierResultsPage": {
         "description": "A single page of results",
         "properties": {
           "items": {
             "description": "list of items on this page of results",
             "items": {
-              "$ref": "#/components/schemas/Shipment_for_Tracking"
+              "$ref": "#/components/schemas/Shipment_for_Tracking_for_Carrier"
             },
             "type": "array"
           },
@@ -1100,6 +1136,14 @@
           "credential_role": {
             "type": "string"
           },
+          "delivery_day": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/DeliveryDay"
+              }
+            ],
+            "nullable": true
+          },
           "pending_syncs": {
             "format": "int64",
             "type": "integer"
@@ -1124,24 +1168,6 @@
         ],
         "type": "object"
       },
-      "Tracking": {
-        "additionalProperties": false,
-        "properties": {
-          "carrier": {
-            "allOf": [
-              {
-                "$ref": "#/components/schemas/Carrier"
-              }
-            ],
-            "nullable": true
-          },
-          "number": {
-            "default": "",
-            "type": "string"
-          }
-        },
-        "type": "object"
-      },
       "TrackingLocation": {
         "properties": {
           "city": {
@@ -1162,6 +1188,40 @@
           "zip": {
             "default": null,
             "nullable": true,
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "Tracking_for_Carrier": {
+        "additionalProperties": false,
+        "properties": {
+          "carrier": {
+            "$ref": "#/components/schemas/Carrier"
+          },
+          "number": {
+            "default": "",
+            "type": "string"
+          }
+        },
+        "required": [
+          "carrier"
+        ],
+        "type": "object"
+      },
+      "Tracking_for_Nullable_Carrier": {
+        "additionalProperties": false,
+        "properties": {
+          "carrier": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Carrier"
+              }
+            ],
+            "nullable": true
+          },
+          "number": {
+            "default": "",
             "type": "string"
           }
         },
@@ -1190,7 +1250,7 @@
             "type": "string"
           },
           "tracking": {
-            "$ref": "#/components/schemas/Tracking"
+            "$ref": "#/components/schemas/Tracking_for_Nullable_Carrier"
           }
         },
         "type": "object"
@@ -1418,7 +1478,7 @@
             "$ref": "#/components/responses/Error"
           }
         },
-        "summary": "List EasyPost's canonical tracking carriers. Omit carrier when automatic detection is preferred.",
+        "summary": "List canonical carriers. Omit the input carrier to request provider detection.",
         "tags": [
           "shipments"
         ]
@@ -1656,6 +1716,25 @@
             }
           },
           {
+            "description": "Inclusive and exclusive UTC bounds over actual carrier delivery scans. Supply both bounds together.",
+            "in": "query",
+            "name": "delivered_after",
+            "schema": {
+              "format": "int64",
+              "nullable": true,
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "delivered_before",
+            "schema": {
+              "format": "int64",
+              "nullable": true,
+              "type": "integer"
+            }
+          },
+          {
             "in": "query",
             "name": "direction",
             "schema": {
@@ -1738,6 +1817,15 @@
             }
           },
           {
+            "description": "Filter by whether a shipment has a stored tracking failure, including retries.",
+            "in": "query",
+            "name": "tracking_issues",
+            "schema": {
+              "nullable": true,
+              "type": "boolean"
+            }
+          },
+          {
             "in": "query",
             "name": "tracking_number",
             "schema": {
@@ -1751,7 +1839,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Shipment_for_TrackingResultsPage"
+                  "$ref": "#/components/schemas/Shipment_for_Tracking_for_CarrierResultsPage"
                 }
               }
             },
@@ -1773,6 +1861,7 @@
         }
       },
       "post": {
+        "description": "attempts remain durable so retries can recover without duplicate trackers.",
         "operationId": "shipments_create",
         "requestBody": {
           "content": {
@@ -1789,7 +1878,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Shipment_for_Tracking"
+                  "$ref": "#/components/schemas/Shipment_for_Tracking_for_Carrier"
                 }
               }
             },
@@ -1811,7 +1900,7 @@
             "$ref": "#/components/responses/Error"
           }
         },
-        "summary": "Save a durable pending registration before contacting the tracking provider.",
+        "summary": "Resolve and verify tracking before saving a shipment. Uncertain provider",
         "tags": [
           "shipments"
         ]
@@ -1836,7 +1925,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Shipment_for_Tracking"
+                  "$ref": "#/components/schemas/Shipment_for_Tracking_for_Carrier"
                 }
               }
             },
@@ -1890,7 +1979,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Shipment_for_Tracking"
+                  "$ref": "#/components/schemas/Shipment_for_Tracking_for_Carrier"
                 }
               }
             },
@@ -1936,7 +2025,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Shipment_for_Tracking"
+                  "$ref": "#/components/schemas/Shipment_for_Tracking_for_Carrier"
                 }
               }
             },
@@ -1980,7 +2069,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Shipment_for_Tracking"
+                  "$ref": "#/components/schemas/Shipment_for_Tracking_for_Carrier"
                 }
               }
             },
@@ -2086,7 +2175,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Shipment_for_Tracking"
+                  "$ref": "#/components/schemas/Shipment_for_Tracking_for_Carrier"
                 }
               }
             },
@@ -2142,7 +2231,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Shipment_for_Tracking"
+                  "$ref": "#/components/schemas/Shipment_for_Tracking_for_Carrier"
                 }
               }
             },
@@ -2188,7 +2277,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Shipment_for_Tracking"
+                  "$ref": "#/components/schemas/Shipment_for_Tracking_for_Carrier"
                 }
               }
             },
@@ -2242,7 +2331,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Shipment_for_Tracking"
+                  "$ref": "#/components/schemas/Shipment_for_Tracking_for_Carrier"
                 }
               }
             },
@@ -2273,6 +2362,24 @@
       "get": {
         "operationId": "summary",
         "parameters": [
+          {
+            "in": "query",
+            "name": "delivered_after",
+            "schema": {
+              "format": "int64",
+              "nullable": true,
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "delivered_before",
+            "schema": {
+              "format": "int64",
+              "nullable": true,
+              "type": "integer"
+            }
+          },
           {
             "in": "query",
             "name": "direction",
