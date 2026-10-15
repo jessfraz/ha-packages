@@ -1006,8 +1006,8 @@ async function show(id, preserveView = false) {
   provider.append(element("summary", `Tracking connection · ${providerState}`));
   const fields = element("dl", undefined, "shipment-details");
   const detail = (label, value) => fields.append(element("dt", label), element("dd", value));
-  detail("Provider", "EasyPost");
-  detail("Registration", shipment.sync.registration_state === "registered" ? "Registered" : shipment.sync.registration_state === "rejected" ? "Needs attention; correct tracking details" : "Pending registration; saved locally");
+  detail("Provider", shipment.sync.provider === "easypost" ? "EasyPost" : "Tracking provider");
+  detail("Registration", shipment.sync.registration_state === "registered" ? "Registered" : shipment.sync.registration_state === "rejected" ? "Needs attention; review provider error" : "Pending registration; saved locally");
   if (shipment.sync.error_code) detail("Error code", shipment.sync.error_code);
   if (shipment.sync.provider_error_code) detail("Provider error code", shipment.sync.provider_error_code);
   if (shipment.sync.provider_status) detail("Provider response", `HTTP ${shipment.sync.provider_status}`);

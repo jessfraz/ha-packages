@@ -27,6 +27,8 @@ struct JsonLog<W> {
 #[derive(Default, Serialize)]
 struct Fields {
     #[serde(skip_serializing_if = "Option::is_none")]
+    provider: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     request_id: Option<Uuid>,
     #[serde(skip_serializing_if = "Option::is_none")]
     shipment_id: Option<Uuid>,
@@ -149,6 +151,7 @@ impl slog::Serializer for Fields {
         // Check the key before formatting it: ignored values can contain
         // secrets, addresses, body fragments, or provider error responses.
         match key.as_str() {
+            "provider" => self.provider = allowed(&value.to_string(), &["easypost"]),
             "req_id" | "request_id" => self.request_id = Uuid::parse_str(&value.to_string()).ok(),
             "shipment_id" => self.shipment_id = Uuid::parse_str(&value.to_string()).ok(),
             "method" => {

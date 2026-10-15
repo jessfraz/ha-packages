@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.5.2
+
+- Explain unsupported tracking as a provider capability issue, without claiming
+  the tracking number is invalid. Clarify existing rejected records on upgrade
+  while preserving their native errors, identity and retry state.
+- Put tracking behind a shared shipping API trait, with EasyPost's protocol,
+  pacing and recovery policy in its own implementation module. Preserve tracker
+  ownership and report the provider in API responses and redacted logs.
+- Keep reconciliation, cancellation and provider recovery deadlines intact.
+  EasyPost remains the only configured backend.
+
 ## 0.5.1
 
 - Look for an existing EasyPost tracker before every new registration, including

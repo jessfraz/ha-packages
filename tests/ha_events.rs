@@ -1,3 +1,5 @@
+use shipments::shipping_api::easypost::EasyPostClient;
+use shipments::shipping_api::types::Tracker;
 use std::{
     io::{Read, Write},
     net::{TcpListener, TcpStream},
@@ -20,7 +22,7 @@ use shipments::{
         StateEventPage, StateEventType, Status, Tracking, UpdateShipment,
     },
     store::Store,
-    sync::{EasyPostClient, SyncWorker, Tracker},
+    sync::SyncWorker,
 };
 use sqlx::{QueryBuilder, Row, Sqlite};
 
@@ -567,7 +569,7 @@ async fn real_carrier_worker_preserves_every_transition_and_ignores_identical_ob
         Status::Failure,
     ]);
     let client = EasyPostClient::for_loopback("example-provider-fixture", &provider.url).unwrap();
-    let worker = SyncWorker::new(fixture.store.pool().clone(), client);
+    let worker = SyncWorker::new(fixture.store.pool().clone(), std::sync::Arc::new(client));
     let shipment = fixture.shipment("EVENTS005").await;
     let mut shipment = fixture
         .store

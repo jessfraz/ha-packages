@@ -5,6 +5,7 @@ pub mod error;
 pub mod installation;
 pub mod logging;
 pub mod models;
+pub mod shipping_api;
 pub mod store;
 pub mod supervisor;
 pub mod sync;

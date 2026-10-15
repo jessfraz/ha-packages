@@ -2,9 +2,10 @@ use anyhow::{Context as _, Result};
 use shipments::{
     api,
     config::Config,
+    shipping_api::{ShippingApi, easypost::EasyPostClient},
     store::Store,
     supervisor::Supervisor,
-    sync::{EasyPostClient, SyncWorker},
+    sync::SyncWorker,
 };
 use std::sync::Arc;
 
@@ -21,9 +22,12 @@ async fn main() -> Result<()> {
         .api_token
         .as_deref()
         .context("missing owner credential")?;
-    let provider = config
+    let provider: Option<Arc<dyn ShippingApi>> = config
         .easypost_api_key
-        .map(|key| EasyPostClient::new(key).map(|client| client.with_logger(log.clone())))
+        .map(|key| {
+            EasyPostClient::new(key)
+                .map(|client| Arc::new(client.with_logger(log.clone())) as Arc<dyn ShippingApi>)
+        })
         .transpose()?;
     let mut context = api::Context::new(store.clone(), token, None, provider.clone());
     if let Some(token) = &config.integration_token {

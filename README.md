@@ -23,7 +23,7 @@ steps, EasyPost configuration, and standalone Docker instructions. The app
 dashboard's **Installation → Run checks** verifies the service, Home Assistant
 connection, app/integration version match, authentication, read-only EasyPost
 access, and backup coverage. Update both the app and HACS integration to
-**0.5.1**, then restart Home Assistant.
+**0.5.2**, then restart Home Assistant.
 
 The supervised integration adds a stable **Shipments** sidebar panel at
 `/shipments`, available to ordinary Home Assistant users. Status corrections,
@@ -226,7 +226,8 @@ failures are stored on the shipment instead of losing the create request:
 | --- | --- | --- |
 | HTTP 400 | `tracking_required` | Supply a tracking number; tracking cannot be cleared. |
 | HTTP 400 | `tracking_invalid` | Check the number's format; unsupported carrier values are also rejected by the enum. |
-| Shipment sync | `tracking_unsupported`, `tracking_invalid`, `tracking_carrier_mismatch`, `tracking_carrier_ambiguous` | Correct the number or specify the right carrier. |
+| Shipment sync | `tracking_unsupported` | The configured provider could not identify a supported carrier. Check carrier support and account requirements; this does not establish that the tracking number is invalid. |
+| Shipment sync | `tracking_invalid`, `tracking_carrier_mismatch`, `tracking_carrier_ambiguous` | Correct the number or specify the right carrier. |
 | Shipment sync | `tracking_test_key`, `tracking_carrier_account_required`, `tracking_carrier_credentials_required` | Fix the EasyPost key, select the appropriate carrier choice, or configure its account. |
 | Shipment sync | `provider_http`, `provider_timeout`, `provider_connection`, `provider_invalid_response` | The app retries with backoff; these do not establish that a number is invalid. |
 | Shipment sync | `registration_ambiguous`, `registration_expired` | Registration needs review; the app will not risk another paid registration automatically. |
@@ -325,6 +326,24 @@ Tracked records and their existing history are preserved. Back up before
 upgrading.
 
 ## Development
+
+Tracking backends implement `ShippingApi` in `src/shipping_api/mod.rs`.
+`easypost.rs` owns EasyPost authentication, wire formats, carrier encoding,
+tracker validation, shared request pacing and registration recovery. Shared
+observations and errors live in `types.rs` and `error.rs`. The worker uses the
+trait and stores provider ownership with each tracking identity.
+
+Reconciliation must establish a confirmed match or authoritative absence.
+Before a provider write, the implementation reserves its request slot, the
+worker verifies the shipment's lease and generation, and the reservation
+checks its provider's recovery deadline before sending. Dropping a reservation
+cancels it without a write. Providers must share pacing across request-scoped
+clients. Never try a different provider automatically after an uncertain
+registration outcome.
+
+EasyPost is the only implemented backend. Another backend, such as AfterShip,
+belongs in its own file beside `easypost.rs`; its carrier mapping, credentials,
+recovery guarantees and configuration must be verified before enabling it.
 
 ```sh
 nix develop

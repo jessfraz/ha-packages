@@ -1,0 +1,59 @@
+use std::{future::Future, pin::Pin};
+
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
+
+use crate::{
+    carrier::Carrier,
+    models::{CarrierTracking, Status},
+};
+
+pub type ApiFuture<'a, T> =
+    Pin<Box<dyn Future<Output = Result<T, crate::shipping_api::error::Error>> + Send + 'a>>;
+
+/// Durable tracker ownership, separate from the package carrier. Add providers
+/// only when an implementation and configuration are available.
+#[derive(
+    Clone, Copy, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq, sqlx::Type,
+)]
+#[serde(rename_all = "snake_case")]
+#[sqlx(rename_all = "lowercase")]
+pub enum ProviderId {
+    #[default]
+    #[serde(rename = "easypost")]
+    EasyPost,
+}
+
+impl ProviderId {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::EasyPost => "easypost",
+        }
+    }
+
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::EasyPost => "EasyPost",
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct Registration {
+    pub tracking_number: String,
+    pub carrier: Option<Carrier>,
+    /// Durable first attempt, preserved across uncertain results and restarts.
+    pub started_at: i64,
+}
+
+/// Normalized observation. IDs are opaque to the worker; implementations must
+/// validate identity and URLs before returning an observation.
+#[derive(Debug)]
+pub struct Tracker {
+    pub id: String,
+    pub tracking_code: String,
+    pub carrier: Carrier,
+    pub status: Status,
+    pub public_url: Option<String>,
+    pub carrier_tracking: CarrierTracking,
+}

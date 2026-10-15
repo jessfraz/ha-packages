@@ -73,7 +73,7 @@ paired, check the integration for a connection or authentication error.
 
 Version mismatch is a separate warning: connectivity and authentication can
 pass while the two installed versions differ. Update both the app through the
-App Store and the integration through HACS to **0.5.1**, then restart Home
+App Store and the integration through HACS to **0.5.2**, then restart Home
 Assistant. Without a recent integration check-in, the version match is
 unverified.
 
@@ -274,7 +274,7 @@ docker run --detach --name shipments --restart unless-stopped \
   --env SHIPMENTS_API_TOKEN \
   --env SHIPMENTS_INTEGRATION_TOKEN \
   --env EASYPOST_API_KEY \
-  ghcr.io/jessfraz/ha-packages:0.5.1
+  ghcr.io/jessfraz/ha-packages:0.5.2
 ```
 
 Open `http://127.0.0.1:8080` and enter the owner API token. Save both tokens in

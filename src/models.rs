@@ -178,6 +178,7 @@ pub enum RegistrationState {
 
 #[derive(Clone, Debug, Serialize, JsonSchema)]
 pub struct SyncState {
+    pub provider: crate::shipping_api::types::ProviderId,
     pub registration_state: RegistrationState,
     pub registration_started_at: Option<i64>,
     pub error_code: Option<String>,
@@ -195,6 +196,8 @@ impl<'de> Deserialize<'de> for SyncState {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         #[derive(Deserialize)]
         struct StoredSyncState {
+            #[serde(default)]
+            provider: crate::shipping_api::types::ProviderId,
             registration_state: Option<RegistrationState>,
             registration_started_at: Option<i64>,
             error_code: Option<String>,
@@ -217,6 +220,7 @@ impl<'de> Deserialize<'de> for SyncState {
                     RegistrationState::Pending
                 });
         Ok(Self {
+            provider: value.provider,
             registration_state,
             registration_started_at: value.registration_started_at,
             error_code: value.error_code,
