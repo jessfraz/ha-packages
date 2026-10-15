@@ -84,12 +84,13 @@ class ShipmentsCoordinator(DataUpdateCoordinator[dict[str, int]]):
         # The validated current page restores it before dispatching transitions.
         self.event_available = False
         try:
+            # Diagnose a release mismatch before reading newer API projections.
+            await self._async_check_version()
             summary = await self._async_summary()
             for direction, keys in DIRECTION_SUMMARY_KEYS.items():
                 counts = await self._async_summary(direction)
                 summary.update({f"{direction}_{key}": counts[key] for key in keys})
             estimates = await self._async_estimates()
-            await self._async_check_version()
             await self._async_report_presence()
         except (ClientError, TimeoutError, ResponseTooLarge, ValueError) as err:
             raise UpdateFailed("Cannot read the backend state") from err
