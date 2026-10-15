@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.3.1
+
+- Share EasyPost concurrency and rate-limit protection across tracking checks,
+  tracking verification, and connection checks. Respect provider cooldowns and
+  give callers a clear retry time without saving unverified input.
+- Coalesce manual refreshes with a persistent one-minute cooldown, including
+  failed checks on terminal shipments.
+- Spread polling with per-shipment jitter and slow unchanged unknown and
+  pre-transit labels after two days and a week. Status changes restore the
+  normal schedule; delivered and archived shipments still stop polling.
+
 ## 0.3.0
 
 - Require a tracking number and EasyPost acceptance before creating a shipment

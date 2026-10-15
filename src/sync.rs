@@ -2,11 +2,15 @@
 //! a database transaction, and a generation/token fence rejects stale results.
 
 use std::net::IpAddr;
+use std::sync::Arc;
 use std::time::Duration;
 
-use reqwest::{Client, Response, Url};
+use reqwest::{Client, RequestBuilder, Response, Url};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use sqlx::{FromRow, SqlitePool};
+use tokio::sync::Mutex;
+use tokio::time::Instant;
 use uuid::Uuid;
 
 use crate::error::Error;
@@ -32,6 +36,8 @@ pub enum SyncError {
         status: u16,
         retry_after: Option<i64>,
     },
+    #[error("EasyPost requests are paused; retry in {retry_after} seconds")]
+    Throttled { retry_after: i64 },
     #[error(transparent)]
     Rejected(#[from] TrackerRejection),
     #[error("EasyPost response exceeded the size limit")]
@@ -89,6 +95,13 @@ pub struct EasyPostClient {
     client: Client,
     api_key: String,
     base: Url,
+    requests: Arc<Mutex<RequestSchedule>>,
+}
+
+struct RequestSchedule {
+    next_start: Instant,
+    cooldown: Option<Instant>,
+    rate_limits: u32,
 }
 
 /// The subset of the tracker contract used by the registry. Carrier-provided
@@ -168,6 +181,76 @@ impl EasyPostClient {
             client,
             api_key,
             base,
+            requests: Arc::new(Mutex::new(RequestSchedule {
+                next_start: Instant::now(),
+                cooldown: None,
+                rate_limits: 0,
+            })),
+        })
+    }
+
+    // All clones share one outbound slot, including API verification and health
+    // checks. Reject contention instead of holding an unbounded request queue or
+    // waiting out a provider cooldown inside a shipment's lease.
+    async fn send(&self, request: RequestBuilder) -> Result<Vec<u8>, SyncError> {
+        let mut schedule = self
+            .requests
+            .try_lock()
+            .map_err(|_| SyncError::Throttled { retry_after: 1 })?;
+        if let Some(until) = schedule.cooldown.filter(|until| *until > Instant::now()) {
+            let remaining = until.saturating_duration_since(Instant::now());
+            return Err(SyncError::Throttled {
+                retry_after: i64::try_from(remaining.as_secs()).unwrap_or(MAX_RETRY_SECONDS) + 1,
+            });
+        }
+        tokio::time::sleep_until(schedule.next_start).await;
+        schedule.next_start = Instant::now() + Duration::from_secs(1);
+        let result = match request.send().await {
+            Ok(response) => Self::read_body(response).await,
+            Err(error) => Err(redact_request_error(error)),
+        };
+        match result {
+            Err(SyncError::Http {
+                status: 429,
+                retry_after,
+            }) => {
+                schedule.rate_limits = schedule.rate_limits.saturating_add(1);
+                let delay = 60_i64
+                    .saturating_mul(2_i64.saturating_pow(schedule.rate_limits.saturating_sub(1)))
+                    .clamp(60, MAX_RETRY_SECONDS)
+                    .max(retry_after.unwrap_or(0));
+                schedule.cooldown =
+                    Some(Instant::now() + Duration::from_secs(delay.unsigned_abs()));
+                Err(SyncError::Http {
+                    status: 429,
+                    retry_after: Some(delay),
+                })
+            }
+            Err(SyncError::Http {
+                status,
+                retry_after: Some(delay),
+            }) => {
+                schedule.cooldown =
+                    Some(Instant::now() + Duration::from_secs(delay.unsigned_abs()));
+                Err(SyncError::Http {
+                    status,
+                    retry_after: Some(delay),
+                })
+            }
+            Ok(body) => {
+                schedule.rate_limits = 0;
+                schedule.cooldown = None;
+                Ok(body)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    fn blocked(&self) -> bool {
+        self.requests.try_lock().map_or(true, |schedule| {
+            schedule
+                .cooldown
+                .is_some_and(|until| until > Instant::now())
         })
     }
 
@@ -178,15 +261,12 @@ impl EasyPostClient {
             .base
             .join("trackers")
             .map_err(|_| SyncError::Configuration)?;
-        let response = self
+        let request = self
             .client
             .get(url)
             .query(&[("page_size", 1_u8)])
-            .basic_auth(&self.api_key, Some(""))
-            .send()
-            .await
-            .map_err(redact_request_error)?;
-        let page: TrackerPage = serde_json::from_slice(&Self::read_body(response).await?)
+            .basic_auth(&self.api_key, Some(""));
+        let page: TrackerPage = serde_json::from_slice(&self.send(request).await?)
             .map_err(|_| SyncError::InvalidConnectionResponse)?;
         if page.trackers.len() > 1 {
             return Err(SyncError::InvalidConnectionResponse);
@@ -203,7 +283,7 @@ impl EasyPostClient {
             .base
             .join("trackers")
             .map_err(|_| SyncError::Configuration)?;
-        let response = self
+        let request = self
             .client
             .post(url)
             .basic_auth(&self.api_key, Some(""))
@@ -212,11 +292,8 @@ impl EasyPostClient {
                     tracking_code,
                     carrier,
                 },
-            })
-            .send()
-            .await
-            .map_err(redact_request_error)?;
-        let tracker = Self::read_tracker(response, tracking_code).await?;
+            });
+        let tracker = Self::read_tracker(&self.send(request).await?, tracking_code)?;
         if carrier.is_some_and(|carrier| !carrier.eq_ignore_ascii_case(&tracker.carrier)) {
             return Err(TrackerRejection::CarrierCodeMismatch.into());
         }
@@ -239,23 +316,17 @@ impl EasyPostClient {
             .map_err(|_| SyncError::Configuration)?
             .pop_if_empty()
             .push(tracker_id);
-        let response = self
-            .client
-            .get(url)
-            .basic_auth(&self.api_key, Some(""))
-            .send()
-            .await
-            .map_err(redact_request_error)?;
-        let tracker = Self::read_tracker(response, tracking_code).await?;
+        let request = self.client.get(url).basic_auth(&self.api_key, Some(""));
+        let tracker = Self::read_tracker(&self.send(request).await?, tracking_code)?;
         if tracker.id != tracker_id {
             return Err(SyncError::InvalidResponse);
         }
         Ok(tracker)
     }
 
-    async fn read_tracker(response: Response, tracking_code: &str) -> Result<Tracker, SyncError> {
-        let mut tracker: Tracker = serde_json::from_slice(&Self::read_body(response).await?)
-            .map_err(|_| SyncError::InvalidResponse)?;
+    fn read_tracker(body: &[u8], tracking_code: &str) -> Result<Tracker, SyncError> {
+        let mut tracker: Tracker =
+            serde_json::from_slice(body).map_err(|_| SyncError::InvalidResponse)?;
         if !valid_tracker_id(&tracker.id)
             || tracker.tracking_code != tracking_code
             || tracker.carrier.trim().is_empty()
@@ -346,14 +417,26 @@ fn redact_request_error(error: reqwest::Error) -> SyncError {
     }
 }
 
-pub(crate) fn poll_delay(status: Status) -> Option<i64> {
-    if status.is_terminal() {
-        None
+pub(crate) fn poll_delay(status: Status, unchanged_seconds: i64, shipment_id: &str) -> Option<i64> {
+    let base = if status.is_terminal() {
+        return None;
     } else if status == Status::OutForDelivery {
-        Some(5 * 60)
+        5 * 60
+    } else if matches!(status, Status::Unknown | Status::PreTransit)
+        && unchanged_seconds >= 7 * 86400
+    {
+        6 * 60 * 60
+    } else if matches!(status, Status::Unknown | Status::PreTransit)
+        && unchanged_seconds >= 2 * 86400
+    {
+        2 * 60 * 60
     } else {
-        Some(30 * 60)
-    }
+        30 * 60
+    };
+    // A stable per-shipment offset spreads batches out without new random state.
+    // Only add delay, so jitter never increases the request rate.
+    let hash = Sha256::digest(shipment_id.as_bytes());
+    Some(base + i64::from(u16::from_be_bytes([hash[0], hash[1]])) % (base / 10 + 1))
 }
 
 #[derive(FromRow)]
@@ -372,6 +455,7 @@ struct CurrentSync {
     tracking_carrier: Option<String>,
     override_status: Option<String>,
     attempts: i64,
+    status_age: i64,
 }
 
 #[derive(Clone)]
@@ -388,8 +472,11 @@ impl SyncWorker {
     /// Attempt one due shipment. Multiple workers can tick concurrently. A
     /// dropped tick leaves a durable lease that another worker can reclaim.
     pub async fn tick(&self) -> Result<bool, Error> {
+        if self.client.blocked() {
+            return Ok(false);
+        }
         let claim = sqlx::query_as::<_, Claim>(
-            "UPDATE shipments SET lease_token = ?, lease_until = unixepoch() + ?
+            "UPDATE shipments SET lease_token = ?, lease_until = unixepoch() + ?, last_attempt_at = unixepoch()
              WHERE id = (
                  SELECT id FROM shipments
                  WHERE archived = 0 AND tracking_number IS NOT NULL
@@ -430,7 +517,8 @@ impl SyncWorker {
             "UPDATE shipments SET lease_until = lease_until
              WHERE id = ? AND tracking_generation = ? AND lease_token = ?
                AND lease_until > unixepoch() AND archived = 0
-             RETURNING carrier_status, tracking_carrier, override_status, attempts",
+             RETURNING carrier_status, tracking_carrier, override_status, attempts,
+                       max(0, unixepoch() - coalesce(unixepoch(status_since), unixepoch())) AS status_age",
         )
         .bind(&claim.id)
         .bind(claim.tracking_generation)
@@ -463,7 +551,15 @@ impl SyncWorker {
                 let next_delay = if override_terminal {
                     None
                 } else {
-                    poll_delay(tracker.status)
+                    poll_delay(
+                        tracker.status,
+                        if previous_status == Some(tracker.status) {
+                            current.status_age
+                        } else {
+                            0
+                        },
+                        &claim.id,
+                    )
                 };
                 sqlx::query(
                     "UPDATE shipments SET tracker_id = ?, carrier_status = ?,
@@ -471,6 +567,8 @@ impl SyncWorker {
                          revision = revision + ?,
                          updated_at = CASE WHEN ? THEN strftime('%Y-%m-%dT%H:%M:%fZ', 'now') ELSE updated_at END,
                          last_success_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
+                         last_attempt_at = unixepoch(),
+                         status_since = CASE WHEN carrier_status = ? THEN coalesce(status_since, strftime('%Y-%m-%dT%H:%M:%fZ', 'now')) ELSE strftime('%Y-%m-%dT%H:%M:%fZ', 'now') END,
                          last_error = NULL, attempts = 0, next_attempt_at = unixepoch() + ?,
                          lease_token = NULL, lease_until = NULL
                      WHERE id = ?",
@@ -481,6 +579,7 @@ impl SyncWorker {
                 .bind(&tracker.public_url)
                 .bind(i64::from(changed))
                 .bind(changed)
+                .bind(&status)
                 .bind(next_delay)
                 .bind(&claim.id)
                 .execute(&mut *transaction)
@@ -509,6 +608,13 @@ impl SyncWorker {
                         .await?;
                 }
             }
+            Err(SyncError::Throttled { retry_after }) => {
+                // Another API request took the shared slot after this claim.
+                // Reschedule without counting a provider failure or changing
+                // the user's last error, and release the claim normally.
+                sqlx::query("UPDATE shipments SET next_attempt_at = CASE WHEN next_attempt_at IS NOT NULL THEN unixepoch() + ? END, lease_token = NULL, lease_until = NULL WHERE id = ?")
+                    .bind(retry_after).bind(&claim.id).execute(&mut *transaction).await?;
+            }
             Err(error) => {
                 let attempts = current.attempts.saturating_add(1);
                 let exponential =
@@ -526,7 +632,7 @@ impl SyncWorker {
                 let delay = (!terminal)
                     .then_some(exponential.clamp(60, MAX_RETRY_SECONDS).max(retry_after));
                 sqlx::query(
-                    "UPDATE shipments SET last_error = ?, attempts = ?,
+                    "UPDATE shipments SET last_error = ?, attempts = ?, last_attempt_at = unixepoch(),
                          next_attempt_at = unixepoch() + ?, lease_token = NULL, lease_until = NULL
                      WHERE id = ?",
                 )
@@ -540,5 +646,116 @@ impl SyncWorker {
         }
         transaction.commit().await?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::{
+        models::{CreateShipment, SetOverride, Status, Tracking},
+        store::Store,
+        sync::{Claim, EasyPostClient, SyncError, SyncWorker, poll_delay},
+    };
+
+    #[test]
+    fn polling_offsets_are_stable_bounded_and_spread_a_batch() {
+        let delays: Vec<_> = (0..20)
+            .map(|index| poll_delay(Status::InTransit, 0, &format!("shipment-{index}")).unwrap())
+            .collect();
+        assert!(delays.iter().all(|delay| (1800..=1980).contains(delay)));
+        assert!(delays.iter().any(|delay| *delay != delays[0]));
+        assert_eq!(
+            poll_delay(Status::InTransit, 0, "shipment-0"),
+            Some(delays[0])
+        );
+        assert_eq!(poll_delay(Status::Delivered, 0, "shipment-0"), None);
+    }
+
+    #[tokio::test]
+    async fn local_throttle_preserves_terminal_cancellation_and_explicit_probe() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = Store::open(&directory.path().join("registry.sqlite3"))
+            .await
+            .unwrap();
+        let shipment = store
+            .create(
+                CreateShipment {
+                    title: "Parcel".into(),
+                    merchant: None,
+                    order_reference: None,
+                    tracking: Tracking {
+                        number: "TERMINAL-TRACK".into(),
+                        carrier: None,
+                    },
+                    source: None,
+                },
+                "owner",
+                "terminal-race",
+                None,
+            )
+            .await
+            .unwrap();
+        let claim = Claim {
+            id: shipment.id.to_string(),
+            tracking_generation: 0,
+            tracking_number: shipment.tracking.number,
+            tracking_carrier: None,
+            tracker_id: None,
+            lease_token: "test-claim".into(),
+        };
+        sqlx::query("UPDATE shipments SET lease_token=?,lease_until=unixepoch()+60 WHERE id=?")
+            .bind(&claim.lease_token)
+            .bind(&claim.id)
+            .execute(store.pool())
+            .await
+            .unwrap();
+        let terminal = store
+            .set_override(
+                shipment.id,
+                shipment.revision,
+                Some(SetOverride {
+                    status: Status::Delivered,
+                    reason: "Received".into(),
+                }),
+                "owner",
+            )
+            .await
+            .unwrap();
+        let worker = SyncWorker::new(
+            store.pool().clone(),
+            EasyPostClient::new("unused-key").unwrap(),
+        );
+        worker
+            .complete(&claim, Err(SyncError::Throttled { retry_after: 1 }))
+            .await
+            .unwrap();
+        assert!(
+            store
+                .get(shipment.id)
+                .await
+                .unwrap()
+                .sync
+                .next_attempt_at
+                .is_none()
+        );
+
+        store
+            .refresh(shipment.id, terminal.revision, "owner")
+            .await
+            .unwrap();
+        sqlx::query("UPDATE shipments SET lease_token=?,lease_until=unixepoch()+60 WHERE id=?")
+            .bind(&claim.lease_token)
+            .bind(&claim.id)
+            .execute(store.pool())
+            .await
+            .unwrap();
+        worker
+            .complete(&claim, Err(SyncError::Throttled { retry_after: 1 }))
+            .await
+            .unwrap();
+        let deferred = store.get(shipment.id).await.unwrap();
+        assert!(deferred.sync.next_attempt_at.is_some());
+        assert_eq!(deferred.sync.attempts, 0);
+        assert!(deferred.sync.last_error.is_none());
     }
 }

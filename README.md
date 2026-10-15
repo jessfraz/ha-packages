@@ -153,9 +153,23 @@ the transaction, and checks the lease and tracking generation before saving.
 An old response cannot overwrite a corrected tracking number or archived
 record. Failed requests retain the local record and retry with backoff from
 one minute to six hours. Ordinary polling is every 30 minutes, or five minutes
-when out for delivery. Terminal carrier states and terminal manual corrections
-stop polling. An explicit refresh allows one further check and respects a
-pending error backoff.
+when out for delivery, with up to 10% added per-shipment jitter. Unknown and
+pre-transit labels that keep the same status slow to two-hour checks after two
+days and six-hour checks after a week. A status change restores its normal
+schedule. Terminal carrier states and terminal manual corrections stop polling.
+
+All EasyPost operations share one outbound slot, with at least one second
+between request starts. A rate-limit response pauses polling, new tracking
+verification, and connection checks together, honoring `Retry-After` with a
+minimum one-minute exponential cooldown. During a pause or an in-flight
+request, tracking verification returns `tracking_verification_rate_limited`
+with `Retry-After`; no changes are saved. The shared provider pause lasts for
+the current process; shipment retries and refresh cooldowns survive restarts.
+
+Manual refreshes coalesce and wait at least one minute after the last provider
+attempt, respecting longer pending error backoff and earlier scheduled checks.
+An explicit terminal refresh allows one further check. Repeated failed terminal
+checks also respect the cooldown.
 
 Home Assistant uses cold backups: the app stops while its persistent `/data`
 directory is copied. For standalone operation, stop the service before copying

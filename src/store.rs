@@ -437,7 +437,7 @@ impl Store {
             .bind(shipment.tracking.carrier.as_deref()).bind(&shipment.tracking.number)
             .bind(id.to_string()).execute(&mut *tx).await.map_err(unique_error)?;
         if changed_tracking {
-            sqlx::query("UPDATE shipments SET tracking_generation=tracking_generation+1,tracker_id=NULL,tracking_url=NULL,carrier_status=NULL,last_success_at=NULL,last_error=NULL,attempts=0,lease_until=NULL,lease_token=NULL,next_attempt_at=CASE WHEN tracking_number IS NOT NULL AND archived=0 AND ? THEN unixepoch() END WHERE id=?")
+            sqlx::query("UPDATE shipments SET tracking_generation=tracking_generation+1,tracker_id=NULL,tracking_url=NULL,carrier_status=NULL,status_since=NULL,last_success_at=NULL,last_attempt_at=NULL,last_error=NULL,attempts=0,lease_until=NULL,lease_token=NULL,next_attempt_at=CASE WHEN tracking_number IS NOT NULL AND archived=0 AND ? THEN unixepoch() END WHERE id=?")
                 .bind(!shipment.status_override.as_ref().is_some_and(|value|value.status.is_terminal())).bind(id.to_string()).execute(&mut *tx).await?;
             if let Some(tracker) = verified {
                 Self::save_verification(&mut tx, id, tracker).await?;
@@ -466,9 +466,9 @@ impl Store {
         id: Uuid,
         tracker: &Tracker,
     ) -> Result<(), Error> {
-        sqlx::query(r#"UPDATE shipments SET tracker_id=?,tracking_url=?,carrier_status=?,last_success_at=strftime('%Y-%m-%dT%H:%M:%fZ','now'),last_error=NULL,attempts=0,next_attempt_at=CASE WHEN archived=1 OR override_status IN ('"delivered"','"return_to_sender"','"cancelled"') THEN NULL ELSE unixepoch()+? END WHERE id=?"#)
+        sqlx::query(r#"UPDATE shipments SET tracker_id=?,tracking_url=?,carrier_status=?,status_since=strftime('%Y-%m-%dT%H:%M:%fZ','now'),last_success_at=strftime('%Y-%m-%dT%H:%M:%fZ','now'),last_attempt_at=unixepoch(),last_error=NULL,attempts=0,next_attempt_at=CASE WHEN archived=1 OR override_status IN ('"delivered"','"return_to_sender"','"cancelled"') THEN NULL ELSE unixepoch()+? END WHERE id=?"#)
             .bind(&tracker.id).bind(&tracker.public_url).bind(serde_json::to_string(&tracker.status)?)
-            .bind(crate::sync::poll_delay(tracker.status)).bind(id.to_string()).execute(&mut **tx).await?;
+            .bind(crate::sync::poll_delay(tracker.status, 0, &id.to_string())).bind(id.to_string()).execute(&mut **tx).await?;
         Ok(())
     }
 
@@ -652,9 +652,22 @@ impl Store {
                 "refresh requires an unarchived shipment with tracking".into(),
             ));
         }
-        // A pending retry remains rate-limited; repeated client refreshes coalesce.
-        sqlx::query("UPDATE shipments SET next_attempt_at=CASE WHEN last_error IS NOT NULL AND next_attempt_at>unixepoch() THEN next_attempt_at ELSE min(coalesce(next_attempt_at,unixepoch()),unixepoch()) END WHERE id=?")
-            .bind(id.to_string()).execute(&mut *tx).await?;
+        // Refreshes coalesce without disturbing an in-flight check or a retry.
+        // An earlier scheduled check stays earlier; otherwise wait at least one
+        // minute after the last provider attempt, even for terminal shipments.
+        sqlx::query(
+            "UPDATE shipments SET next_attempt_at=CASE
+                 WHEN lease_until>unixepoch()
+                   OR (last_error IS NOT NULL AND next_attempt_at>unixepoch())
+                     THEN next_attempt_at
+                 WHEN next_attempt_at>unixepoch()
+                     THEN min(next_attempt_at,max(unixepoch(),coalesce(last_attempt_at+60,unixepoch())))
+                 ELSE max(unixepoch(),coalesce(last_attempt_at+60,unixepoch()))
+             END WHERE id=?",
+        )
+        .bind(id.to_string())
+        .execute(&mut *tx)
+        .await?;
         Self::event_in(
             &mut tx,
             id,
