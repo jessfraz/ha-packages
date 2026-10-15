@@ -123,7 +123,7 @@ docker run --detach --name shipments --restart unless-stopped \
   --publish 127.0.0.1:8080:8080 \
   --mount type=volume,source=shipments-data,target=/data \
   --env SHIPMENTS_API_TOKEN \
-  ghcr.io/jessfraz/ha-packages:0.2.0
+  ghcr.io/jessfraz/ha-packages:0.2.1
 ```
 
 Open `http://127.0.0.1:8080` and enter the token. Save it in your password

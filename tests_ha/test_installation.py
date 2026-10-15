@@ -70,7 +70,7 @@ async def inventory(hass: HomeAssistant, aiohttp_server, socket_enabled, monkeyp
         "custom_components.shipments.coordinator.is_hassio", lambda hass: True
     )
     monkeypatch.setattr(
-        "custom_components.shipments.coordinator.get_supervisor_client",
+        "homeassistant.components.hassio.get_supervisor_client",
         lambda hass: client,
     )
     return state

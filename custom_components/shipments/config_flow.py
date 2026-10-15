@@ -5,9 +5,7 @@ from collections.abc import Mapping
 from uuid import UUID
 
 import probatio as vol
-from aiohasupervisor import SupervisorError
 from aiohttp import ClientError
-from homeassistant.components.hassio import get_supervisor_client
 from homeassistant.config_entries import SOURCE_REAUTH, ConfigFlow, ConfigFlowResult
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.hassio import is_hassio
@@ -58,6 +56,9 @@ class ShipmentsConfigFlow(ConfigFlow, domain=DOMAIN):
         if not is_hassio(self.hass):
             error = "supervisor_required"
         else:
+            from aiohasupervisor import SupervisorError
+            from homeassistant.components.hassio import get_supervisor_client
+
             try:
                 async with asyncio.timeout(REQUEST_TIMEOUT_SECONDS):
                     discoveries = await get_supervisor_client(

@@ -6,9 +6,7 @@ import logging
 from datetime import timedelta
 from typing import Literal, TypedDict
 
-from aiohasupervisor import SupervisorError
 from aiohttp import ClientError
-from homeassistant.components.hassio import get_supervisor_client
 from homeassistant.config_entries import ConfigEntry, ConfigEntryState
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryAuthFailed
@@ -112,6 +110,9 @@ class ShipmentsCoordinator(DataUpdateCoordinator[dict[str, int]]):
             return {"status": "standalone", "last_backup": None}
         if not is_hassio(self.hass):
             return {"status": "unavailable", "last_backup": None}
+        from aiohasupervisor import SupervisorError
+        from homeassistant.components.hassio import get_supervisor_client
+
         try:
             async with asyncio.timeout(_BACKUP_TIMEOUT_SECONDS):
                 info = await get_supervisor_client(self.hass).backups.info()
