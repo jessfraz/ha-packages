@@ -73,7 +73,7 @@ paired, check the integration for a connection or authentication error.
 
 Version mismatch is a separate warning: connectivity and authentication can
 pass while the two installed versions differ. Update both the app through the
-App Store and the integration through HACS to **0.5.0**, then restart Home
+App Store and the integration through HACS to **0.5.1**, then restart Home
 Assistant. Without a recent integration check-in, the version match is
 unverified.
 
@@ -178,7 +178,11 @@ that choice or configure the carrier account; retrying does not fix missing
 credentials or mean that the number is invalid.
 
 Select **Save shipment** to commit it locally. Registration runs in the
-background; the pending badge remains until EasyPost accepts the number. New
+background; the pending badge remains until EasyPost confirms tracking. The
+app first looks for an existing matching tracker and adopts it when found,
+including for old failed creates that were never saved locally. It registers
+only after a complete lookup finds no match. A failed lookup backs off, and
+ambiguous matches need attention. New
 labels can be registered before their first scan. Provider outages keep the
 record and schedule retries. Unsupported or mismatched numbers remain visible
 with a clear error so you can correct them; malformed input is rejected before
@@ -270,7 +274,7 @@ docker run --detach --name shipments --restart unless-stopped \
   --env SHIPMENTS_API_TOKEN \
   --env SHIPMENTS_INTEGRATION_TOKEN \
   --env EASYPOST_API_KEY \
-  ghcr.io/jessfraz/ha-packages:0.5.0
+  ghcr.io/jessfraz/ha-packages:0.5.1
 ```
 
 Open `http://127.0.0.1:8080` and enter the owner API token. Save both tokens in

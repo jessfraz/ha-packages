@@ -1,5 +1,7 @@
 """Constants for the Shipments adapter."""
 
+from .models import Direction
+
 DOMAIN = "shipments"
 CONF_BACKEND_URL = "backend_url"
 CONF_TOKEN = "token"
@@ -17,9 +19,9 @@ SUMMARY_KEYS = (
     "exceptions",
     "sync_errors",
 )
-DIRECTION_SUMMARY_KEYS = {
-    "inbound": ("active", "out_for_delivery", "exceptions"),
-    "outbound": ("active", "exceptions"),
+DIRECTION_SUMMARY_KEYS: dict[Direction, tuple[str, ...]] = {
+    Direction.INBOUND: ("active", "out_for_delivery", "exceptions"),
+    Direction.OUTBOUND: ("active", "exceptions"),
 }
 SENSOR_KEYS = SUMMARY_KEYS + tuple(
     f"{direction}_{key}"

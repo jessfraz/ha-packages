@@ -1175,8 +1175,14 @@ struct ProviderFixture {
 }
 #[derive(Default)]
 struct ProviderState {
-    requests: Vec<RegisterInput>,
-    replies: std::collections::VecDeque<(u16, String)>,
+    requests: Vec<Method>,
+    registration_replies: std::collections::VecDeque<(u16, String)>,
+}
+
+#[derive(serde::Serialize)]
+struct EmptyTrackerPage {
+    trackers: Vec<RegisteredTracker>,
+    has_more: bool,
 }
 impl ProviderFixture {
     fn new() -> Self {
@@ -1203,7 +1209,9 @@ impl ProviderFixture {
                     bytes.push(byte[0]);
                 }
                 let headers = String::from_utf8(bytes).unwrap();
-                assert!(headers.starts_with("POST /trackers "));
+                let mut line = headers.lines().next().unwrap().split_whitespace();
+                let method: Method = line.next().unwrap().parse().unwrap();
+                let path = line.next().unwrap();
                 let length: usize = headers
                     .lines()
                     .find_map(|line| {
@@ -1211,27 +1219,45 @@ impl ProviderFixture {
                             .strip_prefix("content-length: ")
                             .map(str::to_owned)
                     })
-                    .unwrap()
-                    .parse()
-                    .unwrap();
+                    .map_or(0, |length| length.parse().unwrap());
                 let mut bytes = vec![0; length];
                 stream.read_exact(&mut bytes).unwrap();
-                let request: RegisterRequest = serde_json::from_slice(&bytes).unwrap();
                 let mut state = thread_state.lock().unwrap();
-                state.requests.push(request.tracker.clone());
-                let (status, body) = state.replies.pop_front().unwrap_or_else(|| {
+                state.requests.push(method.clone());
+                let (status, body) = if method == Method::GET {
+                    let url = reqwest::Url::parse(&format!("http://provider{path}")).unwrap();
+                    assert_eq!(url.path(), "/trackers");
+                    let query: std::collections::HashMap<_, _> = url.query_pairs().collect();
+                    assert!(query.contains_key("tracking_codes[]"));
+                    assert!(query.contains_key("start_datetime"));
+                    assert!(query.contains_key("end_datetime"));
+                    assert!(bytes.is_empty());
                     (
                         200,
-                        serde_json::to_string(&RegisteredTracker {
-                            id: format!("trk_{}", request.tracker.tracking_code),
-                            tracking_code: request.tracker.tracking_code,
-                            carrier: request.tracker.carrier.unwrap_or_else(|| "UPS".into()),
-                            status: Status::Unknown,
-                            public_url: "https://track.easypost.com/test-parcel".into(),
+                        serde_json::to_string(&EmptyTrackerPage {
+                            trackers: Vec::new(),
+                            has_more: false,
                         })
                         .unwrap(),
                     )
-                });
+                } else {
+                    assert_eq!(method, Method::POST);
+                    assert_eq!(path, "/trackers");
+                    let request: RegisterRequest = serde_json::from_slice(&bytes).unwrap();
+                    state.registration_replies.pop_front().unwrap_or_else(|| {
+                        (
+                            200,
+                            serde_json::to_string(&RegisteredTracker {
+                                id: format!("trk_{}", request.tracker.tracking_code),
+                                tracking_code: request.tracker.tracking_code,
+                                carrier: request.tracker.carrier.unwrap_or_else(|| "UPS".into()),
+                                status: Status::Unknown,
+                                public_url: "https://track.easypost.com/test-parcel".into(),
+                            })
+                            .unwrap(),
+                        )
+                    })
+                };
                 drop(state);
                 write!(stream, "HTTP/1.1 {status} response\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
             }
@@ -1251,11 +1277,14 @@ impl ProviderFixture {
     fn calls(&self) -> usize {
         self.state.lock().unwrap().requests.len()
     }
-    fn reply(&self, status: u16, body: impl Into<String>) {
+    fn methods(&self) -> Vec<Method> {
+        self.state.lock().unwrap().requests.clone()
+    }
+    fn reply_to_registration(&self, status: u16, body: impl Into<String>) {
         self.state
             .lock()
             .unwrap()
-            .replies
+            .registration_replies
             .push_back((status, body.into()));
     }
 }
@@ -1356,7 +1385,7 @@ async fn unscanned_tracking_is_saved_pending_then_registered_and_replays_make_no
     {
         let mut body = input(&format!("PENDING{index}"));
         body.tracking.carrier = None;
-        provider.reply(
+        provider.reply_to_registration(
             200,
             serde_json::to_string(&RegisteredTracker {
                 id: format!("trk_PENDING{index}"),
@@ -1382,7 +1411,7 @@ async fn unscanned_tracking_is_saved_pending_then_registered_and_replays_make_no
         assert!(created.tracking.carrier.is_none());
         assert!(created.sync.tracker_id.is_none());
         assert!(created.sync.last_success_at.is_none());
-        assert_eq!(provider.calls(), index);
+        assert_eq!(provider.calls(), index * 2);
         assert!(worker.tick().await.unwrap());
         let registered: Shipment = app
             .request(Method::GET, &format!("/v1/shipments/{}", created.id))
@@ -1415,7 +1444,7 @@ async fn unscanned_tracking_is_saved_pending_then_registered_and_replays_make_no
         assert_eq!(replay.id, created.id);
         assert_eq!(replay.revision, created.revision);
         assert_eq!(replay.sync.registration_state, RegistrationState::Pending);
-        assert_eq!(provider.calls(), index + 1);
+        assert_eq!(provider.calls(), (index + 1) * 2);
         let edit = app
             .request(Method::PATCH, &format!("/v1/shipments/{}", created.id))
             .header("If-Match", format!("\"{}\"", registered.revision))
@@ -1436,10 +1465,14 @@ async fn unscanned_tracking_is_saved_pending_then_registered_and_replays_make_no
             RegistrationState::Registered
         );
         assert_eq!(edited.sync.tracker_id, registered.sync.tracker_id);
-        assert_eq!(provider.calls(), index + 1);
+        assert_eq!(provider.calls(), (index + 1) * 2);
     }
     assert!(!worker.tick().await.unwrap());
-    assert_eq!(provider.calls(), 2);
+    assert_eq!(provider.calls(), 4);
+    assert_eq!(
+        provider.methods(),
+        [Method::GET, Method::POST, Method::GET, Method::POST]
+    );
     app.close().await;
 }
 
@@ -1473,7 +1506,7 @@ async fn tracking_changes_save_pending_and_later_provider_rejection_preserves_th
     assert_eq!(cleared.status(), StatusCode::BAD_REQUEST);
     let error: ApiFailure = cleared.json().await.unwrap();
     assert_eq!(error.error_code.as_deref(), Some("tracking_required"));
-    assert_eq!(provider.calls(), 1);
+    assert_eq!(provider.calls(), 2);
     let changed = UpdateShipment {
         tracking: Patch {
             value: Some(Some(Tracking {
@@ -1497,8 +1530,8 @@ async fn tracking_changes_save_pending_and_later_provider_rejection_preserves_th
     assert!(accepted.sync.tracker_id.is_none());
     assert!(accepted.sync.last_success_at.is_none());
     assert_eq!(accepted.revision, registered.revision + 1);
-    assert_eq!(provider.calls(), 1);
-    provider.reply(
+    assert_eq!(provider.calls(), 2);
+    provider.reply_to_registration(
         422,
         r#"{"error":{"code":"TRACKER.CARRIER_CODE_MISMATCH","message":"private-provider-detail"}}"#,
     );
@@ -1527,7 +1560,7 @@ async fn tracking_changes_save_pending_and_later_provider_rejection_preserves_th
     assert!(!message.contains("private-provider-detail"));
     assert!(!message.contains("NEWNUMBER123"));
     assert!(rejected.sync.next_attempt_at.is_none());
-    assert_eq!(provider.calls(), 2);
+    assert_eq!(provider.calls(), 4);
     let stale = app
         .request(Method::PATCH, &path)
         .header("If-Match", &version)
@@ -1537,7 +1570,11 @@ async fn tracking_changes_save_pending_and_later_provider_rejection_preserves_th
         .unwrap();
     assert_eq!(stale.status(), StatusCode::PRECONDITION_FAILED);
     assert!(!worker.tick().await.unwrap());
-    assert_eq!(provider.calls(), 2);
+    assert_eq!(provider.calls(), 4);
+    assert_eq!(
+        provider.methods(),
+        [Method::GET, Method::POST, Method::GET, Method::POST]
+    );
     app.close().await;
 }
 
@@ -1547,7 +1584,7 @@ async fn provider_outage_does_not_discard_a_valid_create() {
     app.provider_fixture
         .as_ref()
         .unwrap()
-        .reply(503, "unavailable");
+        .reply_to_registration(503, "unavailable");
     let response = app.create("Parcel503", "pending503").await;
     assert_eq!(
         response.status(),
@@ -1636,11 +1673,11 @@ async fn provider_failures_are_visible_on_durable_records_with_safe_codes_and_ht
             None,
         ),
     ] {
-        // Each upstream response is independent; a 429 pauses all operations
-        // sharing its provider client.
+        // Each registration POST follows a complete, empty lookup. Its response
+        // is independent; a 429 pauses all operations sharing this client.
         let app = App::new(None).await;
         let provider = app.provider_fixture.as_ref().unwrap();
-        provider.reply(status, body);
+        provider.reply_to_registration(status, body);
         let response = app.create("Parcel", "durable-input").await;
         assert_eq!(response.status(), StatusCode::CREATED);
         let created: Shipment = response.json().await.unwrap();
@@ -1676,7 +1713,8 @@ async fn provider_failures_are_visible_on_durable_records_with_safe_codes_and_ht
             .await
             .unwrap();
         assert_eq!(replay.id, created.id);
-        assert_eq!(provider.calls(), 1);
+        assert_eq!(provider.calls(), 2);
+        assert_eq!(provider.methods(), [Method::GET, Method::POST]);
         let summary: Summary = app
             .request(Method::GET, "/v1/summary")
             .send()
@@ -1700,12 +1738,13 @@ async fn shared_provider_cooldown_keeps_new_api_creates_durable_and_worker_reque
     let response = app.create("Limited parcel", "limited").await;
     assert_eq!(response.status(), StatusCode::CREATED);
     let first: Shipment = response.json().await.unwrap();
-    provider.reply(429, "private-provider-detail");
+    provider.reply_to_registration(429, "private-provider-detail");
     assert!(worker.tick().await.unwrap());
     let limited = app.store.get(first.id).await.unwrap();
     assert_eq!(limited.sync.provider_status, Some(429));
     assert!(limited.sync.next_attempt_at.is_some());
-    assert_eq!(provider.calls(), 1);
+    assert_eq!(provider.calls(), 2);
+    assert_eq!(provider.methods(), [Method::GET, Method::POST]);
 
     for (index, credential) in [OWNER, &app.agent, INTEGRATION].into_iter().enumerate() {
         let response = app
@@ -1735,7 +1774,8 @@ async fn shared_provider_cooldown_keeps_new_api_creates_durable_and_worker_reque
                 .unwrap();
         assert!(due);
     }
-    assert_eq!(provider.calls(), 1);
+    assert_eq!(provider.calls(), 2);
+    assert_eq!(provider.methods(), [Method::GET, Method::POST]);
     let summary: Summary = app
         .request(Method::GET, "/v1/summary")
         .send()

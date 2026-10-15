@@ -487,10 +487,23 @@ impl Provider {
         }
         let headers = String::from_utf8(headers).unwrap();
         assert!(headers.starts_with(if index == 0 {
-            "POST /v2/trackers "
+            "GET /v2/trackers?"
         } else {
             "GET /v2/trackers/trk_feed_fixture "
         }));
+        if index == 0 {
+            let path = headers.split_whitespace().nth(1).unwrap();
+            let url = reqwest::Url::parse(&format!("http://provider{path}")).unwrap();
+            let query: std::collections::HashMap<_, _> = url.query_pairs().collect();
+            assert_eq!(
+                query.get("tracking_codes[]").map(|value| value.as_ref()),
+                Some("EVENTS005")
+            );
+            assert_eq!(
+                query.get("carrier").map(|value| value.as_ref()),
+                Some("USPS")
+            );
+        }
         let length = headers
             .lines()
             .filter_map(|line| line.split_once(':'))
@@ -499,7 +512,8 @@ impl Provider {
         assert!(length <= 16 * 1024);
         let mut body = vec![0; length];
         stream.read_exact(&mut body).unwrap();
-        let body = serde_json::to_string(&TrackerReply {
+        assert!(body.is_empty());
+        let tracker = TrackerReply {
             id: "trk_feed_fixture",
             tracking_code: "EVENTS005",
             carrier: "USPS",
@@ -509,8 +523,23 @@ impl Provider {
             } else {
                 "2031-02-18T13:00:00Z"
             },
-        })
-        .unwrap();
+        };
+        let body = if index == 0 {
+            // The ordinary worker adopts an existing provider tracker. That
+            // first observation emits the same durable transition as a POST.
+            #[derive(Serialize)]
+            struct TrackerPage {
+                trackers: Vec<TrackerReply>,
+                has_more: bool,
+            }
+            serde_json::to_string(&TrackerPage {
+                trackers: vec![tracker],
+                has_more: false,
+            })
+            .unwrap()
+        } else {
+            serde_json::to_string(&tracker).unwrap()
+        };
         write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
     }
 }

@@ -9,7 +9,7 @@ use reqwest::{Client, RequestBuilder, Response, Url};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use sqlx::{FromRow, SqlitePool};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, MutexGuard};
 use tokio::time::Instant;
 use uuid::Uuid;
 
@@ -494,7 +494,12 @@ impl EasyPostClient {
     // checks. Reject contention instead of holding an unbounded request queue or
     // waiting out a provider cooldown inside a shipment's lease.
     async fn send(&self, request: RequestBuilder) -> Result<Vec<u8>, SyncError> {
-        let mut schedule = self
+        let schedule = self.request_slot().await?;
+        self.send_in_slot(request, schedule).await
+    }
+
+    async fn request_slot(&self) -> Result<MutexGuard<'_, RequestSchedule>, SyncError> {
+        let schedule = self
             .requests
             .try_lock()
             .map_err(|_| SyncError::Throttled { retry_after: 1 })?;
@@ -505,6 +510,14 @@ impl EasyPostClient {
             });
         }
         tokio::time::sleep_until(schedule.next_start).await;
+        Ok(schedule)
+    }
+
+    async fn send_in_slot(
+        &self,
+        request: RequestBuilder,
+        mut schedule: MutexGuard<'_, RequestSchedule>,
+    ) -> Result<Vec<u8>, SyncError> {
         schedule.next_start = Instant::now() + Duration::from_secs(1);
         let result = match request.send().await {
             Ok(response) => Self::read_body(response).await,
@@ -575,27 +588,37 @@ impl EasyPostClient {
         carrier: Option<Carrier>,
     ) -> Result<Tracker, SyncError> {
         self.observe("register", async {
-            let url = self
-                .base
-                .join("trackers")
-                .map_err(|_| SyncError::Configuration)?;
-            let request = self
-                .client
-                .post(url)
-                .basic_auth(&self.api_key, Some(""))
-                .json(&RegisterTracker {
-                    tracker: RegisterTracking {
-                        tracking_code,
-                        carrier,
-                    },
-                });
-            let tracker = Self::read_tracker(&self.send(request).await?, tracking_code)?;
-            if carrier.is_some_and(|carrier| carrier != tracker.carrier) {
-                return Err(TrackerRejection::CarrierCodeMismatch.into());
-            }
-            Ok(tracker)
+            let slot = self.request_slot().await?;
+            self.register_in_slot(tracking_code, carrier, slot).await
         })
         .await
+    }
+
+    async fn register_in_slot(
+        &self,
+        tracking_code: &str,
+        carrier: Option<Carrier>,
+        slot: MutexGuard<'_, RequestSchedule>,
+    ) -> Result<Tracker, SyncError> {
+        let url = self
+            .base
+            .join("trackers")
+            .map_err(|_| SyncError::Configuration)?;
+        let request = self
+            .client
+            .post(url)
+            .basic_auth(&self.api_key, Some(""))
+            .json(&RegisterTracker {
+                tracker: RegisterTracking {
+                    tracking_code,
+                    carrier,
+                },
+            });
+        let tracker = Self::read_tracker(&self.send_in_slot(request, slot).await?, tracking_code)?;
+        if carrier.is_some_and(|carrier| carrier != tracker.carrier) {
+            return Err(TrackerRejection::CarrierCodeMismatch.into());
+        }
+        Ok(tracker)
     }
 
     /// Resolve an earlier POST whose response may have been lost. This lookup
@@ -844,7 +867,6 @@ struct Claim {
     tracking_number: String,
     tracking_carrier: Option<String>,
     tracker_id: Option<String>,
-    registration_started_at: Option<i64>,
     lease_token: String,
 }
 
@@ -886,7 +908,7 @@ impl SyncWorker {
                  ORDER BY next_attempt_at, id LIMIT 1
              )
              RETURNING id, tracking_generation, tracking_number, tracking_carrier,
-                       tracker_id, registration_started_at, lease_token",
+                       tracker_id, lease_token",
         )
         .bind(Uuid::now_v7().to_string())
         .bind(LEASE_SECONDS)
@@ -907,8 +929,8 @@ impl SyncWorker {
         let observation = match &claim.tracker_id {
             Some(id) => client.retrieve(id, &claim.tracking_number).await,
             None => {
-                // Commit the POST intent before crossing the network boundary.
-                // Cancellation or restart after this point must reconcile first.
+                // Commit registration intent before any provider request. Even
+                // the first attempt must find an earlier, uncommitted tracker.
                 let started = sqlx::query_scalar::<_, i64>(
                     "UPDATE shipments SET registration_started_at=coalesce(registration_started_at,unixepoch())
                      WHERE id=? AND tracking_generation=? AND lease_token=?
@@ -920,38 +942,53 @@ impl SyncWorker {
                     self.release_cancelled_registration(&claim).await?;
                     return Ok(true);
                 };
-                if claim.registration_started_at.is_some() {
-                    match client
-                        .reconcile_registration(&claim.tracking_number, carrier, started)
-                        .await
-                    {
-                        Ok(Some(tracker)) => Ok(tracker),
-                        Ok(None) => {
-                            // The lookup crossed a network boundary. Do not create
-                            // tracking for a record that was edited or archived meanwhile.
-                            let owned = sqlx::query_scalar::<_, bool>(
+                match client
+                    .reconcile_registration(&claim.tracking_number, carrier, started)
+                    .await
+                {
+                    Ok(Some(tracker)) => Ok(tracker),
+                    Ok(None) => {
+                        // Wait for the outbound slot before checking the
+                        // generation fence; cancellation during pacing must
+                        // not start a paid registration for an obsolete claim.
+                        let slot = match client.request_slot().await {
+                            Ok(slot) => slot,
+                            Err(error) => {
+                                self.complete(&claim, Err(error)).await?;
+                                return Ok(true);
+                            }
+                        };
+                        // The lookup crossed a network boundary. Do not create
+                        // tracking for a record that was edited or archived meanwhile.
+                        let owned = sqlx::query_scalar::<_, bool>(
                                 "SELECT EXISTS(SELECT 1 FROM shipments WHERE id=? AND tracking_generation=? AND lease_token=? AND lease_until>unixepoch() AND archived=0 AND next_attempt_at IS NOT NULL)",
                             ).bind(&claim.id).bind(claim.tracking_generation).bind(&claim.lease_token)
                                 .fetch_one(&self.pool).await?;
-                            if !owned {
-                                self.release_cancelled_registration(&claim).await?;
-                                return Ok(true);
-                            }
-                            match shift_calendar_months(started, 3) {
-                                Ok(expiry)
-                                    if time::OffsetDateTime::now_utc().unix_timestamp()
-                                        < expiry =>
-                                {
-                                    client.register(&claim.tracking_number, carrier).await
-                                }
-                                Ok(_) => Err(SyncError::RegistrationExpired),
-                                Err(error) => Err(error),
-                            }
+                        if !owned {
+                            drop(slot);
+                            self.release_cancelled_registration(&claim).await?;
+                            return Ok(true);
                         }
-                        Err(error) => Err(error),
+                        match shift_calendar_months(started, 3) {
+                            Ok(expiry)
+                                if time::OffsetDateTime::now_utc().unix_timestamp() < expiry =>
+                            {
+                                client
+                                    .observe(
+                                        "register",
+                                        client.register_in_slot(
+                                            &claim.tracking_number,
+                                            carrier,
+                                            slot,
+                                        ),
+                                    )
+                                    .await
+                            }
+                            Ok(_) => Err(SyncError::RegistrationExpired),
+                            Err(error) => Err(error),
+                        }
                     }
-                } else {
-                    client.register(&claim.tracking_number, carrier).await
+                    Err(error) => Err(error),
                 }
             }
         };
@@ -1201,7 +1238,6 @@ mod tests {
             tracking_number: shipment.tracking.number,
             tracking_carrier: None,
             tracker_id: None,
-            registration_started_at: None,
             lease_token: "test-claim".into(),
         };
         sqlx::query("UPDATE shipments SET lease_token=?,lease_until=unixepoch()+60 WHERE id=?")
