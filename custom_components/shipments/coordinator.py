@@ -20,7 +20,7 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, Upda
 
 from .client import ResponseTooLarge, ShipmentsClient
 from .const import CONF_ADDON_SLUG, DIRECTION_SUMMARY_KEYS, DOMAIN, SUMMARY_KEYS
-from .models import DeliveryEstimate, ShipmentStatusEvent, delivery_estimate
+from .models import DeliveryEstimate, Direction, ShipmentStatusEvent, delivery_estimate
 
 _LOGGER = logging.getLogger(__name__)
 _BACKUP_TIMEOUT_SECONDS = 10
@@ -279,7 +279,9 @@ class ShipmentsCoordinator(DataUpdateCoordinator[dict[str, int]]):
                 ir.async_delete_issue(self.hass, DOMAIN, "event_stream_unavailable")
                 return
 
-    async def _async_summary(self, direction: str | None = None) -> dict[str, int]:
+    async def _async_summary(
+        self, direction: Direction | None = None
+    ) -> dict[str, int]:
         """Validate every summary before publishing a complete refresh."""
         path = "/v1/summary"
         label = "summary"

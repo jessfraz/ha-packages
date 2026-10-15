@@ -23,7 +23,7 @@ steps, EasyPost configuration, and standalone Docker instructions. The app
 dashboard's **Installation → Run checks** verifies the service, Home Assistant
 connection, app/integration version match, authentication, read-only EasyPost
 access, and backup coverage. Update both the app and HACS integration to
-**0.5.0**, then restart Home Assistant.
+**0.5.1**, then restart Home Assistant.
 
 The supervised integration adds a stable **Shipments** sidebar panel at
 `/shipments`, available to ordinary Home Assistant users. Status corrections,
@@ -238,6 +238,26 @@ idempotency replay returns the original committed create response, which may
 still say pending even after registration succeeds. Retry an uncertain local
 create with its original idempotency key. Do not create a fresh record or key
 just because registration is pending.
+
+### Retry old failed attempts
+
+Versions before 0.4.0 could create an EasyPost tracker, then lose its response
+without saving the shipment or idempotency key. Submit those parcels through
+normal creation with a stable idempotency key and the correct canonical
+carrier, or omit the carrier when it is uncertain.
+
+Every unregistered shipment first looks for an existing matching EasyPost
+tracker, including on its first attempt. A single confirmed match is adopted
+without another paid registration. Only a complete, empty lookup permits a
+registration request. Failed lookups retain the pending shipment and back off;
+ambiguous results need attention and never fall through to registration.
+
+Lookup and duplicate protection cover the previous three calendar months for
+the selected carrier and tracking number. They do not establish that every
+older tracker or a tracker under another carrier is unrelated. Review the
+provider inventory for historical attempts outside that window or uncertain
+carrier choices. Retry the same local create key and read the saved shipment's
+current state rather than generating new keys because registration is pending.
 
 Home Assistant tokens grant access beyond this integration. Give agents the
 restricted shipment credential through a constrained tool boundary rather than

@@ -74,6 +74,38 @@ impl Incoming {
         self.reply(Reply::tracker(number, status));
     }
 
+    fn empty_tracker_search(self, number: &str) {
+        assert_eq!(self.method, "GET");
+        let url = reqwest::Url::parse(&format!("http://provider{}", self.path)).unwrap();
+        assert_eq!(url.path(), "/v2/trackers");
+        let query: std::collections::HashMap<_, _> = url.query_pairs().collect();
+        assert_eq!(
+            query.get("tracking_codes[]").map(|value| value.as_ref()),
+            Some(number)
+        );
+        assert_eq!(
+            query.get("carrier").map(|value| value.as_ref()),
+            Some("USPS")
+        );
+        assert!(query.contains_key("start_datetime"));
+        assert!(query.contains_key("end_datetime"));
+        assert!(self.body.is_empty());
+        #[derive(Serialize)]
+        struct EmptyPage {
+            trackers: Vec<TrackerReply<'static>>,
+            has_more: bool,
+        }
+        self.reply(Reply {
+            status: 200,
+            headers: Vec::new(),
+            body: serde_json::to_string(&EmptyPage {
+                trackers: Vec::new(),
+                has_more: false,
+            })
+            .unwrap(),
+        });
+    }
+
     fn reconciled_tracker(self, number: &str, status: Status) {
         assert_eq!(self.method, "GET");
         assert!(self.path.contains("tracking_codes"));
@@ -275,6 +307,14 @@ impl Provider {
             .unwrap()
             .unwrap()
     }
+
+    async fn registration_after_empty_search(&mut self, number: &str) -> Incoming {
+        self.request().await.empty_tracker_search(number);
+        let registration = self.request().await;
+        assert_eq!(registration.method, "POST");
+        assert_eq!(registration.path, "/v2/trackers");
+        registration
+    }
 }
 
 impl Drop for Provider {
@@ -361,6 +401,19 @@ async fn observe(
 ) -> IncomingDetails {
     let task = start_tick(worker);
     let request = provider.request().await;
+    let request = if request.path.starts_with("/v2/trackers?") {
+        // New registrations must complete their filtered lookup before POST.
+        // Already registered shipments go straight to their tracker GET.
+        request.empty_tracker_search(number);
+        let registration = provider.request().await;
+        assert_eq!(registration.method, "POST");
+        assert_eq!(registration.path, "/v2/trackers");
+        registration
+    } else {
+        assert_eq!(request.method, "GET");
+        assert_eq!(request.path, "/v2/trackers/trk_test");
+        request
+    };
     let details = IncomingDetails {
         method: request.method.clone(),
         path: request.path.clone(),
@@ -392,7 +445,7 @@ async fn registers_retrieves_and_only_revises_changed_observations() {
     let mut provider = Provider::start();
     let worker = provider.worker(&fixture.store);
     let task = start_tick(&worker);
-    let request = provider.request().await;
+    let request = provider.registration_after_empty_search("TRACK1").await;
     assert_eq!(request.method, "POST");
     assert_eq!(request.path, "/v2/trackers");
     assert_eq!(
@@ -443,18 +496,21 @@ async fn worker_persists_canonical_carrier_and_safe_url_without_revising_identic
     let mut provider = Provider::start();
     let worker = provider.worker(&fixture.store);
     let task = start_tick(&worker);
-    provider.request().await.reply(Reply {
-        status: 200,
-        headers: Vec::new(),
-        body: serde_json::to_string(&TrackerReply {
-            id: "trk_test",
-            tracking_code: "TRACK-URL",
-            carrier: "uSpS",
-            status: Status::Unknown,
-            public_url: Some("https://track.easypost.com/public-tracker"),
-        })
-        .unwrap(),
-    });
+    provider
+        .registration_after_empty_search("TRACK-URL")
+        .await
+        .reply(Reply {
+            status: 200,
+            headers: Vec::new(),
+            body: serde_json::to_string(&TrackerReply {
+                id: "trk_test",
+                tracking_code: "TRACK-URL",
+                carrier: "uSpS",
+                status: Status::Unknown,
+                public_url: Some("https://track.easypost.com/public-tracker"),
+            })
+            .unwrap(),
+        });
     assert!(task.await.unwrap().unwrap());
     let first = fixture.store.get(shipment.id).await.unwrap();
     assert_eq!(
@@ -629,7 +685,7 @@ async fn preserves_a_manual_terminal_override_set_during_network_io() {
     let mut provider = Provider::start();
     let worker = provider.worker(&fixture.store);
     let task = start_tick(&worker);
-    let request = provider.request().await;
+    let request = provider.registration_after_empty_search("TRACK2").await;
     let corrected = fixture
         .store
         .set_override(
@@ -661,7 +717,7 @@ async fn retry_schedule_and_attempts_survive_restart_without_exposing_provider_e
     let mut provider = Provider::start();
     let worker = provider.worker(&fixture.store);
     let task = start_tick(&worker);
-    let request = provider.request().await;
+    let request = provider.registration_after_empty_search("TRACK3").await;
     let mut reply = Reply::error(429);
     reply.headers.push(("Retry-After".into(), "600".into()));
     request.reply(reply);
@@ -726,7 +782,7 @@ async fn a_response_from_a_replaced_tracking_identity_is_discarded() {
     let mut provider = Provider::start();
     let worker = provider.worker(&fixture.store);
     let task = start_tick(&worker);
-    let old_request = provider.request().await;
+    let old_request = provider.registration_after_empty_search("OLDTRACK").await;
     let replaced = fixture
         .store
         .update(
@@ -764,7 +820,7 @@ async fn archiving_an_in_flight_shipment_discards_the_response_and_stops_polling
     let mut provider = Provider::start();
     let worker = provider.worker(&fixture.store);
     let task = start_tick(&worker);
-    let request = provider.request().await;
+    let request = provider.registration_after_empty_search("TRACK4").await;
     let archived = fixture
         .store
         .archive(shipment.id, shipment.revision, true, "owner")
@@ -788,7 +844,7 @@ async fn concurrent_workers_only_claim_a_due_shipment_once() {
     let mut provider = Provider::start();
     let worker = provider.worker(&fixture.store);
     let first = start_tick(&worker);
-    let request = provider.request().await;
+    let request = provider.registration_after_empty_search("TRACK5").await;
     assert!(!provider.worker(&fixture.store).tick().await.unwrap());
     request.tracker("TRACK5", Status::InTransit);
     assert!(first.await.unwrap().unwrap());
@@ -802,7 +858,7 @@ async fn an_expired_claim_cannot_overwrite_a_newer_claim_for_the_same_generation
     let mut provider = Provider::start();
     let worker = provider.worker(&fixture.store);
     let first = start_tick(&worker);
-    let stale_request = provider.request().await;
+    let stale_request = provider.registration_after_empty_search("TRACK6").await;
     sqlx::query("UPDATE shipments SET lease_until = unixepoch() - 1 WHERE id = ?")
         .bind(shipment.id.to_string())
         .execute(fixture.store.pool())
@@ -831,7 +887,7 @@ async fn a_cancelled_claim_survives_restart_and_is_reclaimed_after_lease_expiry(
     let mut provider = Provider::start();
     let worker = provider.worker(&fixture.store);
     let task = start_tick(&worker);
-    let request = provider.request().await;
+    let request = provider.registration_after_empty_search("TRACK7").await;
     task.abort();
     assert!(task.await.unwrap_err().is_cancelled());
     drop(request);
@@ -1585,7 +1641,7 @@ async fn provider_logs_correlate_requests_and_shipments_without_exposing_private
         .into_iter::<Entry>()
         .collect::<Result<_, _>>()
         .unwrap();
-    assert_eq!(entries.len(), 3);
+    assert_eq!(entries.len(), 4);
     assert_eq!(entries[0].event, "provider_request");
     assert_eq!(entries[0].request_id, request_id);
     assert_eq!(entries[0].operation, "register");
@@ -1600,11 +1656,17 @@ async fn provider_logs_correlate_requests_and_shipments_without_exposing_private
         Some("CREDENTIALS_NOT_FOUND")
     );
     assert_eq!(entries[1].shipment_id, Some(shipment.id));
+    assert_eq!(entries[1].operation, "reconcile");
     assert_eq!(entries[1].outcome, "success");
     assert!(entries[1].error_code.is_none());
-    assert_eq!(entries[2].request_id, health_request_id);
-    assert_eq!(entries[2].operation, "health");
-    assert_eq!(entries[2].outcome, "error");
+    assert_eq!(entries[2].shipment_id, Some(shipment.id));
+    assert_eq!(entries[2].request_id, entries[1].request_id);
+    assert_eq!(entries[2].operation, "register");
+    assert_eq!(entries[2].outcome, "success");
+    assert!(entries[2].error_code.is_none());
+    assert_eq!(entries[3].request_id, health_request_id);
+    assert_eq!(entries[3].operation, "health");
+    assert_eq!(entries[3].outcome, "error");
     for entry in entries {
         time::OffsetDateTime::parse(
             &entry.timestamp,
@@ -1755,12 +1817,15 @@ async fn tracking_replacement_clears_signature_and_history_and_fences_old_scans(
     let mut provider = Provider::start();
     let worker = provider.worker(&fixture.store);
     let task = start_tick(&worker);
-    provider.request().await.reply(detailed_reply(
-        "OLD-HISTORY",
-        Status::InTransit,
-        vec![scan("2026-01-01T10:00:00Z", "Old parcel accepted")],
-        None,
-    ));
+    provider
+        .registration_after_empty_search("OLD-HISTORY")
+        .await
+        .reply(detailed_reply(
+            "OLD-HISTORY",
+            Status::InTransit,
+            vec![scan("2026-01-01T10:00:00Z", "Old parcel accepted")],
+            None,
+        ));
     task.await.unwrap().unwrap();
     let current = fixture.store.get(shipment.id).await.unwrap();
     let current = fixture

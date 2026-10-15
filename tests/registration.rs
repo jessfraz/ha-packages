@@ -208,6 +208,11 @@ impl Provider {
             .unwrap()
             .unwrap()
     }
+    async fn empty_lookup(&mut self) {
+        let request = self.request().await;
+        assert_eq!(request.method, "GET");
+        request.page(Vec::new(), false);
+    }
     fn no_request(&mut self) {
         assert!(self.incoming.try_recv().is_err());
     }
@@ -254,11 +259,162 @@ fn spawn(worker: SyncWorker) -> tokio::task::JoinHandle<Result<bool, shipments::
 }
 
 #[tokio::test]
+async fn first_attempt_adopts_existing_tracker_without_a_saved_registration_intent() {
+    let fixture = Fixture::new().await;
+    let shipment = fixture.shipment().await;
+    assert!(shipment.sync.registration_started_at.is_none());
+    let mut provider = Provider::new();
+    let task = spawn(provider.worker(&fixture.store));
+    let lookup = provider.request().await;
+    assert_eq!(lookup.method, "GET");
+    let query = lookup.query();
+    assert!(query.contains(&("tracking_codes[]".into(), NUMBER.into())));
+    assert!(query.contains(&("carrier".into(), "USPS".into())));
+    lookup.page(vec![tracker(NUMBER)], false);
+    assert!(task.await.unwrap().unwrap());
+    provider.no_request();
+    let adopted = fixture.store.get(shipment.id).await.unwrap();
+    assert_eq!(
+        adopted.sync.registration_state,
+        RegistrationState::Registered
+    );
+    assert_eq!(adopted.sync.tracker_id.as_deref(), Some("trk_registration"));
+    assert!(adopted.sync.registration_started_at.is_some());
+    assert!(adopted.sync.last_error.is_none());
+    fixture.due(shipment.id).await;
+    let task = spawn(provider.worker(&fixture.store));
+    let retrieve = provider.request().await;
+    assert_eq!(retrieve.method, "GET");
+    assert_eq!(retrieve.target, "/v2/trackers/trk_registration");
+    retrieve.tracker();
+    assert!(task.await.unwrap().unwrap());
+    provider.no_request();
+    fixture.store.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn complete_empty_first_lookup_registers_once_with_the_requested_identity() {
+    let fixture = Fixture::new().await;
+    let shipment = fixture.shipment().await;
+    let mut provider = Provider::new();
+    let task = spawn(provider.worker(&fixture.store));
+    provider.empty_lookup().await;
+    let registration = provider.request().await;
+    assert_eq!(registration.method, "POST");
+    let submitted: RegistrationRequest = serde_json::from_slice(&registration.body).unwrap();
+    assert_eq!(
+        submitted.tracker,
+        RegistrationTracking {
+            tracking_code: NUMBER.into(),
+            carrier: "USPS".into(),
+        }
+    );
+    registration.respond(201, serde_json::to_string(&tracker(NUMBER)).unwrap());
+    assert!(task.await.unwrap().unwrap());
+    provider.no_request();
+    let saved = fixture.store.get(shipment.id).await.unwrap();
+    assert_eq!(saved.sync.registration_state, RegistrationState::Registered);
+    assert_eq!(saved.sync.tracker_id.as_deref(), Some("trk_registration"));
+    assert!(saved.sync.last_error.is_none());
+    fixture.store.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn unavailable_first_lookup_keeps_intent_and_restart_adopts_without_a_post() {
+    let fixture = Fixture::new().await;
+    let shipment = fixture.shipment().await;
+    let mut provider = Provider::new();
+    let worker = provider.worker(&fixture.store);
+    let task = spawn(worker.clone());
+    let lookup = provider.request().await;
+    assert_eq!(lookup.method, "GET");
+    lookup.respond(503, "private upstream details".into());
+    assert!(task.await.unwrap().unwrap());
+    provider.no_request();
+    let pending = fixture.store.get(shipment.id).await.unwrap();
+    let started = pending.sync.registration_started_at.unwrap();
+    assert_eq!(pending.sync.registration_state, RegistrationState::Pending);
+    assert_eq!(pending.sync.error_code.as_deref(), Some("provider_http"));
+    assert_eq!(pending.sync.provider_status, Some(503));
+    assert_eq!(pending.sync.attempts, 1);
+    assert_eq!(
+        pending.sync.last_error.as_deref(),
+        Some("EasyPost returned HTTP 503")
+    );
+    assert!(!worker.tick().await.unwrap());
+    fixture.store.close().await.unwrap();
+    let restored = Store::open(&fixture.path).await.unwrap();
+    assert_eq!(
+        restored
+            .get(shipment.id)
+            .await
+            .unwrap()
+            .sync
+            .registration_started_at,
+        Some(started)
+    );
+    sqlx::query("UPDATE shipments SET next_attempt_at=0,lease_until=0 WHERE id=?")
+        .bind(shipment.id.to_string())
+        .execute(restored.pool())
+        .await
+        .unwrap();
+    let task = spawn(provider.worker(&restored));
+    let lookup = provider.request().await;
+    assert_eq!(lookup.method, "GET");
+    lookup.page(vec![tracker(NUMBER)], false);
+    assert!(task.await.unwrap().unwrap());
+    provider.no_request();
+    let adopted = restored.get(shipment.id).await.unwrap();
+    assert_eq!(
+        adopted.sync.registration_state,
+        RegistrationState::Registered
+    );
+    assert_eq!(adopted.sync.tracker_id.as_deref(), Some("trk_registration"));
+    assert_eq!(adopted.sync.registration_started_at, Some(started));
+    assert!(adopted.sync.last_error.is_none());
+    restored.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn ambiguous_or_incomplete_first_lookup_never_registers() {
+    for has_more in [false, true] {
+        let fixture = Fixture::new().await;
+        let shipment = fixture.shipment().await;
+        let mut provider = Provider::new();
+        let task = spawn(provider.worker(&fixture.store));
+        let lookup = provider.request().await;
+        assert_eq!(lookup.method, "GET");
+        let candidates = if has_more {
+            vec![tracker(NUMBER)]
+        } else {
+            vec![tracker(NUMBER), tracker(NUMBER)]
+        };
+        lookup.page(candidates, has_more);
+        assert!(task.await.unwrap().unwrap());
+        provider.no_request();
+        let unresolved = fixture.store.get(shipment.id).await.unwrap();
+        assert!(unresolved.sync.tracker_id.is_none());
+        assert!(unresolved.sync.registration_started_at.is_some());
+        assert_eq!(
+            unresolved.sync.registration_state,
+            RegistrationState::Rejected
+        );
+        assert!(unresolved.sync.next_attempt_at.is_none());
+        assert_eq!(
+            unresolved.sync.error_code.as_deref(),
+            Some("registration_ambiguous")
+        );
+        fixture.store.close().await.unwrap();
+    }
+}
+
+#[tokio::test]
 async fn post_intent_survives_cancellation_and_restart_then_reuses_existing_tracker() {
     let fixture = Fixture::new().await;
     let shipment = fixture.shipment().await;
     let mut provider = Provider::new();
     let task = spawn(provider.worker(&fixture.store));
+    provider.empty_lookup().await;
     let first = provider.request().await;
     assert_eq!(first.method, "POST");
     let pending = fixture.store.get(shipment.id).await.unwrap();
@@ -313,7 +469,9 @@ async fn unknown_post_outcome_is_durable_and_empty_reconciliation_retries_same_i
     let shipment = fixture.shipment().await;
     let mut provider = Provider::new();
     let task = spawn(provider.worker(&fixture.store));
+    provider.empty_lookup().await;
     let first = provider.request().await;
+    assert_eq!(first.method, "POST");
     let original: RegistrationRequest = serde_json::from_slice(&first.body).unwrap();
     first.respond(503, "private upstream details".into());
     assert!(task.await.unwrap().unwrap());
@@ -360,6 +518,7 @@ async fn invalid_tracking_is_rejected_with_provider_code_and_status_without_repe
     let mut provider = Provider::new();
     let worker = provider.worker(&fixture.store);
     let task = spawn(worker.clone());
+    provider.empty_lookup().await;
     provider.request().await.respond(
         422,
         r#"{"error":{"code":"TRACKER.NO_CARRIER_FOR_CODE","message":"private upstream details"}}"#
@@ -410,7 +569,9 @@ async fn key_and_carrier_account_configuration_errors_keep_valid_parcels_pending
         let shipment = fixture.shipment().await;
         let mut provider = Provider::new();
         let task = spawn(provider.worker(&fixture.store));
-        provider.request().await.respond(status, body.into());
+        let lookup = provider.request().await;
+        assert_eq!(lookup.method, "GET");
+        lookup.respond(status, body.into());
         assert!(task.await.unwrap().unwrap());
         let pending = fixture.store.get(shipment.id).await.unwrap();
         assert_eq!(pending.sync.registration_state, RegistrationState::Pending);
@@ -518,6 +679,7 @@ async fn a_real_request_timeout_preserves_the_parcel_intent_and_retry_state() {
     let mut provider = Provider::new();
     let worker = provider.worker(&fixture.store);
     let task = spawn(worker.clone());
+    provider.empty_lookup().await;
     let request = provider.request().await;
     assert_eq!(request.method, "POST");
     let before = fixture.store.get(shipment.id).await.unwrap();
@@ -550,6 +712,63 @@ async fn a_real_request_timeout_preserves_the_parcel_intent_and_retry_state() {
     assert!((59..=60).contains(&remaining));
     assert!(!worker.tick().await.unwrap());
     provider.no_request();
+    fixture.store.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn terminal_correction_during_outbound_pacing_cancels_registration() {
+    let fixture = Fixture::new().await;
+    let shipment = fixture.shipment().await;
+    sqlx::query("UPDATE shipments SET registration_started_at=unixepoch()-60 WHERE id=?")
+        .bind(shipment.id.to_string())
+        .execute(fixture.store.pool())
+        .await
+        .unwrap();
+    let mut provider = Provider::new();
+    let worker = provider.worker(&fixture.store);
+    let mut task = spawn(worker.clone());
+    provider.empty_lookup().await;
+    // The complete lookup starts a one-second gap before the provider can
+    // receive a POST. Correct after the lookup finishes, during that gap.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let corrected = fixture
+        .store
+        .set_override(
+            shipment.id,
+            shipment.revision,
+            Some(shipments::models::SetOverride {
+                status: Status::Delivered,
+                reason: "Received during registration".into(),
+            }),
+            "owner",
+        )
+        .await
+        .unwrap();
+    assert!(corrected.sync.next_attempt_at.is_none());
+    tokio::time::timeout(Duration::from_secs(2), async {
+        tokio::select! {
+            result = &mut task => assert!(result.unwrap().unwrap()),
+            request = provider.incoming.recv() => {
+                let request = request.unwrap();
+                panic!("obsolete registration sent {} {}", request.method, request.target);
+            }
+        }
+    })
+    .await
+    .unwrap();
+    provider.no_request();
+    assert!(!worker.tick().await.unwrap());
+    let current = fixture.store.get(shipment.id).await.unwrap();
+    assert_eq!(current.status, Status::Delivered);
+    assert!(current.sync.tracker_id.is_none());
+    assert!(current.sync.next_attempt_at.is_none());
+    let leases: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM shipments WHERE id=? AND lease_token IS NOT NULL")
+            .bind(shipment.id.to_string())
+            .fetch_one(fixture.store.pool())
+            .await
+            .unwrap();
+    assert_eq!(leases, 0);
     fixture.store.close().await.unwrap();
 }
 
@@ -658,6 +877,7 @@ async fn fedex_credentials_error_stays_pending_until_explicit_fedex_default_corr
     let mut provider = Provider::new();
     let worker = provider.worker(&fixture.store);
     let task = spawn(worker.clone());
+    provider.empty_lookup().await;
     let request = provider.request().await;
     assert_eq!(request.method, "POST");
     let submitted: RegistrationRequest = serde_json::from_slice(&request.body).unwrap();
@@ -719,6 +939,7 @@ async fn fedex_credentials_error_stays_pending_until_explicit_fedex_default_corr
     assert!(changed.sync.provider_error_code.is_none());
     provider.no_request();
     let task = spawn(provider.worker(&fixture.store));
+    provider.empty_lookup().await;
     let request = provider.request().await;
     assert_eq!(request.method, "POST");
     let submitted: RegistrationRequest = serde_json::from_slice(&request.body).unwrap();
@@ -759,7 +980,9 @@ async fn unrecognized_error_codes_and_oversized_bodies_preserve_http_status_with
         let shipment = fixture.shipment().await;
         let mut provider = Provider::new();
         let task = spawn(provider.worker(&fixture.store));
-        provider.request().await.respond(404, body);
+        let lookup = provider.request().await;
+        assert_eq!(lookup.method, "GET");
+        lookup.respond(404, body);
         assert!(task.await.unwrap().unwrap());
         let pending = fixture.store.get(shipment.id).await.unwrap();
         assert_eq!(pending.sync.registration_state, RegistrationState::Pending);
