@@ -45,6 +45,16 @@ day. It excludes outbound shipments and unknown timestamps, respects daylight
 saving, and links to `#view=delivered_today&direction=inbound` in the dashboard.
 The dashboard uses the same day boundaries even if your browser is elsewhere.
 The sensor stays unavailable while the app and integration versions differ.
+Both `sensor.shipments_inbound_delivered_today` and
+`sensor.shipments_inbound_out_for_delivery` include an `items` attribute for
+dashboard package lists. Their states remain counts. Each item contains `id`,
+`title`, `carrier`, `status`, nullable ISO `delivered_at` and
+`estimated_delivery`, and a relative `url` opening the shipment in Home
+Assistant. Titles retain their stored text. Delivered items sort newest first;
+out-for-delivery items sort by ETA. Lists stop at 20, with `items_truncated`
+indicating additional matches. Tracking numbers are excluded, and both
+attributes are excluded from recorder history.
+
 The **Tracking issues** card opens `#view=tracking_issues`, matching the combined
 sync-error count across both directions.
 

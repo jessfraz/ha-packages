@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 from enum import StrEnum
 from typing import TypedDict
+from urllib.parse import quote
 from uuid import UUID
 from zoneinfo import ZoneInfo
 
@@ -142,6 +143,114 @@ class DeliveryDay:
         }
 
 
+class ShipmentItemAttributes(TypedDict):
+    """Only dashboard fields leave the coordinator, never tracking numbers."""
+
+    id: str
+    title: str
+    carrier: str
+    status: str
+    delivered_at: str | None
+    estimated_delivery: str | None
+    url: str
+
+
+class ShipmentItemsAttributes(TypedDict):
+    items: list[ShipmentItemAttributes]
+    items_truncated: bool
+
+
+@dataclass(frozen=True, slots=True)
+class ShipmentItem:
+    """A bounded dashboard projection of one backend shipment."""
+
+    id: UUID
+    title: str
+    carrier: str
+    status: ShipmentStatus
+    delivered_at: datetime | None
+    estimated_delivery: date | datetime | None
+
+    @classmethod
+    def parse(cls, record: object, day: DeliveryDay | None) -> ShipmentItem:
+        if not isinstance(record, dict):
+            raise ValueError("Invalid shipment item")
+        identity = record.get("id")
+        title = record.get("title")
+        tracking = record.get("tracking")
+        carrier_tracking = record.get("carrier_tracking")
+        status = record.get("status")
+        if (
+            not isinstance(identity, str)
+            or not isinstance(title, str)
+            or not isinstance(status, str)
+            or not isinstance(tracking, dict)
+            or not isinstance(tracking.get("carrier"), str)
+            or not tracking["carrier"]
+            or not isinstance(carrier_tracking, dict)
+            or record.get("direction") != Direction.INBOUND
+            or record.get("archived") is not False
+        ):
+            raise ValueError("Invalid inbound shipment item")
+        delivered_value = carrier_tracking.get("delivered_at")
+        delivered = None
+        if delivered_value is not None:
+            if not isinstance(delivered_value, str):
+                raise ValueError("Invalid carrier delivery timestamp")
+            delivered = dt_util.parse_datetime(delivered_value)
+            if delivered is None or delivered.tzinfo is None:
+                raise ValueError("Invalid carrier delivery timestamp")
+        parsed_status = ShipmentStatus(status)
+        if day is not None:
+            # A later manual status correction does not erase a carrier scan.
+            if delivered is None or not (
+                day.delivered_after <= delivered.timestamp() < day.delivered_before
+            ):
+                raise ValueError("Shipment is outside the local delivery day")
+        elif parsed_status is not ShipmentStatus.OUT_FOR_DELIVERY:
+            raise ValueError("Shipment is not out for delivery")
+        return cls(
+            UUID(identity),
+            title,
+            tracking["carrier"],
+            parsed_status,
+            delivered,
+            parse_delivery_estimate(carrier_tracking.get("estimated_delivery_at")),
+        )
+
+    def attributes(self) -> ShipmentItemAttributes:
+        fragment = quote(f"shipment={self.id}", safe="")
+        return {
+            "id": str(self.id),
+            "title": self.title,
+            "carrier": self.carrier,
+            "status": self.status.value,
+            "delivered_at": (
+                self.delivered_at.isoformat() if self.delivered_at is not None else None
+            ),
+            "estimated_delivery": (
+                self.estimated_delivery.isoformat()
+                if self.estimated_delivery is not None
+                else None
+            ),
+            "url": f"/shipments/shipments/{fragment}",
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class ShipmentItems:
+    """Items and their truncation marker are published with the same count."""
+
+    items: tuple[ShipmentItem, ...] = ()
+    truncated: bool = False
+
+    def attributes(self) -> ShipmentItemsAttributes:
+        return {
+            "items": [item.attributes() for item in self.items],
+            "items_truncated": self.truncated,
+        }
+
+
 @dataclass(frozen=True, slots=True)
 class DeliveryEstimate:
     """A carrier estimate for an active inbound shipment, never a promise."""
@@ -177,20 +286,24 @@ def delivery_estimate(record: object) -> tuple[UUID, DeliveryEstimate | None]:
     value = record.get("estimated_delivery_at")
     if value is None:
         return identity, None
-    if not isinstance(value, str):
-        raise ValueError("Invalid carrier delivery estimate")
     carrier = record.get("carrier")
     if carrier is not None and not isinstance(carrier, str):
         raise ValueError("Invalid shipment carrier")
-    estimated: date | datetime | None = None
-    if len(value) == 10:
-        estimated = dt_util.parse_date(value)
-    else:
-        timestamp = dt_util.parse_datetime(value)
-        if timestamp is not None and timestamp.tzinfo is not None:
-            estimated = timestamp
+    estimated = parse_delivery_estimate(value)
     return identity, (
         DeliveryEstimate(identity, title, carrier, estimated)
         if estimated is not None
         else None
     )
+
+
+def parse_delivery_estimate(value: object) -> date | datetime | None:
+    """Share the calendar's nullable ISO date/aware-datetime interpretation."""
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ValueError("Invalid carrier delivery estimate")
+    if len(value) == 10:
+        return dt_util.parse_date(value)
+    timestamp = dt_util.parse_datetime(value)
+    return timestamp if timestamp is not None and timestamp.tzinfo is not None else None
