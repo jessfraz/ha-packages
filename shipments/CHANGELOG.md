@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.1
+
+- Load Supervisor support only when Home Assistant manages apps, so the
+  integration also loads on minimal Home Assistant Core installations.
+
 ## 0.2.0
 
 - Pair the app and integration through Home Assistant discovery. Credentials

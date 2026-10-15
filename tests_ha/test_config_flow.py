@@ -181,7 +181,7 @@ async def supervisor(hass: HomeAssistant, aiohttp_server, socket_enabled, monkey
         "custom_components.shipments.config_flow.is_hassio", lambda hass: True
     )
     monkeypatch.setattr(
-        "custom_components.shipments.config_flow.get_supervisor_client",
+        "homeassistant.components.hassio.get_supervisor_client",
         lambda hass: client,
     )
     return state
