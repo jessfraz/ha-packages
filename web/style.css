@@ -1,13 +1,19 @@
 :root {
-  font-family: ui-sans-serif, system-ui, -apple-system, sans-serif;
-  color: #26392f;
-  background: #f6f7f2;
+  color-scheme: light dark;
+  font-family:
+    ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
+  color: #1d1e20;
+  background: #f7f7f6;
   font-synthesis: none;
+  --mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, monospace;
   --paper: #fff;
-  --line: #dce2d7;
-  --muted: #647369;
-  --green: #265d40;
-  --soft: #e6efdf;
+  --line: #e1e1de;
+  --muted: #6a6d71;
+  --accent: #1d1e20;
+  --on-accent: #fff;
+  --soft: #f0f0ee;
+  --warning: #a2401f;
+  --focus: #3d6ec9;
 }
 * {
   box-sizing: border-box;
@@ -16,19 +22,42 @@ body {
   margin: 0;
 }
 header,
-main {
+main,
+.app-footer {
   max-width: 1100px;
   margin: auto;
   padding: 32px;
 }
+.app-footer {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 8px 24px;
+  padding-top: 20px;
+  padding-bottom: 32px;
+  border-top: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.6;
+}
+.app-footer p {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+.app-version {
+  font-family: var(--mono);
+  font-size: 11px;
+  margin-left: 6px;
+}
 .installation {
   border: 1px solid var(--line);
-  border-radius: 10px;
+  border-radius: 8px;
   padding: 18px;
   margin-bottom: 24px;
 }
 .installation summary {
   cursor: pointer;
+  font-size: 14px;
   font-weight: 600;
 }
 #installation-summary {
@@ -70,7 +99,7 @@ main {
   margin-top: 0;
 }
 #agent-token {
-  font-family: ui-monospace, monospace;
+  font-family: var(--mono);
 }
 .agent-token-actions {
   display: flex;
@@ -98,7 +127,8 @@ main {
   display: block;
   margin-top: 5px;
   color: var(--muted);
-  font-size: 12px;
+  font-family: var(--mono);
+  font-size: 11px;
 }
 .agent-credential button {
   flex-shrink: 0;
@@ -124,11 +154,12 @@ main {
 }
 .check-state {
   float: right;
-  color: var(--green);
-  font-size: 12px;
+  color: var(--delivered-ink);
+  font-family: var(--mono);
+  font-size: 11px;
 }
 .check-attention .check-state {
-  color: #8b591b;
+  color: var(--amber-ink);
 }
 .installation a {
   font-size: 13px;
@@ -138,21 +169,22 @@ header {
   display: flex;
   justify-content: space-between;
   align-items: center;
+  gap: 20px;
   border-bottom: 1px solid var(--line);
-  padding-top: 50px;
+  padding-top: 24px;
+  padding-bottom: 20px;
 }
 h1 {
-  font-size: clamp(36px, 6vw, 60px);
-  letter-spacing: -3px;
-  margin: 6px 0 0;
-  font-weight: 650;
-}
-h1 span {
-  color: #8ba755;
+  font-size: 17px;
+  letter-spacing: -0.2px;
+  margin: 0;
+  font-weight: 600;
 }
 h2 {
-  font-size: 24px;
-  letter-spacing: -0.6px;
+  font-size: 22px;
+  line-height: 1.25;
+  letter-spacing: -0.3px;
+  font-weight: 600;
 }
 h3 {
   font-size: 15px;
@@ -170,16 +202,16 @@ select {
 }
 button {
   border: 1px solid transparent;
-  background: var(--green);
-  color: white;
-  border-radius: 7px;
-  padding: 11px 17px;
+  background: var(--accent);
+  color: var(--on-accent);
+  border-radius: 6px;
+  padding: 10px 16px;
   cursor: pointer;
   font-size: 14px;
   font-weight: 550;
 }
 button:hover {
-  filter: brightness(1.12);
+  opacity: 0.86;
 }
 button:disabled {
   opacity: 0.5;
@@ -190,24 +222,26 @@ button:disabled {
   color: inherit;
   border-color: var(--line);
 }
+.quiet:hover {
+  opacity: 1;
+  background: var(--soft);
+}
 input,
 select {
   width: 100%;
   padding: 11px 12px;
   border: 1px solid var(--line);
-  border-radius: 6px;
+  border-radius: 5px;
   background: var(--paper);
   color: inherit;
 }
 input:focus,
 select:focus,
-button:focus-visible {
-  outline: 2px solid #82a266;
-  outline-offset: 3px;
-}
-.tracking-links a:focus-visible {
-  outline: 2px solid #82a266;
-  outline-offset: 3px;
+button:focus-visible,
+a:focus-visible,
+summary:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
 }
 label {
   display: grid;
@@ -220,35 +254,40 @@ label {
 }
 #notice {
   background: var(--soft);
-  border-radius: 7px;
-  padding: 14px;
+  border-radius: 6px;
+  padding: 14px 18px;
   font-size: 14px;
+  line-height: 1.6;
 }
 #notice.error,
 [role="alert"] {
-  color: #aa452d;
+  color: var(--warning);
 }
 #login {
-  max-width: 460px;
-  margin: 50px auto;
+  max-width: 420px;
+  margin: 48px auto;
+}
+#login h2 {
+  margin: 0 0 8px;
 }
 .summary {
   display: grid;
   grid-template-columns: repeat(5, minmax(0, 1fr));
-  gap: 16px;
+  gap: 12px;
   margin: 8px 0 30px;
 }
 .stat {
   background: var(--paper);
   border: 1px solid var(--line);
-  border-radius: 10px;
-  padding: 22px;
+  border-radius: 8px;
+  padding: 16px 18px;
 }
 .stat strong {
   display: block;
-  font-size: 34px;
-  font-weight: 550;
-  letter-spacing: -1px;
+  font-family: var(--mono);
+  font-size: 26px;
+  font-weight: 500;
+  letter-spacing: -0.5px;
 }
 .stat span {
   display: block;
@@ -279,7 +318,7 @@ label {
 }
 #search button {
   background: transparent;
-  color: var(--green);
+  color: inherit;
   border-color: var(--line);
 }
 .view-filter {
@@ -305,19 +344,20 @@ label {
   background: var(--paper);
   color: inherit;
   border: 1px solid var(--line);
-  border-radius: 9px;
+  border-radius: 8px;
   text-align: left;
-  padding: 22px;
+  padding: 18px 20px;
   width: 100%;
   font-weight: 400;
 }
 .shipment:hover {
-  border-color: #97b08a;
-  filter: none;
+  background: var(--soft);
+  opacity: 1;
 }
 .shipment h2 {
   font-size: 16px;
-  margin: 0 0 7px;
+  line-height: 1.4;
+  margin: 0 0 4px;
   letter-spacing: -0.2px;
 }
 .shipment p {
@@ -326,7 +366,9 @@ label {
   color: var(--muted);
 }
 .shipment .shipment-tracking {
-  margin-top: 7px;
+  margin-top: 6px;
+  font-family: var(--mono);
+  font-size: 11px;
   overflow-wrap: anywhere;
 }
 .shipment > div {
@@ -358,24 +400,27 @@ label {
   font-size: 13px;
 }
 .tracking-links a {
-  color: var(--green);
+  color: inherit;
+  text-underline-offset: 3px;
 }
 .badge {
+  font-family: var(--mono);
   font-size: 11px;
-  font-weight: 600;
-  border-radius: 30px;
-  padding: 7px 11px;
+  font-weight: 500;
+  line-height: 1.3;
+  border-radius: 4px;
+  padding: 4px 7px;
   background: var(--soft);
   white-space: nowrap;
 }
 .empty {
-  padding: 70px 24px;
+  padding: 56px 24px;
   text-align: center;
   border: 1px dashed var(--line);
-  border-radius: 10px;
+  border-radius: 8px;
 }
 .empty h2 {
-  font-size: 21px;
+  font-size: 18px;
 }
 .empty p {
   color: var(--muted);
@@ -395,15 +440,15 @@ dialog {
   background: var(--paper);
   color: inherit;
   border: 1px solid var(--line);
-  border-radius: 14px;
-  padding: 30px;
+  border-radius: 10px;
+  padding: 28px;
   max-width: 620px;
   width: calc(100% - 32px);
   max-height: 90dvh;
+  box-shadow: 0 8px 32px #0000001f;
 }
 dialog::backdrop {
-  background: #14291e70;
-  backdrop-filter: blur(3px);
+  background: #0000004d;
 }
 .dialog-heading {
   display: flex;
@@ -415,8 +460,12 @@ dialog::backdrop {
   margin: 0;
 }
 .dialog-heading .quiet {
+  width: 40px;
+  height: 40px;
+  flex-shrink: 0;
+  padding: 0;
   font-size: 24px;
-  padding: 2px 10px;
+  font-weight: 400;
 }
 .columns {
   display: grid;
@@ -459,6 +508,7 @@ dialog::backdrop {
 }
 #events time {
   display: block;
+  font-family: var(--mono);
   font-size: 11px;
   color: var(--muted);
   margin-top: 5px;
@@ -468,7 +518,7 @@ dialog::backdrop {
 }
 .history-snapshot summary {
   cursor: pointer;
-  color: var(--green);
+  color: inherit;
   font-size: 12px;
   font-weight: 600;
 }
@@ -504,21 +554,27 @@ dialog::backdrop {
 }
 @media (max-width: 650px) {
   header,
-  main {
+  main,
+  .app-footer {
     padding: 24px 18px;
   }
+  .app-footer {
+    flex-direction: column;
+    padding-top: 16px;
+  }
   header {
-    padding-top: 32px;
+    padding-top: 18px;
+    padding-bottom: 16px;
   }
   .summary {
     grid-template-columns: 1fr 1fr;
     gap: 10px;
   }
   .stat {
-    padding: 16px;
+    padding: 12px 14px;
   }
   .stat strong {
-    font-size: 28px;
+    font-size: 22px;
   }
   .toolbar {
     flex-wrap: wrap;
@@ -546,23 +602,16 @@ dialog::backdrop {
 }
 @media (prefers-color-scheme: dark) {
   :root {
-    color: #e0e8df;
-    background: #152219;
-    --paper: #1c2c21;
-    --line: #344738;
-    --muted: #a0b09e;
-    --green: #397751;
-    --soft: #2b4430;
-  }
-  .check-state {
-    color: #8fc49b;
-  }
-  .check-attention .check-state {
-    color: #e5bf79;
-  }
-  #notice.error,
-  [role="alert"] {
-    color: #f29e85;
+    color: #e6e6e4;
+    background: #131415;
+    --paper: #1b1c1e;
+    --line: #2f3134;
+    --muted: #9c9fa3;
+    --accent: #e6e6e4;
+    --on-accent: #131415;
+    --soft: #242528;
+    --warning: #f2ad8f;
+    --focus: #7fa6ee;
   }
 }
 
@@ -583,9 +632,9 @@ dialog::backdrop {
   --violet-ink: #73509b;
   --violet-fill: #f1eafa;
   --violet-line: #baa3d4;
-  --neutral-ink: #627067;
-  --neutral-fill: #f0f3ef;
-  --neutral-line: #bdc7bd;
+  --neutral-ink: #5f6266;
+  --neutral-fill: #f0f0ee;
+  --neutral-line: #c4c5c2;
 }
 .status-expected,
 .status-unknown,
@@ -653,8 +702,8 @@ dialog::backdrop {
 }
 .stat:focus-visible,
 .shipment:focus-visible {
-  outline: 3px solid var(--blue-line);
-  outline-offset: 3px;
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
 }
 .shipment {
   border-left: 3px solid var(--status-line);
@@ -681,9 +730,9 @@ dialog::backdrop {
   padding: 32px;
 }
 #detail .dialog-heading h2 {
-  font-size: 26px;
+  font-size: 22px;
   line-height: 1.25;
-  letter-spacing: -0.7px;
+  letter-spacing: -0.3px;
 }
 .detail-hero {
   margin: 24px 0;
@@ -696,7 +745,8 @@ dialog::backdrop {
   font-size: 14px;
 }
 .detail-tracking span {
-  font-family: ui-monospace, monospace;
+  font-family: var(--mono);
+  font-size: 13px;
   overflow-wrap: anywhere;
   color: var(--muted);
 }
@@ -707,9 +757,9 @@ dialog::backdrop {
   margin: 24px 0;
 }
 .detail-fact {
-  padding: 18px;
+  padding: 16px;
   border: 1px solid var(--line);
-  border-radius: 10px;
+  border-radius: 8px;
 }
 .detail-fact > span {
   display: block;
@@ -786,7 +836,8 @@ dialog::backdrop {
   align-items: center;
 }
 .event-heading time {
-  font-size: 12px;
+  font-family: var(--mono);
+  font-size: 11px;
   color: var(--muted);
 }
 .event-message { margin: 10px 0 4px; font-size: 14px; line-height: 1.55; }
@@ -817,9 +868,9 @@ dialog::backdrop {
     --violet-ink: #d5bdf3;
     --violet-fill: #392c4a;
     --violet-line: #9474b9;
-    --neutral-ink: #b7c4ba;
-    --neutral-fill: #2e3a31;
-    --neutral-line: #637368;
+    --neutral-ink: #b9bbbe;
+    --neutral-fill: #26272a;
+    --neutral-line: #55585c;
   }
 }
 
@@ -835,9 +886,10 @@ dialog::backdrop {
   color: var(--blue-ink);
 }
 
-.direction-tabs { display: flex; gap: .35rem; margin: 0 0 1.25rem; }
-.direction-tabs button { border-radius: 2rem; padding: .55rem 1.2rem; background: transparent; color: var(--muted); }
-.direction-tabs button[aria-pressed="true"] { background: var(--green); color: var(--paper); }
+.direction-tabs { display: flex; gap: 4px; margin: 0 0 20px; }
+.direction-tabs button { border-color: transparent; padding: 7px 12px; background: transparent; color: var(--muted); }
+.direction-tabs button:hover { opacity: 1; color: inherit; }
+.direction-tabs button[aria-pressed="true"] { border-color: var(--line); background: var(--paper); color: inherit; }
 .direction-inbound { background: #d5eee9; color: #155d50; }
 .direction-outbound { background: #f5dce9; color: #852b58; }
 .registration-pending { background: var(--neutral-fill); color: var(--neutral-ink); }

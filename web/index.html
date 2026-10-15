@@ -10,16 +10,14 @@
   </head>
   <body>
     <header>
-      <div>
-        <h1>Shipments<span>.</span></h1>
-      </div>
+      <h1>Shipments</h1>
       <button id="add">Add shipment</button>
     </header>
     <main>
       <p id="notice" role="status" aria-live="polite"></p>
       <form id="login" hidden>
-        <h2>Connect to your registry</h2>
-        <p>Enter your shipment API token. It stays in this tab’s memory.</p>
+        <h2>Connect</h2>
+        <p class="muted">Enter your shipment API token. It stays in this tab’s memory.</p>
         <label
           >API token<input
             name="token"
@@ -31,7 +29,7 @@
       </form>
       <section id="dashboard" hidden>
         <nav id="directions" class="direction-tabs" aria-label="Shipment direction">
-          <button type="button" data-direction="all" aria-pressed="true">All shipments</button>
+          <button type="button" data-direction="all" aria-pressed="true">All</button>
           <button type="button" data-direction="inbound" aria-pressed="false">Inbound</button>
           <button type="button" data-direction="outbound" aria-pressed="false">Outbound</button>
         </nav>
@@ -65,7 +63,7 @@
         <p id="view-note" class="view-note muted" role="status" hidden></p>
         <div id="list" class="shipments"></div>
         <button id="more" hidden>Load more</button>
-        <p id="health" class="muted"></p>
+        <p id="health" class="muted" hidden></p>
         <div id="management">
         <details id="installation" class="installation" hidden>
           <summary>Installation <span id="installation-summary"></span></summary>
@@ -106,6 +104,10 @@
         </div>
       </section>
     </main>
+    <footer id="app-footer" class="app-footer" hidden>
+      <p>Shipments <span id="app-version" class="app-version"></span></p>
+      <p id="service-status"></p>
+    </footer>
     <dialog id="editor" aria-labelledby="edit-title">
       <form id="edit-form">
         <div class="dialog-heading">

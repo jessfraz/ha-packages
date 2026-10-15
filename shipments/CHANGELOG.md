@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.5.3
+
+- Match Maintenance's neutral light and dark styling, compact controls, and
+  restrained mono typography. Simplify labels and improve mobile layouts.
+- Show the running service version and tracking status in a consistent footer.
+- Update SHA-256 dependencies while preserving stored request fingerprints.
+
 ## 0.5.2
 
 - Verify tracking before saving a shipment or changing its tracking identity.
