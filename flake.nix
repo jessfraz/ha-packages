@@ -31,6 +31,7 @@
           cmake
           pkg-config
           sqlite
+          jq
           actionlint
           shellcheck
           cargo-deny

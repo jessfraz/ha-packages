@@ -71,7 +71,10 @@ they are and `null` clears optional fields. Carrier state and audit identity
 cannot be written in request bodies.
 
 List filters include `tracking_number`, `carrier`, `order_reference`,
-`source_namespace` with `source_key`, `status`, `search`, and `archived`.
+`source_namespace` with `source_key`, `status`, `active`, `search`, and `archived`.
+`active=true` excludes delivered, returned, and cancelled shipments, using the
+manual correction when one exists. Archiving is independent of status. The
+dashboard opens in the active view and refreshes while the tab is visible.
 Lists and history use `items` and `next_page`. Pass the token as `page_token`
 to continue, with an optional `limit` of up to 200.
 

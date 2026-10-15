@@ -110,10 +110,15 @@ async def test_list_and_event_query_forwarding(
 ) -> None:
     client = await hass_client()
     response = await client.get(
-        f"{PREFIX}/shipments", params={"search": "book & pen", "limit": "10"}
+        f"{PREFIX}/shipments",
+        params={"search": "book & pen", "limit": "10", "active": "true"},
     )
     assert response.status == 200
-    assert backend.requests[-1].query == {"search": "book & pen", "limit": "10"}
+    assert backend.requests[-1].query == {
+        "search": "book & pen",
+        "limit": "10",
+        "active": "true",
+    }
     response = await client.get(
         f"{PREFIX}/shipments/{SHIPMENT_ID}/events", params={"page_token": "next+one"}
     )

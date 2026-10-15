@@ -41,17 +41,25 @@
               placeholder="Search title, merchant, or order"
             ><button>Search</button>
           </form>
-          <label class="archive-filter"
-            ><input id="archived" type="checkbox">
-            Archived</label
-          >
+          <label class="view-filter" for="view"
+            >View
+            <select id="view">
+              <option value="active">Active</option>
+              <option value="delivered">Delivered</option>
+              <option value="all">All</option>
+              <option value="archived">Archived</option>
+            </select>
+          </label>
+          <button id="refresh" class="quiet" aria-label="Refresh shipment list">
+            Refresh
+          </button>
         </div>
         <div id="list" class="shipments"></div>
         <button id="more" hidden>Load more</button>
         <p id="health" class="muted"></p>
       </section>
     </main>
-    <dialog id="editor">
+    <dialog id="editor" aria-labelledby="edit-title">
       <form id="edit-form">
         <div class="dialog-heading">
           <h2 id="edit-title">Add shipment</h2>
@@ -88,7 +96,7 @@
         <button id="save">Save shipment</button>
       </form>
     </dialog>
-    <dialog id="detail">
+    <dialog id="detail" aria-labelledby="detail-title">
       <div class="dialog-heading">
         <h2 id="detail-title"></h2>
         <button

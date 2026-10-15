@@ -66,7 +66,10 @@ class Backend:
             return web.json_response({"credential_role": self.role})
         if request.path == "/v1/summary":
             return web.json_response(SUMMARY)
-        return web.json_response({"id": SHIPMENT_ID}, headers={"ETag": '"7"'})
+        return web.json_response(
+            {"id": SHIPMENT_ID, "revision": 7, "status": "expected"},
+            headers={"ETag": '"7"'},
+        )
 
 
 @pytest.fixture(autouse=True)

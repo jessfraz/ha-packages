@@ -27,6 +27,23 @@ let editorGeneration = 0;
 let loadingMore = false;
 let loadingEvents = false;
 let savingEditor = false;
+let appliedSearch = "";
+let listController = null;
+let refreshTimer = null;
+
+class ApiError extends Error {
+  constructor(message, status) {
+    super(message);
+    this.status = status;
+  }
+}
+
+function editError(error) {
+  if (error.status === 412) {
+    return "This shipment changed. Your draft is still here. Close and reopen the shipment to review its latest version before retrying.";
+  }
+  return error.message;
+}
 
 function element(tag, text, className) {
   const node = document.createElement(tag);
@@ -50,7 +67,10 @@ async function api(path, options = {}) {
   });
   const body = await response.json();
   if (!response.ok) {
-    throw new Error(body.message || `Request failed (${response.status})`);
+    throw new ApiError(
+      body.message || `Request failed (${response.status})`,
+      response.status,
+    );
   }
   return body;
 }
@@ -74,12 +94,24 @@ async function connect() {
   byId("health").textContent = system.provider_enabled
     ? `${system.pending_syncs} tracking checks scheduled · ${system.sync_errors} sync errors`
     : "Carrier tracking is off. Local records and manual controls are available.";
-  await load();
+  try {
+    await load();
+  } finally {
+    scheduleRefresh();
+  }
 }
 
 async function load(append = false) {
   if (append && (!nextPage || loadingMore)) return;
+  listController?.abort();
+  const controller = new AbortController();
+  listController = controller;
+  byId("refresh").disabled = true;
+  byId("refresh").textContent = "Refreshing…";
+  byId("list").setAttribute("aria-busy", "true");
   const generation = append ? listGeneration : ++listGeneration;
+  const view = byId("view").value;
+  const search = appliedSearch;
   const query = new URLSearchParams({ limit: "50" });
   if (append) {
     loadingMore = true;
@@ -90,19 +122,27 @@ async function load(append = false) {
     loadingMore = false;
     byId("more").hidden = true;
     byId("more").disabled = false;
-    query.set("archived", String(byId("archived").checked));
-    const search = byId("query").value.trim();
+    query.set("archived", String(view === "archived"));
+    if (view === "active") query.set("active", "true");
+    if (view === "delivered") query.set("status", "delivered");
     if (search) query.set("search", search);
   }
 
   try {
-    const [summary, page] = await Promise.all([
-      api("v1/summary"),
-      api(`v1/shipments?${query}`),
+    const [summary, page, system] = await Promise.all([
+      api("v1/summary", { signal: controller.signal }),
+      api(`v1/shipments?${query}`, { signal: controller.signal }),
+      api("v1/system", { signal: controller.signal }),
     ]);
     // A search or archive-filter change owns its whole result, including any
     // pagination requests already in flight for the previous list.
     if (generation !== listGeneration) return;
+    byId("health").textContent = system.provider_enabled
+      ? `${system.pending_syncs} tracking checks scheduled · ${system.sync_errors} sync errors`
+      : "Carrier tracking is off. Local records and manual controls are available.";
+    byId("health").append(
+      ` Last checked ${new Date().toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}.`,
+    );
     const stats = byId("summary");
     stats.replaceChildren();
     for (const [key, label] of [
@@ -149,25 +189,83 @@ async function load(append = false) {
     }
     if (!list.children.length) {
       const empty = element("div", undefined, "empty");
-      empty.append(
-        element("h2", "Nothing here yet."),
-        element(
-          "p",
-          "Add an expected delivery, with or without a tracking number.",
-        ),
-      );
+      const messages = {
+        active: [
+          "No active shipments.",
+          "Add an expected delivery, or switch to All to review completed shipments.",
+        ],
+        delivered: [
+          "No delivered shipments yet.",
+          "Received a parcel? Open it from All and mark it delivered.",
+        ],
+        all: [
+          "No shipments yet.",
+          "Use Add shipment to track an expected delivery, with or without a tracking number.",
+        ],
+        archived: [
+          "No archived shipments.",
+          "Archived shipments are kept here and can be restored from their details.",
+        ],
+      };
+      const [heading, description] = search
+        ? [
+            "No shipments match your search.",
+            "Try a different title, merchant, or order reference in this view.",
+          ]
+        : messages[view];
+      empty.append(element("h2", heading), element("p", description));
+      if (search) {
+        const clear = element("button", "Clear search", "quiet");
+        clear.addEventListener(
+          "click",
+          guarded(() => {
+            appliedSearch = "";
+            byId("query").value = "";
+            return load();
+          }),
+        );
+        empty.append(clear);
+      }
       list.append(empty);
     }
     nextPage = page.next_page;
     byId("more").hidden = !nextPage;
   } catch (error) {
-    if (generation === listGeneration) throw error;
+    if (generation === listGeneration && error.name !== "AbortError")
+      throw error;
   } finally {
     if (generation === listGeneration) {
       loadingMore = false;
       byId("more").disabled = false;
+      byId("refresh").disabled = false;
+      byId("refresh").textContent = "Refresh";
+      byId("list").setAttribute("aria-busy", "false");
+      listController = null;
     }
   }
+}
+
+async function refreshDashboard() {
+  if (listController || document.hidden || byId("dashboard").hidden) return;
+  await load();
+  notice("");
+}
+
+function scheduleRefresh() {
+  clearTimeout(refreshTimer);
+  if (document.hidden || byId("dashboard").hidden) return;
+  refreshTimer = setTimeout(async () => {
+    try {
+      await refreshDashboard();
+    } catch (error) {
+      notice(
+        `Could not refresh shipments. ${error.message} Use Refresh to retry.`,
+        true,
+      );
+    } finally {
+      scheduleRefresh();
+    }
+  }, 30_000);
 }
 
 function closeDetail() {
@@ -301,7 +399,45 @@ async function loadEvents() {
     if (!currentDetail(id, generation)) return;
     for (const event of page.items) {
       const item = element("li", `${event.detail} · ${event.actor_id}`);
-      item.append(element("time", new Date(event.at).toLocaleString()));
+      const time = element("time", new Date(event.at).toLocaleString());
+      time.dateTime = event.at;
+      item.append(time);
+      if (event.snapshot) {
+        const snapshot = event.snapshot;
+        const details = element("details", undefined, "history-snapshot");
+        const fields = element("dl");
+        const values = [
+          ["Title", snapshot.title],
+          ["Status", labels[snapshot.status]],
+          [
+            "Tracking",
+            snapshot.tracking
+              ? `${snapshot.tracking.carrier || "Auto-detect carrier"} · ${snapshot.tracking.number}`
+              : "Not set",
+          ],
+          ["Merchant", snapshot.merchant || "Not set"],
+          ["Order reference", snapshot.order_reference || "Not set"],
+          [
+            "Carrier status",
+            snapshot.carrier_status
+              ? labels[snapshot.carrier_status]
+              : "Not checked",
+          ],
+          [
+            "Manual correction",
+            snapshot.status_override
+              ? `${labels[snapshot.status_override.status]} · ${snapshot.status_override.reason} (${snapshot.status_override.actor_id})`
+              : "None",
+          ],
+          ["Archived", snapshot.archived ? "Yes" : "No"],
+          ["Revision", String(snapshot.revision)],
+        ];
+        for (const [label, value] of values) {
+          fields.append(element("dt", label), element("dd", value));
+        }
+        details.append(element("summary", "Record at this point"), fields);
+        item.append(details);
+      }
       byId("events").append(item);
     }
     eventsPage = page.next_page;
@@ -338,19 +474,35 @@ async function mutate(path, method, body) {
     if (currentDetail(id, refreshedGeneration)) notice("Saved.");
   } catch (error) {
     if (currentDetail(id, generation))
-      byId("detail-error").textContent = error.message;
+      byId("detail-error").textContent = editError(error);
   }
 }
 
 byId("add").addEventListener("click", () => openEditor());
 byId("search").addEventListener(
   "submit",
-  guarded(() => load()),
+  guarded(() => {
+    appliedSearch = byId("query").value.trim();
+    return load();
+  }),
 );
-byId("archived").addEventListener(
+byId("view").addEventListener(
   "change",
   guarded(() => load()),
 );
+byId("refresh").addEventListener("click", guarded(refreshDashboard));
+document.addEventListener("visibilitychange", () => {
+  clearTimeout(refreshTimer);
+  if (!document.hidden) {
+    guarded(async () => {
+      try {
+        await refreshDashboard();
+      } finally {
+        scheduleRefresh();
+      }
+    })();
+  }
+});
 byId("more").addEventListener(
   "click",
   guarded(() => load(true)),
@@ -423,7 +575,7 @@ byId("edit-form").addEventListener("submit", async (event) => {
     if (current) notice("Shipment saved.");
   } catch (error) {
     if (generation === editorGeneration && byId("editor").open)
-      byId("edit-error").textContent = error.message;
+      byId("edit-error").textContent = editError(error);
   } finally {
     if (generation === editorGeneration) {
       savingEditor = false;

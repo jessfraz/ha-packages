@@ -582,6 +582,17 @@ impl Store {
                 .push_bind(value)
                 .push("))>0)");
         }
+        if let Some(active) = filters.active {
+            query.push(" AND coalesce(override_status,carrier_status,'\"expected\"')");
+            query.push(if active { " NOT IN (" } else { " IN (" });
+            {
+                let mut terminal = query.separated(",");
+                for status in Status::TERMINAL {
+                    terminal.push_bind(serde_json::to_string(&status)?);
+                }
+            }
+            query.push(")");
+        }
         if let Some(value) = filters.status {
             query
                 .push(" AND coalesce(override_status,carrier_status,'\"expected\"')=")

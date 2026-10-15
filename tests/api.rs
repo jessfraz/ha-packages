@@ -397,6 +397,127 @@ async fn duplicate_sources_tracking_archive_and_pagination_use_real_http() {
 }
 
 #[tokio::test]
+async fn active_views_follow_effective_status_and_keep_archive_separate() {
+    let app = App::new(None).await;
+    let expected: Shipment = app
+        .create("Still expected", "expected")
+        .await
+        .json()
+        .await
+        .unwrap();
+    let mut ids = Vec::new();
+    for (index, status) in Status::TERMINAL.into_iter().enumerate() {
+        let shipment: Shipment = app
+            .create("Finished", &format!("finished-{index}"))
+            .await
+            .json()
+            .await
+            .unwrap();
+        let updated: Shipment = app
+            .request(
+                Method::PUT,
+                &format!("/v1/shipments/{}/status-override", shipment.id),
+            )
+            .header("If-Match", "\"1\"")
+            .json(&SetOverride {
+                status,
+                reason: "Human correction".into(),
+            })
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(updated.status, status);
+        ids.push(shipment.id);
+    }
+    let page: ResultsPage<Shipment> = app
+        .request(Method::GET, "/v1/shipments?active=true")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        page.items.iter().map(|s| s.id).collect::<Vec<_>>(),
+        [expected.id]
+    );
+    let page: ResultsPage<Shipment> = app
+        .request(Method::GET, "/v1/shipments?active=false")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(page.items.iter().map(|s| s.id).collect::<Vec<_>>(), ids);
+    let page: ResultsPage<Shipment> = app
+        .request(Method::GET, "/v1/shipments?active=false&status=delivered")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(page.items.len(), 1);
+    assert_eq!(page.items[0].id, ids[0]);
+    let archived = app
+        .request(
+            Method::PUT,
+            &format!("/v1/shipments/{}/archive", expected.id),
+        )
+        .header("If-Match", "\"1\"")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(archived.status(), StatusCode::OK);
+    let page: ResultsPage<Shipment> = app
+        .request(Method::GET, "/v1/shipments?active=true&archived=true")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(page.items.len(), 1);
+    assert_eq!(page.items[0].id, expected.id);
+    let summary: Summary = app
+        .request(Method::GET, "/v1/summary")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(summary.active, 0);
+    assert_eq!(summary.delivered, 1);
+    // Clearing a human correction brings the shipment back into the active view.
+    let cleared = app
+        .request(
+            Method::DELETE,
+            &format!("/v1/shipments/{}/status-override", ids[0]),
+        )
+        .header("If-Match", "\"2\"")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(cleared.status(), StatusCode::OK);
+    let page: ResultsPage<Shipment> = app
+        .request(Method::GET, "/v1/shipments?active=true")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(page.items.len(), 1);
+    assert_eq!(page.items[0].id, ids[0]);
+    app.close().await;
+}
+
+#[tokio::test]
 async fn ingress_checks_real_peer_and_browser_request_header() {
     let forbidden = App::new(Some("172.30.32.2".parse().unwrap())).await;
     assert_eq!(

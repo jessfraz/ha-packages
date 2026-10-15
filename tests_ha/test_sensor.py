@@ -18,7 +18,7 @@ async def test_summary_entities_and_unload(hass: HomeAssistant, entry) -> None:
     assert all(
         state.state == "unavailable" for state in hass.states.async_all("sensor")
     )
-    assert not hass.services.has_service(DOMAIN, "archive")
+    assert hass.services.has_service(DOMAIN, "archive")
     # Shared HA session survives unloading and the same view can serve a reload.
     assert await hass.config_entries.async_setup(entry.entry_id)
     await hass.async_block_till_done()

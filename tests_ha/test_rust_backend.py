@@ -117,17 +117,19 @@ async def test_ha_to_rust_contract(
     assert forbidden.status == 403
 
     # The native action uses the same Rust contract, ETag, and HA actor identity.
-    await hass.services.async_call(
+    action_result = await hass.services.async_call(
         DOMAIN,
         "set_override",
         {
             "shipment_id": shipment_id,
-            "if_match": etag,
-            "payload": {"status": "delivered", "reason": "Received in person"},
+            "status": "delivered",
+            "reason": "Received in person",
         },
         context=Context(user_id=hass_admin_user.id),
         blocking=True,
+        return_response=True,
     )
+    assert action_result == {"id": shipment_id, "revision": 2, "status": "delivered"}
     response = await admin.get(f"{PREFIX}/shipments/{shipment_id}")
     assert response.status == 200
     shipment = await response.json()
@@ -152,3 +154,17 @@ async def test_ha_to_rust_contract(
         f"ha:{hass_user.id}",
         f"ha:{hass_admin_user.id}",
     ]
+    created = await hass.services.async_call(
+        DOMAIN,
+        "add",
+        {"title": "Second parcel", "merchant": "Example shop"},
+        context=Context(user_id=hass_user.id),
+        blocking=True,
+        return_response=True,
+    )
+    assert created["id"] != shipment_id
+    assert created["revision"] == 1
+    assert created["status"] == "expected"
+    saved = await (await admin.get(f"{PREFIX}/shipments/{created['id']}")).json()
+    assert saved["title"] == "Second parcel"
+    assert saved["merchant"] == "Example shop"
