@@ -297,6 +297,8 @@ fn route_template(uri: &str) -> &'static str {
         "/openapi.json" => "/openapi.json",
         "/v1/shipments" => "/v1/shipments",
         "/v1/carriers" => "/v1/carriers",
+        "/v1/delivery-estimates" => "/v1/delivery-estimates",
+        "/v1/events" => "/v1/events",
         "/v1/summary" => "/v1/summary",
         "/v1/system" => "/v1/system",
         "/v1/installation" => "/v1/installation",

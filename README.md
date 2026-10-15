@@ -21,13 +21,45 @@ automatically.
 See [installation and configuration](shipments/DOCS.md) for both installation
 steps, EasyPost configuration, and standalone Docker instructions. The app
 dashboard's **Installation → Run checks** verifies the service, Home Assistant
-connection, authentication, read-only EasyPost access, and backup coverage.
+connection, app/integration version match, authentication, read-only EasyPost
+access, and backup coverage. Update both the app and HACS integration to
+**0.5.0**, then restart Home Assistant.
+
+The supervised integration adds a stable **Shipments** sidebar panel at
+`/shipments`, available to ordinary Home Assistant users. Status corrections,
+archiving, installation checks, and credential management still require an
+administrator. A standalone installation opens its configured backend URL.
+
+## Home Assistant entities
+
+Existing combined counts and the inbound/outbound counts keep their entity
+IDs. Counts use distinct status icons and `measurement` statistics: each value
+describes the current registry. The delivered count is not a deliveries-per-week
+counter. **Awaiting pickup** keeps the API key `expected` and combines expected,
+unknown, and pre-transit states; an unknown carrier state does not establish
+that a label exists or that pickup is pending.
+
+Two native problem entities flag delivery exceptions and synchronization
+errors. The read-only **Inbound deliveries** calendar includes active inbound
+shipments with a carrier ETA. Date-only estimates appear as all-day entries;
+timestamp estimates use a one-hour window. Outbound, archived, and terminal
+shipments, and missing or invalid estimates, do not appear. These are carrier
+estimates, not delivery appointments.
+
+The native shipment event entity emits `out_for_delivery`, `delivered`, and
+`exception` transitions from durable backend events. Attributes include
+`event_id`, `shipment_id`, `title`, `carrier`, `direction`, `status`, and `at`.
+Initial setup starts at the current event tail rather than replaying history.
+The integration saves its checkpoint across reloads and restarts. Delivery is
+at least once: use `event_id` to deduplicate automations when a restart occurs
+between emission and checkpoint persistence.
 
 ## Run standalone
 
 ```sh
 nix develop
 export SHIPMENTS_API_TOKEN="$(openssl rand -hex 32)"
+export SHIPMENTS_INTEGRATION_TOKEN="$(openssl rand -hex 32)"
 export EASYPOST_API_KEY="your-easypost-api-key"
 cargo run
 ```
@@ -35,6 +67,11 @@ cargo run
 Open `http://127.0.0.1:8080` and enter the token. The browser keeps it in memory
 for that tab. The default database is `shipments.sqlite3` in the working
 directory. Set `SHIPMENTS_DATABASE` to change it.
+Use the separate `SHIPMENTS_INTEGRATION_TOKEN` when pairing Home Assistant;
+the owner API token is for the direct dashboard and administrative clients.
+The tokens must be distinct and each contain 32–256 printable ASCII characters
+without whitespace. The integration token is optional when running without
+Home Assistant.
 
 `EASYPOST_API_KEY` enables background registration and tracking updates.
 Creates and tracking edits are saved even when the key is missing or EasyPost
@@ -78,6 +115,8 @@ carrier history. Pending registration is never presented as verified tracking.
 | GET | `/v1/carriers` | List supported EasyPost carrier values |
 | GET / PATCH | `/v1/shipments/{id}` | Read or edit |
 | GET | `/v1/shipments/{id}/events` | Read history |
+| GET | `/v1/events` | Read durable shipment status transitions |
+| GET | `/v1/delivery-estimates` | Page active inbound delivery estimates |
 | POST | `/v1/shipments/{id}/sources` | Attach evidence |
 | PUT / DELETE | `/v1/shipments/{id}/status-override` | Set or clear a correction |
 | PUT / DELETE | `/v1/shipments/{id}/archive` | Archive or restore |
@@ -171,6 +210,9 @@ Manual corrections, archiving, installation checks, and credential management
 require owner access.
 Home Assistant status corrections and archiving require an authenticated
 administrator. The adapter derives the actor from Home Assistant authentication.
+Ingress administrator access also requires a current authenticated integration
+check-in listing that active administrator. The list expires after three
+minutes; missing or stale check-ins deny privileged actions.
 
 An ingestion agent should look up a tracking or source reference, create or
 patch the record, and attach new evidence. The app handles tracking afterward.

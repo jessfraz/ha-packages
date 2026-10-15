@@ -1,13 +1,17 @@
 """Shipment counts exposed as native sensors."""
 
-from homeassistant.components.sensor import SensorEntity, SensorEntityDescription
+from homeassistant.components.sensor import (
+    SensorEntity,
+    SensorEntityDescription,
+    SensorStateClass,
+)
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from .const import DOMAIN, SUMMARY_KEYS
+from .const import DOMAIN, SENSOR_KEYS
 from .coordinator import ShipmentsCoordinator
 
 
@@ -19,7 +23,7 @@ async def async_setup_entry(
     """Add summary entities for the configured backend."""
     async_add_entities(
         ShipmentCountSensor(entry.runtime_data, entry.entry_id, key)
-        for key in SUMMARY_KEYS
+        for key in SENSOR_KEYS
     )
 
 
@@ -33,7 +37,7 @@ class ShipmentCountSensor(CoordinatorEntity[ShipmentsCoordinator], SensorEntity)
     ) -> None:
         super().__init__(coordinator)
         self.entity_description = SensorEntityDescription(
-            key=key, translation_key=key, icon="mdi:package-variant-closed"
+            key=key, translation_key=key, state_class=SensorStateClass.MEASUREMENT
         )
         self._attr_unique_id = f"{entry_id}_{key}"
         self._attr_device_info = DeviceInfo(
@@ -41,7 +45,15 @@ class ShipmentCountSensor(CoordinatorEntity[ShipmentsCoordinator], SensorEntity)
             name="Shipments",
             manufacturer="Shipments",
             model="Shipment registry",
+            configuration_url="homeassistant://shipments"
+            if coordinator.config_entry.data.get("addon_slug")
+            else coordinator.config_entry.data["backend_url"],
         )
+
+    @property
+    def suggested_object_id(self) -> str:
+        """Keep count IDs stable when their translated display labels change."""
+        return self.entity_description.key
 
     @property
     def native_value(self) -> int:

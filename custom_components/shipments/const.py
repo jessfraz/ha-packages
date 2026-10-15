@@ -17,3 +17,12 @@ SUMMARY_KEYS = (
     "exceptions",
     "sync_errors",
 )
+DIRECTION_SUMMARY_KEYS = {
+    "inbound": ("active", "out_for_delivery", "exceptions"),
+    "outbound": ("active", "exceptions"),
+}
+SENSOR_KEYS = SUMMARY_KEYS + tuple(
+    f"{direction}_{key}"
+    for direction, keys in DIRECTION_SUMMARY_KEYS.items()
+    for key in keys
+)

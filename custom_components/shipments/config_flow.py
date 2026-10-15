@@ -141,7 +141,7 @@ class ShipmentsConfigFlow(ConfigFlow, domain=DOMAIN):
             return self.async_abort(reason="invalid_discovery")
         errors: dict[str, str] = {}
         if user_input is not None:
-            if error := await self._async_validate(self._discovered, app=True):
+            if error := await self._async_validate(self._discovered):
                 errors["base"] = error
             elif self.source == SOURCE_REAUTH:
                 return self.async_update_reload_and_abort(
@@ -175,9 +175,7 @@ class ShipmentsConfigFlow(ConfigFlow, domain=DOMAIN):
         """Validate replacement standalone credentials before saving them."""
         return await self._async_configure(user_input, reauth=True)
 
-    async def _async_validate(
-        self, values: dict[str, str], *, app: bool = False
-    ) -> str | None:
+    async def _async_validate(self, values: dict[str, str]) -> str | None:
         try:
             client = ShipmentsClient(
                 async_get_clientsession(self.hass),
@@ -189,8 +187,7 @@ class ShipmentsConfigFlow(ConfigFlow, domain=DOMAIN):
                 return "invalid_auth"
             if response.status != 200 or not isinstance(data := response.json(), dict):
                 return "cannot_connect"
-            accepted_roles = {"integration"} if app else {"integration", "owner"}
-            if data.get("credential_role") not in accepted_roles:
+            if data.get("credential_role") != "integration":
                 return "integration_required"
         except InvalidBackendURL:
             return "invalid_url"

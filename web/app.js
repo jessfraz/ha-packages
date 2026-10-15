@@ -2,7 +2,7 @@
 
 const byId = (id) => document.getElementById(id);
 const labels = {
-  expected: "Expected",
+  expected: "Awaiting pickup",
   unknown: "Unknown",
   pre_transit: "Label created",
   in_transit: "In transit",
@@ -243,7 +243,23 @@ async function connect() {
   byId("login").hidden = true;
   byId("dashboard").hidden = false;
   byId("add").hidden = false;
-  showInstallation = system.credential_role === "owner";
+  setOwnerAccess(system.credential_role === "owner", true);
+  byId("health").textContent = system.provider_enabled
+    ? `${system.pending_syncs} tracking checks scheduled · ${system.sync_errors} sync errors`
+    : "Shipments save locally. Set the EasyPost API key to register them and receive tracking updates.";
+  connected = true;
+  try {
+    await applyRoute(true);
+  } finally {
+    scheduleRefresh();
+  }
+}
+
+function setOwnerAccess(owner, reset = false) {
+  if (showInstallation === owner && !reset) return;
+  showInstallation = owner;
+  // Role and connection changes invalidate pending credential responses and
+  // clear any one-time token before privileged controls can disappear.
   agentSession += 1;
   agentCredentials = [];
   clearAgentToken();
@@ -254,16 +270,39 @@ async function connect() {
   byId("agent-error").textContent = "";
   byId("create-agent").textContent = "Create credential";
   setAgentBusy(false);
-  if (!showInstallation) byId("agent-access").open = false;
-  else if (byId("agent-access").open) loadAgents();
-  byId("health").textContent = system.provider_enabled
-    ? `${system.pending_syncs} tracking checks scheduled · ${system.sync_errors} sync errors`
-    : "Shipments save locally. Set the EasyPost API key to register them and receive tracking updates.";
-  connected = true;
+  installationInitialized = false;
+  installationNeedsAttention = false;
+  byId("installation-checks").replaceChildren();
+  byId("installation-summary").textContent = owner ? "Checking…" : "";
+  byId("backup-date").textContent = "";
+  if (!owner) {
+    byId("agent-access").open = false;
+    byId("installation").open = false;
+  } else if (byId("agent-access").open) {
+    loadAgents();
+  }
+  byId("correction").hidden = !owner;
+  for (const button of byId("actions").querySelectorAll("[data-owner-only]"))
+    button.hidden = !owner;
+}
+
+async function refreshInstallation(generation, signal) {
+  const session = agentSession;
   try {
-    await applyRoute(true);
-  } finally {
-    scheduleRefresh();
+    const report = await api("v1/installation", { signal });
+    if (signal.aborted || generation !== listGeneration || session !== agentSession || !showInstallation) return;
+    renderInstallation(report);
+  } catch (error) {
+    if (signal.aborted || generation !== listGeneration || session !== agentSession) return;
+    if ([401, 403].includes(error.status)) {
+      setOwnerAccess(false);
+      return;
+    }
+    installationNeedsAttention = true;
+    byId("installation-summary").textContent = "Checks unavailable";
+    const row = element("li", undefined, "check-attention");
+    row.append(element("strong", "Installation checks unavailable"), element("p", error.message));
+    byId("installation-checks").replaceChildren(row);
   }
 }
 
@@ -299,17 +338,20 @@ async function load(append = false) {
   }
 
   try {
-    const [summary, page, system, installation] = await Promise.all([
+    const [summary, page, system] = await Promise.all([
       api(activeDirection === "all" ? "v1/summary" : `v1/summary?direction=${activeDirection}`, { signal: controller.signal }),
       api(`v1/shipments?${query}`, { signal: controller.signal }),
-      api("v1/system", { signal: controller.signal }),
-      showInstallation ? api("v1/installation", { signal: controller.signal }) : null,
+      api("v1/system", { signal: controller.signal }).then(system => {
+        if (!controller.signal.aborted && generation === listGeneration)
+          setOwnerAccess(system.credential_role === "owner");
+        return system;
+      }),
     ]);
     // A search or archive-filter change owns its whole result, including any
     // pagination requests already in flight for the previous list.
     if (generation !== listGeneration) return;
     providerEnabled = system.provider_enabled;
-    if (installation) renderInstallation(installation);
+    if (showInstallation) refreshInstallation(generation, controller.signal);
     byId("health").textContent = system.provider_enabled
       ? `${system.pending_syncs} tracking checks scheduled · ${system.sync_errors} sync errors`
       : "Shipments save locally. Set the EasyPost API key to register them and receive tracking updates.";
@@ -440,6 +482,7 @@ function renderInstallation(report) {
   for (const [key, label] of [
     ["backend", "App and database"],
     ["integration", "Home Assistant"],
+    ["version", "App / integration versions"],
     ["authentication", "Authentication"],
     ["easypost", "EasyPost"],
     ["backup", "Backup"],
@@ -476,17 +519,25 @@ function renderInstallation(report) {
   else byId("management").insertBefore(installation, byId("agent-access"));
   installation.hidden = false;
   if (!installationInitialized) {
-    byId("installation").open = attention > 0;
+    const params = route();
+    byId("installation").open = params.has("installation")
+      ? params.get("installation") === "open" : attention > 0;
     installationInitialized = true;
   }
 }
 
 byId("check-installation").addEventListener("click", guarded(async () => {
+  const session = agentSession;
   const button = byId("check-installation");
   button.disabled = true;
   button.textContent = "Checking…";
   try {
-    renderInstallation(await api("v1/installation/check", { method: "POST" }));
+    const report = await api("v1/installation/check", { method: "POST" });
+    if (session === agentSession && showInstallation) renderInstallation(report);
+  } catch (error) {
+    if (session !== agentSession) return;
+    if ([401, 403].includes(error.status)) setOwnerAccess(false);
+    else throw error;
   } finally {
     button.disabled = false;
     button.textContent = "Run checks";
@@ -565,6 +616,10 @@ async function loadAgents() {
     renderAgents();
   } catch (error) {
     if (session === agentSession) {
+      if ([401, 403].includes(error.status)) {
+        setOwnerAccess(false);
+        return;
+      }
       byId("agent-status").textContent = "";
       byId("agent-error").textContent = `Could not load credentials. ${error.message} Use Refresh credentials to retry.`;
     }
@@ -980,8 +1035,10 @@ async function show(id, preserveView = false) {
 
   const actions = byId("actions");
   actions.replaceChildren();
-  const button = (label, action) => {
+  const button = (label, action, ownerOnly = false) => {
     const node = element("button", label, "quiet");
+    if (ownerOnly) node.dataset.ownerOnly = "true";
+    node.hidden = ownerOnly && !showInstallation;
     node.addEventListener("click", guarded(() => { userNavigation(); return action(); }));
     actions.append(node);
   };
@@ -989,13 +1046,14 @@ async function show(id, preserveView = false) {
   if (shipment.tracking && !shipment.archived)
     button("Refresh tracking", () => mutate("refresh", "POST"));
   if (shipment.status_override)
-    button("Clear correction", () => mutate("status-override", "DELETE"));
+    button("Clear correction", () => mutate("status-override", "DELETE"), true);
   button(shipment.archived ? "Restore" : "Archive", () =>
-    mutate("archive", shipment.archived ? "DELETE" : "PUT"),
+    mutate("archive", shipment.archived ? "DELETE" : "PUT"), true,
   );
   if (!preserveView) {
     for (const id of ["correction", "activity"]) byId(id).open = route().get("section") === id;
   }
+  byId("correction").hidden = !showInstallation;
   byId("override-form").reset();
   byId("detail-error").textContent = "";
   byId("events").replaceChildren();

@@ -4,8 +4,11 @@
 use crate::sync::EasyPostClient;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::Mutex;
+
+const PRESENCE_MAX_AGE: Duration = Duration::from_secs(180);
 
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -30,6 +33,8 @@ pub struct BackupReport {
 pub struct IntegrationPresence {
     pub version: String,
     pub backup: BackupReport,
+    #[serde(default)]
+    pub administrator_ids: Vec<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
@@ -53,6 +58,7 @@ pub struct Check {
 pub struct InstallationReport {
     pub backend: Check,
     pub integration: Check,
+    pub version: Check,
     pub authentication: Check,
     pub easypost: Check,
     pub backup: Check,
@@ -78,6 +84,19 @@ impl Installation {
 
     pub async fn presence(&self, report: IntegrationPresence) {
         *self.presence.lock().await = Some((Instant::now(), report));
+    }
+
+    /// The authenticated adapter supplies the active administrator set. Expiry
+    /// denies privileged ingress actions until Home Assistant checks in again.
+    pub async fn is_admin(&self, id: &str) -> bool {
+        self.presence
+            .lock()
+            .await
+            .as_ref()
+            .is_some_and(|(at, presence)| {
+                at.elapsed() < PRESENCE_MAX_AGE
+                    && presence.administrator_ids.iter().any(|admin| admin == id)
+            })
     }
 
     pub async fn check_provider(&self, provider: Option<&EasyPostClient>) {
@@ -117,7 +136,7 @@ impl Installation {
         let presence = self.presence.lock().await;
         let recent = presence
             .as_ref()
-            .filter(|(at, _)| at.elapsed() < Duration::from_secs(180));
+            .filter(|(at, _)| at.elapsed() < PRESENCE_MAX_AGE);
         let integration = if let Some((_, presence)) = recent {
             Check::pass(&format!(
                 "Home Assistant integration {} is loaded and connected.",
@@ -142,6 +161,27 @@ impl Installation {
             )
         } else {
             Check::pass("Your API credential was accepted.")
+        };
+        let version = match recent {
+            Some((_, presence)) if presence.version == env!("CARGO_PKG_VERSION") => {
+                Check::pass(&format!(
+                    "The app and Home Assistant integration both run {}.",
+                    env!("CARGO_PKG_VERSION")
+                ))
+            }
+            Some((_, presence)) => Check::attention(&format!(
+                "The app runs {} and the Home Assistant integration runs {}. Update both the app and HACS integration to the same release, then restart Home Assistant.",
+                env!("CARGO_PKG_VERSION"), presence.version
+            )),
+            None => Check {
+                status: if self.supervised {
+                    CheckStatus::Unavailable
+                } else {
+                    CheckStatus::NotApplicable
+                },
+                message: "No recent integration check-in. The app and integration versions have not been compared.".into(),
+                checked_at: None,
+            },
         };
         let easypost = if !provider_enabled {
             Check {
@@ -171,6 +211,7 @@ impl Installation {
         InstallationReport {
             backend: Check::pass("The app is running and SQLite is responding."),
             integration,
+            version,
             authentication,
             easypost,
             backup,
@@ -201,8 +242,16 @@ pub fn valid_presence(presence: &IntegrationPresence) -> bool {
         .duration_since(UNIX_EPOCH)
         .map(|value| value.as_secs())
         .unwrap_or_default();
+    let mut administrator_ids = HashSet::new();
     semver::Version::parse(&presence.version).is_ok()
         && presence.version.len() <= 64
+        && presence.administrator_ids.len() <= 200
+        && presence.administrator_ids.iter().all(|id| {
+            !id.is_empty()
+                && id.len() <= 200
+                && id.bytes().all(|byte| byte.is_ascii_graphic())
+                && administrator_ids.insert(id)
+        })
         && presence
             .backup
             .last_backup
@@ -363,6 +412,7 @@ mod tests {
         installation
             .presence(IntegrationPresence {
                 version: "0.2.0".into(),
+                administrator_ids: Vec::new(),
                 backup: BackupReport {
                     status: BackupStatus::Complete,
                     last_backup: Some(1_700_000_000),
@@ -376,6 +426,7 @@ mod tests {
         let stale = installation.report(false).await;
         assert_eq!(stale.integration.status, CheckStatus::Attention);
         assert_eq!(stale.authentication.status, CheckStatus::Attention);
+        assert_eq!(stale.version.status, CheckStatus::Unavailable);
         assert_eq!(stale.backup.status, CheckStatus::Unavailable);
         assert_eq!(stale.last_backup, None);
     }
@@ -384,6 +435,7 @@ mod tests {
     fn presence_rejects_unsupported_versions_and_inconsistent_backup_reports() {
         let mut report = IntegrationPresence {
             version: "0.2.0".into(),
+            administrator_ids: Vec::new(),
             backup: BackupReport {
                 status: BackupStatus::Missing,
                 last_backup: None,
@@ -397,5 +449,111 @@ mod tests {
         assert!(!valid_presence(&report));
         report.backup.last_backup = Some(i64::MAX);
         assert!(!valid_presence(&report));
+    }
+
+    fn integration_presence(version: &str, administrators: &[&str]) -> IntegrationPresence {
+        IntegrationPresence {
+            version: version.into(),
+            administrator_ids: administrators.iter().map(|id| (*id).into()).collect(),
+            backup: BackupReport {
+                status: BackupStatus::Missing,
+                last_backup: None,
+            },
+        }
+    }
+
+    #[tokio::test]
+    async fn recent_version_match_is_separate_from_connectivity_and_authentication() {
+        let installation = Installation::new(true);
+        for (version, expected) in [
+            (env!("CARGO_PKG_VERSION").to_owned(), CheckStatus::Pass),
+            ("0.2.0".to_owned(), CheckStatus::Attention),
+            (
+                format!("{}+different-build", env!("CARGO_PKG_VERSION")),
+                CheckStatus::Attention,
+            ),
+        ] {
+            installation
+                .presence(integration_presence(&version, &[]))
+                .await;
+            let report = installation.report(false).await;
+            assert_eq!(report.integration.status, CheckStatus::Pass);
+            assert_eq!(report.authentication.status, CheckStatus::Pass);
+            assert_eq!(report.version.status, expected);
+            assert!(report.version.message.contains(env!("CARGO_PKG_VERSION")));
+            assert!(report.version.message.contains(&version));
+            if expected == CheckStatus::Attention {
+                assert!(report.version.message.contains("Update both"));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn missing_presence_never_claims_matching_versions() {
+        assert_eq!(
+            Installation::new(true).report(false).await.version.status,
+            CheckStatus::Unavailable
+        );
+        assert_eq!(
+            Installation::new(false).report(false).await.version.status,
+            CheckStatus::NotApplicable
+        );
+    }
+
+    #[tokio::test]
+    async fn administrator_access_requires_current_presence_and_exact_membership() {
+        let installation = Installation::new(true);
+        assert!(!installation.is_admin("admin-one").await);
+        installation
+            .presence(integration_presence(
+                env!("CARGO_PKG_VERSION"),
+                &["admin-one", "admin-two"],
+            ))
+            .await;
+        assert!(installation.is_admin("admin-one").await);
+        assert!(installation.is_admin("admin-two").await);
+        assert!(!installation.is_admin("admin").await);
+        assert!(!installation.is_admin("admin-one-suffix").await);
+        assert!(!installation.is_admin("user").await);
+
+        installation.presence.lock().await.as_mut().unwrap().0 =
+            Instant::now() - Duration::from_secs(180);
+        assert!(!installation.is_admin("admin-one").await);
+
+        installation
+            .presence(integration_presence(env!("CARGO_PKG_VERSION"), &[]))
+            .await;
+        assert!(!installation.is_admin("admin-one").await);
+    }
+
+    #[test]
+    fn administrator_presence_rejects_duplicates_malformed_ids_and_oversized_sets() {
+        let mut report = integration_presence(env!("CARGO_PKG_VERSION"), &[]);
+        assert!(valid_presence(&report));
+        report.administrator_ids = vec!["a".repeat(200)];
+        assert!(valid_presence(&report));
+        for invalid in ["", "admin one", "admin\n", "\u{00e9}", &"a".repeat(201)] {
+            report.administrator_ids = vec![invalid.into()];
+            assert!(
+                !valid_presence(&report),
+                "accepted malformed administrator ID"
+            );
+        }
+        report.administrator_ids = vec!["same-id".into(), "same-id".into()];
+        assert!(!valid_presence(&report));
+        report.administrator_ids = (0..200).map(|index| format!("admin-{index}")).collect();
+        assert!(valid_presence(&report));
+        report.administrator_ids.push("one-too-many".into());
+        assert!(!valid_presence(&report));
+    }
+
+    #[test]
+    fn omitted_administrator_set_deserializes_without_granting_access() {
+        let report: IntegrationPresence = serde_json::from_str(
+            r#"{"version":"0.2.0","backup":{"status":"missing","last_backup":null}}"#,
+        )
+        .unwrap();
+        assert!(report.administrator_ids.is_empty());
+        assert!(valid_presence(&report));
     }
 }

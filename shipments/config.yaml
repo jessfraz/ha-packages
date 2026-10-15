@@ -1,5 +1,5 @@
 name: Shipments
-version: "0.4.0"
+version: "0.5.0"
 slug: shipments
 description: A local shipment registry with a Home Assistant dashboard
 url: https://github.com/jessfraz/ha-packages
@@ -13,7 +13,7 @@ backup: cold
 init: false
 ingress: true
 ingress_port: 8099
-panel_admin: true
+panel_admin: false
 panel_icon: mdi:package-variant-closed
 ports:
   8080/tcp: null

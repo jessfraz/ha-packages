@@ -15,7 +15,11 @@ from .coordinator import ShipmentsCoordinator
 _UUID = r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
 _ROUTES = (
     (re.compile(r"shipments"), frozenset({"GET", "POST"}), False),
-    (re.compile(r"summary|system|carriers"), frozenset({"GET"}), False),
+    (
+        re.compile(r"summary|system|carriers|delivery-estimates"),
+        frozenset({"GET"}),
+        False,
+    ),
     (re.compile(rf"shipments/{_UUID}"), frozenset({"GET", "PATCH"}), False),
     (re.compile(rf"shipments/{_UUID}/events"), frozenset({"GET"}), False),
     (re.compile(rf"shipments/{_UUID}/(?:sources|refresh)"), frozenset({"POST"}), False),
@@ -74,6 +78,8 @@ class ShipmentsView(HomeAssistantView):
                 allowed_query = _LIST_QUERY
             elif path == "summary":
                 allowed_query = {"direction"}
+            elif path == "delivery-estimates":
+                allowed_query = _EVENT_QUERY
             elif path.endswith("/events"):
                 allowed_query = _EVENT_QUERY
         if len(request.query_string) > 4096 or request.query.keys() - allowed_query:
@@ -119,7 +125,13 @@ class ShipmentsView(HomeAssistantView):
             raise web.HTTPBadGateway from None
         if request.method != "GET" and response.status < 300:
             # Let polling reconcile native counts without delaying the REST response.
-            self._hass.async_create_task(coordinator.async_request_refresh())
+            entry = coordinator.config_entry
+            if entry is not None and entry.state is ConfigEntryState.LOADED:
+                entry.async_create_background_task(
+                    self._hass,
+                    coordinator.async_request_refresh(),
+                    "Shipments refresh after action",
+                )
         return web.Response(
             status=response.status, body=response.body, headers=response.headers
         )

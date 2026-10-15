@@ -39,6 +39,12 @@ The app shares a separate integration credential through authenticated
 Supervisor discovery. Pairing does not require pasting a URL or token.
 Internal app networking does not require a host port mapping.
 
+The integration also adds a **Shipments** sidebar panel at the stable
+`/shipments` path. Ordinary Home Assistant users can open the dashboard;
+administrator-only actions still enforce administrator access. The device's
+**Visit** link opens this panel for supervised apps. A standalone installation
+uses its configured backend URL instead.
+
 If there is no discovered card, choose **Add integration → Shipments → Connect
 the Home Assistant app**. Start the app if prompted, then select **Submit** to
 find it and confirm the connection.
@@ -55,6 +61,7 @@ Open the app dashboard, expand **Installation**, and select **Run checks**.
 | --- | --- |
 | App and database | The service is running and SQLite responds. |
 | Home Assistant | The integration has checked in recently. |
+| App / integration versions | A recent check-in reports the same app and integration version. |
 | Authentication | Home Assistant authenticated with the app. |
 | EasyPost | The configured key permits a read-only tracking request. |
 | Backup | A recorded backup includes the app and Home Assistant configuration. |
@@ -64,9 +71,15 @@ If either needs attention, finish the HACS installation, restart Home
 Assistant, and confirm the connection in **Devices & services**. If already
 paired, check the integration for a connection or authentication error.
 
+Version mismatch is a separate warning: connectivity and authentication can
+pass while the two installed versions differ. Update both the app through the
+App Store and the integration through HACS to **0.5.0**, then restart Home
+Assistant. Without a recent integration check-in, the version match is
+unverified.
+
 **Run checks** makes a read-only EasyPost request when a key is configured;
-results are cached for up to a minute. A key is required to add shipments or
-change their tracking details.
+results are cached for up to a minute. Without a key, new shipments and tracking
+edits are still saved; their EasyPost registration remains pending.
 
 The backup check shows the recorded backup time. It requires a backup made
 after pairing. An older, app-only, or missing backup needs attention; an
@@ -74,6 +87,75 @@ unavailable backup inventory is reported as
 **Unavailable**. Include both **Shipments** and **Home Assistant** when
 creating a backup in **Settings → System → Backups**. The check confirms backup
 inventory and coverage; restore testing is a separate step.
+
+## Sensors
+
+The integration keeps the existing counts combined across inbound and outbound
+shipments, including **Exceptions** and **Sync errors**. It also adds:
+
+| Sensor key | Counts |
+| --- | --- |
+| `inbound_active` | Active packages you receive. |
+| `inbound_out_for_delivery` | Incoming packages out for delivery. |
+| `inbound_exceptions` | Incoming packages with a delivery exception. |
+| `outbound_active` | Active packages you send. |
+| `outbound_exceptions` | Outgoing packages with a delivery exception. |
+
+By default, their entity IDs are `sensor.shipments_` followed by the sensor key,
+for example `sensor.shipments_inbound_out_for_delivery`. Use the direction
+sensors in dashboard tiles and automations to distinguish incoming deliveries
+from outgoing packages or returns. Counts refresh together every minute.
+
+All count sensors have `measurement` state class and distinct status icons.
+They are gauges of the current unarchived registry, not cumulative counters.
+For example, **Delivered** is not the number delivered this week: archiving a
+delivered shipment reduces that count. Keep the existing `expected` sensor
+entity ID; its visible name is now **Awaiting pickup**. That API aggregate
+includes expected, unknown, and pre-transit shipments. An unknown tracking state
+does not prove the carrier has created a label or is waiting for pickup.
+
+The integration also creates native problem entities:
+
+| Default entity ID | On when |
+| --- | --- |
+| `binary_sensor.shipments_exceptions` | At least one unarchived shipment has a delivery exception. |
+| `binary_sensor.shipments_sync_errors` | At least one unarchived shipment has a synchronization error. |
+
+Transport failures make coordinated entities unavailable; they do not turn an
+unknown problem state into a healthy one.
+
+## Delivery calendar
+
+`calendar.shipments_inbound_deliveries` is a read-only calendar of carrier
+estimates for active inbound shipments. Date-only ETAs create all-day entries;
+ETAs with a time zone create one-hour estimated windows. Missing or invalid
+dates, outbound shipments, archived records, and terminal shipments do not
+appear. Estimates can change and are not guaranteed delivery times.
+
+## Shipment events
+
+Use the native `event.shipments` entity for `out_for_delivery`, `delivered`,
+and `exception` transitions. Its attributes contain:
+
+| Attribute | Meaning |
+| --- | --- |
+| `event_id` | Stable backend event ID for deduplication. |
+| `shipment_id` | Shipment UUID. |
+| `title` | Shipment title when the transition occurred. |
+| `carrier` | Carrier, or `null` when unknown. |
+| `direction` | `inbound` or `outbound`. |
+| `status` | The effective shipment status. |
+| `at` | Backend transition timestamp. |
+
+Events come from committed backend transitions, rather than changes in summary
+counts. On first setup the integration records the current event tail and
+does not replay existing history. A per-entry checkpoint persists across
+reloads and restarts. Each page is emitted before its checkpoint is saved, so
+delivery is at least once: a restart in that interval can repeat an event.
+Deduplicate consequential automations using `event_id`.
+
+Default entity IDs can change if another entity already uses the name or you
+rename an entity in Home Assistant.
 
 ## Settings
 
@@ -167,32 +249,42 @@ stable `idempotency_key` instead of generating a new shipment on each attempt.
 Actions require an authenticated Home Assistant user. Status corrections and
 archiving additionally require an administrator. They are explicit human
 decisions; unattended ingestion should use the restricted agent API token.
+For ingress, the app checks the administrator IDs supplied by a recent
+authenticated integration heartbeat. Only active administrators qualify; the
+list expires after three minutes and a missing or stale list denies privileged
+actions. Keep the integration connected so this authorization can refresh.
 
 ## Standalone Docker
 
 The same image runs without Home Assistant. Docker is required. Create an
-owner token, set your EasyPost key, and start it with a persistent volume:
+owner token and a separate integration token, set your EasyPost key, and start
+it with a persistent volume:
 
 ```sh
 export SHIPMENTS_API_TOKEN="$(openssl rand -hex 32)"
+export SHIPMENTS_INTEGRATION_TOKEN="$(openssl rand -hex 32)"
 export EASYPOST_API_KEY="your-easypost-api-key"
 docker run --detach --name shipments --restart unless-stopped \
   --publish 127.0.0.1:8080:8080 \
   --mount type=volume,source=shipments-data,target=/data \
   --env SHIPMENTS_API_TOKEN \
+  --env SHIPMENTS_INTEGRATION_TOKEN \
   --env EASYPOST_API_KEY \
-  ghcr.io/jessfraz/ha-packages:0.3.0
+  ghcr.io/jessfraz/ha-packages:0.5.0
 ```
 
-Open `http://127.0.0.1:8080` and enter the token. Save it in your password
-manager before closing the shell. Tracker registration can incur EasyPost
+Open `http://127.0.0.1:8080` and enter the owner API token. Save both tokens in
+your password manager before closing the shell. They must be distinct and
+contain 32–256 printable ASCII characters without whitespace. Tracker registration can incur EasyPost
 charges. The image supports amd64 and arm64 and runs the service as an
 unprivileged user.
 
 To use the integration with a standalone server, install it through HACS and
 restart Home Assistant. Then choose **Settings → Devices & services → Add
 integration → Shipments → Connect a standalone service** and enter the server
-URL and owner token. Expose port 8080 on a trusted network address that Home
+URL and integration token. The owner token is not accepted for new standalone
+pairing or reauthentication. If you run without Home Assistant, the integration
+token is optional. Expose port 8080 on a trusted network address that Home
 Assistant can reach. Use TLS for access across untrusted networks.
 
 ## Data and backups
@@ -212,6 +304,8 @@ The app version selects a matching prebuilt container image. Release tags
 publish images for amd64 and aarch64. Update the app through the App Store and
 the integration through HACS. Restart Home Assistant after integration updates.
 Back up both parts before upgrading.
+The installation checks and Home Assistant Repairs warn when app and
+integration versions differ. Update both parts to the same release.
 
 The 0.3.0 upgrade permanently deletes legacy shipments without a tracking
 number, including their sources, history, and saved idempotency responses.
