@@ -33,6 +33,7 @@ _LIST_QUERY = {
     "source_key",
     "search",
     "archived",
+    "active",
     "status",
     "limit",
     "page_token",

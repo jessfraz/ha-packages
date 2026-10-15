@@ -463,7 +463,7 @@
   "info": {
     "description": "Persistent local shipment records, manual corrections, and carrier synchronization. Use a Bearer owner or ingestion token. Creates require Idempotency-Key; writes to an existing shipment require its quoted revision in If-Match.",
     "title": "Shipments API",
-    "version": "0.1.0"
+    "version": "0.1.1"
   },
   "openapi": "3.0.3",
   "paths": {
@@ -549,6 +549,15 @@
       "get": {
         "operationId": "shipments_list",
         "parameters": [
+          {
+            "description": "Filter by whether the effective status is nonterminal.",
+            "in": "query",
+            "name": "active",
+            "schema": {
+              "nullable": true,
+              "type": "boolean"
+            }
+          },
           {
             "in": "query",
             "name": "archived",

@@ -20,11 +20,10 @@ pub enum Status {
 }
 
 impl Status {
+    pub const TERMINAL: [Self; 3] = [Self::Delivered, Self::ReturnToSender, Self::Cancelled];
+
     pub fn is_terminal(self) -> bool {
-        matches!(
-            self,
-            Self::Delivered | Self::ReturnToSender | Self::Cancelled
-        )
+        Self::TERMINAL.contains(&self)
     }
 }
 
@@ -179,6 +178,8 @@ pub struct Filters {
     pub source_key: Option<String>,
     pub search: Option<String>,
     pub archived: Option<bool>,
+    /// Filter by whether the effective status is nonterminal.
+    pub active: Option<bool>,
     pub status: Option<Status>,
 }
 

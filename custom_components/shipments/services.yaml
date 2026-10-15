@@ -1,69 +1,116 @@
 add:
   name: Add shipment
-  description: Add a shipment to the registry.
+  description: Add an expected delivery, with or without a tracking number.
   fields:
-    payload:
-      name: Shipment
-      description: Shipment fields accepted by the service API.
+    title:
+      name: Title
       required: true
-      selector:
-        object:
-    idempotency_key:
-      name: Idempotency key
-      description: A unique key reused only when retrying this same creation.
-      required: true
+      example: Office supplies
       selector:
         text:
+    merchant:
+      name: Merchant
+      selector:
+        text:
+    order_reference:
+      name: Order reference
+      selector:
+        text:
+    tracking_number:
+      name: Tracking number
+      selector:
+        text:
+    carrier:
+      name: Carrier
+      description: Leave blank to let the tracking provider identify the carrier.
+      example: USPS
+      selector:
+        text:
+    advanced:
+      collapsed: true
+      fields:
+        idempotency_key:
+          name: Retry key
+          description: >-
+            Optional. A new key is generated for each action call. Supply the same
+            key when retrying the same creation after an uncertain result.
+          selector:
+            text:
 refresh:
   name: Refresh shipment
   description: Ask the service to refresh tracking for a shipment.
   fields:
     shipment_id: &shipment_id
       name: Shipment ID
+      description: The ID returned by Add shipment or the shipment API.
       required: true
       selector:
         text:
-    if_match: &if_match
-      name: Current ETag
-      description: The current shipment version from the service API.
-      required: true
-      selector:
-        text:
-    idempotency_key: &idempotency_key
-      name: Idempotency key
-      selector:
-        text:
+    advanced: &version_fields
+      collapsed: true
+      fields:
+        if_match:
+          name: Expected version
+          description: >-
+            Optional. Uses the current version when omitted. Supply a quoted
+            ETag to reject changes made since you last read the shipment.
+          selector:
+            text:
 set_override:
   name: Set status override
   description: Record an administrator's explicit status decision.
   fields:
     shipment_id: *shipment_id
-    if_match: *if_match
-    idempotency_key: *idempotency_key
-    payload:
-      name: Override
-      description: Status and reason accepted by the service API.
+    status:
+      name: Status
       required: true
       selector:
-        object:
+        select:
+          options:
+            - value: expected
+              label: Expected
+            - value: unknown
+              label: Unknown
+            - value: pre_transit
+              label: Label created
+            - value: in_transit
+              label: In transit
+            - value: out_for_delivery
+              label: Out for delivery
+            - value: available_for_pickup
+              label: Ready for pickup
+            - value: delivered
+              label: Delivered
+            - value: return_to_sender
+              label: Returning to sender
+            - value: failure
+              label: Delivery exception
+            - value: cancelled
+              label: Cancelled
+            - value: error
+              label: Tracking error
+    reason:
+      name: Reason
+      required: true
+      example: Received in person
+      selector:
+        text:
+    advanced: *version_fields
 clear_override:
   name: Clear status override
   description: Remove an administrator's status override.
   fields:
     shipment_id: *shipment_id
-    if_match: *if_match
-    idempotency_key: *idempotency_key
+    advanced: *version_fields
 archive:
   name: Archive shipment
   description: Archive a shipment after an administrator's explicit decision.
   fields:
     shipment_id: *shipment_id
-    if_match: *if_match
-    idempotency_key: *idempotency_key
+    advanced: *version_fields
 unarchive:
   name: Restore shipment
   description: Return an archived shipment to the active registry.
   fields:
     shipment_id: *shipment_id
-    if_match: *if_match
-    idempotency_key: *idempotency_key
+    advanced: *version_fields

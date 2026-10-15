@@ -1,41 +1,72 @@
 """Native Home Assistant actions backed by the same Rust API."""
 
 import json
-from uuid import UUID
+from typing import TypedDict
+from uuid import UUID, uuid4
 
 import probatio as vol
 from aiohttp import ClientError
-from homeassistant.core import HomeAssistant, ServiceCall
+from homeassistant.core import HomeAssistant, ServiceCall, SupportsResponse
 from homeassistant.exceptions import (
     HomeAssistantError,
     ServiceValidationError,
     Unauthorized,
 )
 
-from .client import ResponseTooLarge
+from .client import BackendResponse, ResponseTooLarge
 from .const import DOMAIN, MAX_REQUEST_BYTES
 from .http import loaded_coordinator
 
 SERVICE_ACTIONS = {
-    "add": ("POST", "/v1/shipments", False, True),
-    "refresh": ("POST", "/v1/shipments/{shipment_id}/refresh", False, False),
-    "set_override": ("PUT", "/v1/shipments/{shipment_id}/status-override", True, True),
-    "clear_override": (
-        "DELETE",
-        "/v1/shipments/{shipment_id}/status-override",
-        True,
-        False,
-    ),
-    "archive": ("PUT", "/v1/shipments/{shipment_id}/archive", True, False),
-    "unarchive": ("DELETE", "/v1/shipments/{shipment_id}/archive", True, False),
+    "add": ("POST", "/v1/shipments", False),
+    "refresh": ("POST", "/v1/shipments/{shipment_id}/refresh", False),
+    "set_override": ("PUT", "/v1/shipments/{shipment_id}/status-override", True),
+    "clear_override": ("DELETE", "/v1/shipments/{shipment_id}/status-override", True),
+    "archive": ("PUT", "/v1/shipments/{shipment_id}/archive", True),
+    "unarchive": ("DELETE", "/v1/shipments/{shipment_id}/archive", True),
 }
 
 
-def async_register_services(hass: HomeAssistant) -> None:
-    """Register actions once for the loaded backend."""
+class ShipmentActionResponse(TypedDict):
+    """Identity and resulting state returned to a calling HA script."""
 
-    async def handle(call: ServiceCall) -> None:
-        method, path, admin_only, _ = SERVICE_ACTIONS[call.service]
+    id: str
+    revision: int
+    status: str
+
+
+def _check_response(response: BackendResponse) -> None:
+    if response.status == 412:
+        raise HomeAssistantError(
+            "The shipment changed before this action could be saved (HTTP 412). "
+            "Review the current shipment before trying again."
+        )
+    if not 200 <= response.status < 300:
+        raise HomeAssistantError(
+            f"The Shipments backend rejected the action (HTTP {response.status})"
+        )
+
+
+def _response_data(response: BackendResponse) -> ShipmentActionResponse:
+    try:
+        data = response.json()
+    except ValueError:
+        raise HomeAssistantError("The backend returned an invalid shipment") from None
+    if (
+        not isinstance(data, dict)
+        or not isinstance(data.get("id"), str)
+        or type(data.get("revision")) is not int
+        or not isinstance(data.get("status"), str)
+    ):
+        raise HomeAssistantError("The backend returned an invalid shipment")
+    return {"id": data["id"], "revision": data["revision"], "status": data["status"]}
+
+
+def async_register_services(hass: HomeAssistant) -> None:
+    """Keep actions available for editing even when the backend is unloaded."""
+
+    async def handle(call: ServiceCall) -> ShipmentActionResponse | None:
+        method, path, admin_only = SERVICE_ACTIONS[call.service]
         user_id = call.context.user_id
         user = await hass.auth.async_get_user(user_id) if user_id else None
         if user is None or not user.is_active or (admin_only and not user.is_admin):
@@ -43,52 +74,86 @@ def async_register_services(hass: HomeAssistant) -> None:
         coordinator = loaded_coordinator(hass)
         if coordinator is None:
             raise ServiceValidationError("Shipments is not loaded")
-        if "shipment_id" in call.data:
+        actor = f"ha:{user.id}"
+        shipment_path = None
+        if call.service != "add":
             try:
                 shipment_id = str(UUID(call.data["shipment_id"]))
             except ValueError as err:
                 raise ServiceValidationError("Invalid shipment ID") from err
+            shipment_path = f"/v1/shipments/{shipment_id}"
             path = path.format(shipment_id=shipment_id)
-        body = None
-        if "payload" in call.data:
-            body = json.dumps(call.data["payload"]).encode()
-            if len(body) > MAX_REQUEST_BYTES:
-                raise ServiceValidationError("Shipment payload is too large")
-        headers = {
-            header: call.data[field]
-            for field, header in (
-                ("if_match", "If-Match"),
-                ("idempotency_key", "Idempotency-Key"),
+
+        payload: dict[str, object] | None = None
+        if call.service == "add":
+            tracking = None
+            if call.data.get("tracking_number") or call.data.get("carrier"):
+                tracking = {
+                    "number": call.data.get("tracking_number", ""),
+                    "carrier": call.data.get("carrier") or None,
+                }
+            payload = {
+                "title": call.data["title"],
+                "merchant": call.data.get("merchant") or None,
+                "order_reference": call.data.get("order_reference") or None,
+                "tracking": tracking,
+            }
+        elif call.service == "set_override":
+            payload = {"status": call.data["status"], "reason": call.data["reason"]}
+        body = json.dumps(payload).encode() if payload is not None else None
+        if body and len(body) > MAX_REQUEST_BYTES:
+            raise ServiceValidationError("Shipment payload is too large")
+
+        headers: dict[str, str] = {}
+        if call.service == "add":
+            headers["Idempotency-Key"] = (
+                call.data["idempotency_key"]
+                if "idempotency_key" in call.data
+                else str(uuid4())
             )
-            if field in call.data
-        }
+        elif "if_match" in call.data:
+            headers["If-Match"] = call.data["if_match"]
         try:
+            if shipment_path and "If-Match" not in headers:
+                current = await coordinator.client.request(
+                    "GET", shipment_path, actor=actor
+                )
+                _check_response(current)
+                if not (etag := current.headers.get("ETag")):
+                    raise HomeAssistantError("The backend omitted the shipment version")
+                headers["If-Match"] = etag
+            # A concurrent change must fail. Never fetch and retry a rejected write.
             response = await coordinator.client.request(
-                method, path, actor=f"ha:{user.id}", body=body, headers=headers
+                method, path, actor=actor, body=body, headers=headers
             )
         except ClientError, TimeoutError, ResponseTooLarge:
             raise HomeAssistantError("Cannot contact the Shipments backend") from None
-        if response.status >= 300:
-            raise HomeAssistantError(
-                f"The Shipments backend rejected the action (HTTP {response.status})"
-            )
+        _check_response(response)
         await coordinator.async_request_refresh()
+        return _response_data(response) if call.return_response else None
 
-    for name, (_, _, _, needs_payload) in SERVICE_ACTIONS.items():
-        fields = {
-            vol.Required("idempotency_key")
-            if name == "add"
-            else vol.Optional("idempotency_key"): str,
-        }
-        if name != "add":
-            fields[vol.Required("shipment_id")] = str
-            fields[vol.Required("if_match")] = str
-        if needs_payload:
-            fields[vol.Required("payload")] = dict
-        hass.services.async_register(DOMAIN, name, handle, schema=vol.Schema(fields))
-
-
-def async_remove_services(hass: HomeAssistant) -> None:
-    """Remove actions when the backend unloads."""
     for name in SERVICE_ACTIONS:
-        hass.services.async_remove(DOMAIN, name)
+        if name == "add":
+            fields = {
+                vol.Required("title"): str,
+                vol.Optional("merchant"): str,
+                vol.Optional("order_reference"): str,
+                vol.Optional("tracking_number"): str,
+                vol.Optional("carrier"): str,
+                vol.Optional("idempotency_key"): str,
+            }
+        else:
+            fields = {
+                vol.Required("shipment_id"): str,
+                vol.Optional("if_match"): str,
+            }
+            if name == "set_override":
+                fields[vol.Required("status")] = str
+                fields[vol.Required("reason")] = str
+        hass.services.async_register(
+            DOMAIN,
+            name,
+            handle,
+            schema=vol.Schema(fields),
+            supports_response=SupportsResponse.OPTIONAL,
+        )
