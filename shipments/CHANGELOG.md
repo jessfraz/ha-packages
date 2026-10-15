@@ -2,6 +2,9 @@
 
 ## 0.3.1
 
+- Write redacted JSON registration, sync, and request logs with UTC timestamps,
+  request IDs, safe routes, durations, and error codes. Credentials, tracking
+  numbers, request bodies, raw URLs, and provider messages stay out of logs.
 - Share EasyPost concurrency and rate-limit protection across tracking checks,
   tracking verification, and connection checks. Respect provider cooldowns and
   give callers a clear retry time without saving unverified input.

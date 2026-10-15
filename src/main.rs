@@ -15,6 +15,7 @@ async fn main() -> Result<()> {
         std::fs::write(path, serde_json::to_string_pretty(&api::openapi()?)?)?;
         return Ok(());
     }
+    let log = shipments::logging::logger();
     let store = Store::open(&config.database).await?;
     let token = config
         .api_token
@@ -22,17 +23,18 @@ async fn main() -> Result<()> {
         .context("missing owner credential")?;
     let provider = config
         .easypost_api_key
-        .map(EasyPostClient::new)
+        .map(|key| EasyPostClient::new(key).map(|client| client.with_logger(log.clone())))
         .transpose()?;
     let mut context = api::Context::new(store.clone(), token, None, provider.clone());
     if let Some(token) = &config.integration_token {
         context = context.with_integration(token);
     }
-    let server = api::start(config.bind, Arc::new(context.clone()))?;
+    let server = api::start_with_logger(config.bind, Arc::new(context.clone()), log.clone())?;
     let ingress = if let Some(bind) = config.ingress_bind {
-        Some(api::start(
+        Some(api::start_with_logger(
             bind,
             Arc::new(context.for_ingress(config.ingress_peer)),
+            log.clone(),
         )?)
     } else {
         None
@@ -42,12 +44,13 @@ async fn main() -> Result<()> {
         (Supervisor::from_environment()?, config.integration_token)
     {
         let mut discovery_stop = stop_rx.clone();
+        let log = log.clone();
         Some(tokio::spawn(async move {
             loop {
                 tokio::select! {
                     _ = discovery_stop.changed() => break,
                     result = supervisor.announce(&integration_token) => {
-                        if result.is_err() { eprintln!("Home Assistant discovery is unavailable; retrying"); }
+                        if result.is_err() { slog::warn!(log, "integration_discovery"; "operation" => "discovery", "outcome" => "error", "error_code" => "discovery_unavailable"); }
                     }
                 }
                 tokio::select! {
@@ -61,12 +64,13 @@ async fn main() -> Result<()> {
     };
     let worker = if let Some(provider) = provider {
         let worker = SyncWorker::new(store.pool().clone(), provider);
+        let log = log.clone();
         Some(tokio::spawn(async move {
             loop {
                 tokio::select! {
                     _=stop_rx.changed()=>break,
                     result=worker.tick()=>{
-                        let delay=match result {Ok(true)=>std::time::Duration::from_millis(100),Ok(false)=>std::time::Duration::from_secs(5),Err(_)=>{eprintln!("tracking worker database error; retrying");std::time::Duration::from_secs(30)}};
+                        let delay=match result {Ok(true)=>std::time::Duration::from_millis(100),Ok(false)=>std::time::Duration::from_secs(5),Err(_)=>{slog::error!(log, "tracking_sync"; "operation" => "sync", "outcome" => "error", "error_code" => "database_error");std::time::Duration::from_secs(30)}};
                         tokio::select! {_=stop_rx.changed()=>break,_=tokio::time::sleep(delay)=>{}}
                     }
                 }

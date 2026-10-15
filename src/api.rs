@@ -7,10 +7,9 @@ use crate::{
 use anyhow::{Context as _, Result, anyhow};
 use dropshot::ClientErrorStatusCode as StatusCode;
 use dropshot::{
-    ApiDescription, Body, ConfigDropshot, ConfigLogging, ConfigLoggingLevel, HttpError,
-    HttpResponseCreated, HttpResponseHeaders, HttpResponseOk, HttpResponseUpdatedNoContent,
-    HttpServer, HttpServerStarter, PaginationParams, Path, Query, RequestContext, ResultsPage,
-    TypedBody, WhichPage, endpoint,
+    ApiDescription, Body, ConfigDropshot, HttpError, HttpResponseCreated, HttpResponseHeaders,
+    HttpResponseOk, HttpResponseUpdatedNoContent, HttpServer, HttpServerStarter, PaginationParams,
+    Path, Query, RequestContext, ResultsPage, TypedBody, WhichPage, endpoint,
 };
 use http::{HeaderValue, Response};
 use schemars::JsonSchema;
@@ -280,7 +279,8 @@ async fn shipments_create(
     let key = header(&request, "idempotency-key")
         .ok_or_else(|| client_error(StatusCode::BAD_REQUEST, "Idempotency-Key is required"))?;
     let mut input = body.into_inner();
-    validate_create(&mut input, key)?;
+    validate_create(&mut input, key)
+        .map_err(|error| log_validation_error(&request, error, "create"))?;
     let store = &request.context().store;
     let shipment = if let Some(saved) = store.replay_create(&input, &principal.actor, key).await? {
         saved
@@ -320,7 +320,7 @@ async fn shipment_update(
     let id = path.into_inner().id;
     let expected_revision = revision(&request)?;
     let mut input = body.into_inner();
-    validate_update(&mut input)?;
+    validate_update(&mut input).map_err(|error| log_validation_error(&request, error, "update"))?;
     let verified = if let Some(value) = &mut input.tracking.value {
         let tracking = value
             .as_mut()
@@ -362,15 +362,31 @@ fn tracking_error(code: &str, status: dropshot::ErrorStatusCode, message: &str) 
     }
 }
 
+fn log_validation_error(
+    request: &RequestContext<Arc<Context>>,
+    error: crate::error::Error,
+    operation: &'static str,
+) -> HttpError {
+    let error: HttpError = error.into();
+    slog::warn!(request.log, "tracking_verification";
+        "request_id" => request.request_id.clone(), "operation" => operation,
+        "outcome" => "rejected", "error_code" => error.error_code.clone());
+    error
+}
+
 async fn verify_tracking(
     request: &RequestContext<Arc<Context>>,
     tracking: &Tracking,
 ) -> Result<Tracker, HttpError> {
-    let provider = request.context().provider.as_ref().ok_or_else(|| tracking_error(
+    let provider = request.context().provider.as_ref().ok_or_else(|| {
+        slog::warn!(request.log, "tracking_verification";
+            "request_id" => request.request_id.clone(), "operation" => "register",
+            "outcome" => "unavailable", "error_code" => "tracking_provider_unconfigured");
+        tracking_error(
         "tracking_provider_unconfigured", dropshot::ErrorStatusCode::SERVICE_UNAVAILABLE,
         "Configure the EasyPost API key before adding shipments or changing tracking numbers. No changes were saved.",
-    ))?;
-    provider.register(&tracking.number, tracking.carrier.as_deref()).await.map_err(|error| {
+    )})?;
+    provider.with_request_id(&request.request_id).register(&tracking.number, tracking.carrier.as_deref()).await.map_err(|error| {
         let unavailable = dropshot::ErrorStatusCode::SERVICE_UNAVAILABLE;
         let error = match error {
             SyncError::Throttled { retry_after } => SyncError::Http { status: 429, retry_after: Some(retry_after) },
@@ -378,14 +394,7 @@ async fn verify_tracking(
         };
         match error {
             SyncError::Rejected(rejection) => {
-                let code = match rejection {
-                    TrackerRejection::NoCarrierForCode => "tracking_unsupported",
-                    TrackerRejection::CarrierCodeMismatch => "tracking_carrier_mismatch",
-                    TrackerRejection::MultipleCarriersForCode => "tracking_carrier_ambiguous",
-                    TrackerRejection::InvalidParams => "tracking_invalid",
-                    TrackerRejection::InvalidTestCode => "tracking_test_key",
-                    TrackerRejection::NoCarrierAccount => "tracking_carrier_account_required",
-                };
+                let code = rejection.error_code();
                 let status = if rejection == TrackerRejection::NoCarrierAccount { unavailable } else { dropshot::ErrorStatusCode::BAD_REQUEST };
                 tracking_error(code, status, &rejection.to_string())
             }
@@ -609,10 +618,11 @@ async fn installation_check(
 ) -> Result<HttpResponseOk<InstallationReport>, HttpError> {
     require_owner(&request).await?;
     let context = request.context();
-    context
-        .installation
-        .check_provider(context.provider.as_ref())
-        .await;
+    let provider = context
+        .provider
+        .as_ref()
+        .map(|provider| provider.with_request_id(&request.request_id));
+    context.installation.check_provider(provider.as_ref()).await;
     installation_report(&request).await.map(HttpResponseOk)
 }
 
@@ -803,11 +813,14 @@ pub fn openapi() -> Result<serde_json::Value> {
 }
 
 pub fn start(bind: SocketAddr, context: Arc<Context>) -> Result<HttpServer<Arc<Context>>> {
-    let logger = ConfigLogging::StderrTerminal {
-        level: ConfigLoggingLevel::Warn,
-    }
-    .to_logger("shipments")
-    .map_err(|error| anyhow!("logger: {error}"))?;
+    start_with_logger(bind, context, crate::logging::logger())
+}
+
+pub fn start_with_logger(
+    bind: SocketAddr,
+    context: Arc<Context>,
+    logger: slog::Logger,
+) -> Result<HttpServer<Arc<Context>>> {
     HttpServerStarter::new(
         &ConfigDropshot {
             bind_address: bind,

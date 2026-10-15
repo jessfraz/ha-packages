@@ -2035,10 +2035,12 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "slog",
  "sqlx",
  "subtle",
  "tempfile",
  "thiserror",
+ "time",
  "tokio",
  "uuid",
 ]

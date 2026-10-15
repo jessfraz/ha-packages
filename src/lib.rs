@@ -2,6 +2,7 @@ pub mod api;
 pub mod config;
 pub mod error;
 pub mod installation;
+pub mod logging;
 pub mod models;
 pub mod store;
 pub mod supervisor;
