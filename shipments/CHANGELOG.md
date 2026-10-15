@@ -9,6 +9,8 @@
   arrivals sorted by ETA.
 - Exclude tracking numbers from sensor attributes and package lists from
   recorder history. Keep failed or inconsistent snapshots unavailable.
+- Exercise EasyPost's real test-mode API in CI for registration, tracking,
+  replay, restart and tracking-number changes, using documented test fixtures.
 
 ## 0.5.3
 
