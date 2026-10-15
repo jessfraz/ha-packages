@@ -4,30 +4,52 @@
     "step": {
       "user": {
         "title": "Connect to Shipments",
-        "description": "Enter the service origin and owner credential. For the Home Assistant app, use http://HOSTNAME:8080 with the hostname shown on its Info tab.",
+        "menu_options": {
+          "app": "Connect the Home Assistant app",
+          "standalone": "Connect a standalone service"
+        }
+      },
+      "app": {
+        "title": "Start the Shipments app",
+        "description": "Install and start Shipments in Settings → Apps, then select Submit to find it. The custom integration must be installed and Home Assistant restarted first. Standalone installations can use the standalone service option instead."
+      },
+      "hassio_confirm": {
+        "title": "Connect the Shipments app",
+        "description": "Connect this app to Home Assistant? Connection credentials are exchanged privately through Supervisor. No token setup is needed."
+      },
+      "standalone": {
+        "title": "Connect a standalone service",
+        "description": "Enter the service origin and its integration credential. These details are needed only when the service runs outside the Home Assistant app.",
         "data": {
-          "backend_url": "Backend URL",
-          "token": "Owner token"
+          "backend_url": "Service URL",
+          "token": "API credential"
         }
       },
       "reauth_confirm": {
-        "title": "Connect to Shipments",
-        "description": "Enter the service origin and owner credential. For the Home Assistant app, use http://HOSTNAME:8080 with the hostname shown on its Info tab.",
+        "title": "Reconnect the service",
+        "description": "Enter the service origin and replacement credential. Home Assistant app connections normally obtain their credentials automatically.",
         "data": {
-          "backend_url": "Backend URL",
-          "token": "Owner token"
+          "backend_url": "Service URL",
+          "token": "API credential"
         }
       }
     },
     "error": {
-      "cannot_connect": "Cannot connect to the Shipments service.",
-      "invalid_auth": "The service rejected the credential.",
-      "owner_required": "Use the owner credential for the Home Assistant adapter.",
-      "invalid_url": "Enter an HTTP or HTTPS origin without credentials, path, query, or fragment."
+      "cannot_connect": "Cannot connect to the Shipments service. Check that it is running and try again.",
+      "invalid_auth": "The service rejected its credential.",
+      "integration_required": "This connection needs an integration credential. An ingestion credential cannot connect Home Assistant.",
+      "invalid_url": "Enter an HTTP or HTTPS origin without credentials, path, query, or fragment.",
+      "app_not_found": "The Shipments app has not announced a connection. Install or start it, then try again.",
+      "supervisor_required": "This Home Assistant installation does not manage apps. Connect a standalone service instead.",
+      "supervisor_unavailable": "Cannot contact Home Assistant Supervisor. Try again after it is available.",
+      "multiple_apps": "Several Shipments apps are available. Use the discovered integration card for the app you want."
     },
     "abort": {
       "single_instance_allowed": "Only one Shipments backend can be configured.",
-      "reauth_successful": "The service credential was updated."
+      "reauth_successful": "The service credential was updated.",
+      "invalid_discovery": "The app announced incomplete or invalid connection details. Restart or update the app and try again.",
+      "already_configured": "This Shipments app is already connected.",
+      "unique_id_mismatch": "This is a different app from the existing connection."
     }
   },
   "entity": {

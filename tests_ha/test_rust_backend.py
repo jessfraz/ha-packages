@@ -1,31 +1,53 @@
 """Cross-language contract through real HA auth and the compiled Rust service."""
 
 import asyncio
+import json
 import os
 from collections.abc import AsyncIterator
+from dataclasses import dataclass, field
 from datetime import timedelta
 from pathlib import Path
 
 import pytest
 from aiohttp import ClientError, ClientTimeout
-from homeassistant.config_entries import SOURCE_USER
+from homeassistant.config_entries import SOURCE_HASSIO, SOURCE_USER, ConfigEntryState
 from homeassistant.core import Context, HomeAssistant
 from homeassistant.data_entry_flow import FlowResultType
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
+from homeassistant.helpers.service_info.hassio import HassioServiceInfo
 from homeassistant.util import dt as dt_util
 from pytest_homeassistant_custom_component.common import async_fire_time_changed
 
-from custom_components.shipments.const import CONF_BACKEND_URL, CONF_TOKEN, DOMAIN
+from custom_components.shipments.const import (
+    CONF_ADDON_SLUG,
+    CONF_BACKEND_URL,
+    CONF_TOKEN,
+    DOMAIN,
+    SUMMARY_KEYS,
+)
 
 OWNER_TOKEN = "test-owner-credential-at-least-32-characters"
 AGENT_TOKEN = "test-agent-credential-at-least-32-characters"
 PREFIX = "/api/shipments/v1"
 
 
+@dataclass
+class RustBackend:
+    """A disposable real service with credentials excluded from test output."""
+
+    origin: str
+    owner_token: str = field(repr=False)
+    integration_token: str | None = field(default=None, repr=False)
+
+
 @pytest.fixture
 async def rust_backend(
-    hass: HomeAssistant, tmp_path: Path, unused_tcp_port: int, socket_enabled
-) -> AsyncIterator[str]:
+    hass: HomeAssistant,
+    tmp_path: Path,
+    unused_tcp_port: int,
+    request: pytest.FixtureRequest,
+    socket_enabled,
+) -> AsyncIterator[RustBackend]:
     """Launch the actual binary with disposable SQLite and no provider access."""
     binary = Path(os.environ.get("SHIPMENTS_TEST_BINARY", "target/debug/shipments"))
     if not await asyncio.to_thread(binary.is_file):
@@ -33,17 +55,29 @@ async def rust_backend(
     environment = {
         key: value
         for key, value in os.environ.items()
-        if not key.startswith("SHIPMENTS_") and key != "EASYPOST_API_KEY"
+        if not key.startswith(("SHIPMENTS_", "SUPERVISOR"))
+        and key != "EASYPOST_API_KEY"
     }
-    environment["SHIPMENTS_API_TOKEN"] = OWNER_TOKEN
-    environment["SHIPMENTS_AGENT_TOKEN"] = AGENT_TOKEN
-    origin = f"http://127.0.0.1:{unused_tcp_port}"
-    process = await asyncio.create_subprocess_exec(
-        str(await asyncio.to_thread(binary.resolve)),
+    arguments = [
         "--bind",
         f"127.0.0.1:{unused_tcp_port}",
         "--database",
         str(tmp_path / "shipments.sqlite3"),
+    ]
+    app_mode = getattr(request, "param", False)
+    owner_token = None if app_mode else OWNER_TOKEN
+    integration_token = None
+    if app_mode:
+        options = tmp_path / "options.json"
+        await asyncio.to_thread(options.write_text, "{}")
+        arguments.extend(("--options", str(options)))
+    else:
+        environment["SHIPMENTS_API_TOKEN"] = OWNER_TOKEN
+        environment["SHIPMENTS_AGENT_TOKEN"] = AGENT_TOKEN
+    origin = f"http://127.0.0.1:{unused_tcp_port}"
+    process = await asyncio.create_subprocess_exec(
+        str(await asyncio.to_thread(binary.resolve)),
+        *arguments,
         env=environment,
         stdout=asyncio.subprocess.DEVNULL,
         stderr=asyncio.subprocess.PIPE,
@@ -53,10 +87,22 @@ async def rust_backend(
             while True:
                 if process.returncode is not None:
                     pytest.fail("The Rust service exited during startup")
+                if owner_token is None:
+                    try:
+                        credentials = json.loads(
+                            await asyncio.to_thread(
+                                (tmp_path / "credentials.json").read_text
+                            )
+                        )
+                    except FileNotFoundError:
+                        await asyncio.sleep(0.01)
+                        continue
+                    owner_token = credentials["owner"]
+                    integration_token = credentials["integration"]
                 try:
                     async with async_get_clientsession(hass).get(
                         f"{origin}/v1/system",
-                        headers={"Authorization": f"Bearer {OWNER_TOKEN}"},
+                        headers={"Authorization": f"Bearer {owner_token}"},
                         timeout=ClientTimeout(total=1),
                     ) as response:
                         if response.status == 200:
@@ -64,7 +110,7 @@ async def rust_backend(
                 except ClientError, TimeoutError:
                     pass
                 await asyncio.sleep(0.01)
-        yield origin
+        yield RustBackend(origin, owner_token, integration_token)
     finally:
         if process.returncode is None:
             process.terminate()
@@ -82,13 +128,19 @@ async def test_ha_to_rust_contract(
     hass_admin_user,
     hass_user,
     hass_user_token: str,
-    rust_backend: str,
+    rust_backend: RustBackend,
 ) -> None:
     """Create, confirm, audit, and count a shipment across the actual boundary."""
     configured = await hass.config_entries.flow.async_init(
         DOMAIN,
         context={"source": SOURCE_USER},
-        data={CONF_BACKEND_URL: rust_backend, CONF_TOKEN: OWNER_TOKEN},
+    )
+    configured = await hass.config_entries.flow.async_configure(
+        configured["flow_id"], {"next_step_id": "standalone"}
+    )
+    configured = await hass.config_entries.flow.async_configure(
+        configured["flow_id"],
+        {CONF_BACKEND_URL: rust_backend.origin, CONF_TOKEN: rust_backend.owner_token},
     )
     assert configured["type"] is FlowResultType.CREATE_ENTRY
     await hass.async_block_till_done()
@@ -168,3 +220,57 @@ async def test_ha_to_rust_contract(
     saved = await (await admin.get(f"{PREFIX}/shipments/{created['id']}")).json()
     assert saved["title"] == "Second parcel"
     assert saved["merchant"] == "Example shop"
+
+
+@pytest.mark.parametrize("rust_backend", [True], indirect=True, ids=["app"])
+async def test_app_generated_pairing_and_loaded_check_in(
+    hass: HomeAssistant, rust_backend: RustBackend
+) -> None:
+    """Pair an empty-options app without asking the user for any credential."""
+    discovery_uuid = "019c6e27e55b73d187d84e01f1f75043"
+    addon_slug = "testrepo_shipments"
+    session = async_get_clientsession(hass)
+    async with session.get(
+        f"{rust_backend.origin}/v1/system",
+        headers={"Authorization": f"Bearer {rust_backend.integration_token}"},
+    ) as response:
+        assert response.status == 200
+        assert (await response.json())["credential_role"] == "integration"
+
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN,
+        context={"source": SOURCE_HASSIO},
+        data=HassioServiceInfo(
+            config={
+                CONF_BACKEND_URL: rust_backend.origin,
+                CONF_TOKEN: rust_backend.integration_token,
+            },
+            name="Shipments",
+            slug=addon_slug,
+            uuid=discovery_uuid,
+        ),
+    )
+    assert result["type"] is FlowResultType.FORM
+    assert result["step_id"] == "hassio_confirm"
+    assert not hass.config_entries.async_entries(DOMAIN)
+    result = await hass.config_entries.flow.async_configure(result["flow_id"], {})
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    await hass.async_block_till_done(wait_background_tasks=True)
+    entry = result["result"]
+    assert entry.state is ConfigEntryState.LOADED
+    assert entry.unique_id == discovery_uuid
+    assert entry.data[CONF_ADDON_SLUG] == addon_slug
+    assert entry.data[CONF_BACKEND_URL] == rust_backend.origin
+    for key in SUMMARY_KEYS:
+        assert hass.states.get(f"sensor.shipments_{key}").state == "0"
+
+    async with session.get(
+        f"{rust_backend.origin}/v1/installation",
+        headers={"Authorization": f"Bearer {rust_backend.owner_token}"},
+    ) as response:
+        assert response.status == 200
+        installation = await response.json()
+    assert installation["integration"]["status"] == "pass"
+    assert installation["authentication"]["status"] == "pass"
+    assert installation["backup"]["status"] == "unavailable"
+    assert installation["last_backup"] is None

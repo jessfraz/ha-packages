@@ -138,9 +138,17 @@ impl Provider {
                             while !stopping.load(Ordering::Relaxed) {
                                 match receiver.recv_timeout(Duration::from_millis(20)) {
                                     Ok(reply) => {
+                                        let chunked = reply.headers.iter().any(|(key, value)| key.eq_ignore_ascii_case("transfer-encoding") && value == "chunked");
                                         let headers = reply.headers.iter().map(|(key, value)| format!("{key}: {value}\r\n")).collect::<String>();
-                                        let head = format!("HTTP/1.1 {} Test\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n{}\r\n", reply.status, reply.body.len(), headers);
-                                        if stream.write_all(head.as_bytes()).is_ok() { let _ = stream.write_all(reply.body.as_bytes()); }
+                                        let length = if chunked { String::new() } else { format!("Content-Length: {}\r\n", reply.body.len()) };
+                                        let head = format!("HTTP/1.1 {} Test\r\nContent-Type: application/json\r\n{length}Connection: close\r\n{headers}\r\n", reply.status);
+                                        if stream.write_all(head.as_bytes()).is_ok() {
+                                            if chunked {
+                                                let _ = write!(stream, "{:x}\r\n{}\r\n0\r\n\r\n", reply.body.len(), reply.body);
+                                            } else {
+                                                let _ = stream.write_all(reply.body.as_bytes());
+                                            }
+                                        }
                                         break;
                                     }
                                     Err(mpsc::RecvTimeoutError::Timeout) => {}
@@ -688,4 +696,122 @@ async fn provider_client_bounds_responses_rejects_redirects_and_redacts_parse_er
         task.await.unwrap(),
         Err(SyncError::InvalidResponse)
     ));
+}
+
+#[tokio::test]
+async fn connection_check_reads_one_page_without_creating_trackers() {
+    #[derive(Serialize)]
+    struct Page {
+        trackers: Vec<ListedTracker>,
+        has_more: bool,
+    }
+    #[derive(Serialize)]
+    struct ListedTracker {
+        object: &'static str,
+        id: &'static str,
+        tracking_code: &'static str,
+    }
+
+    let mut provider = Provider::start();
+    let client = provider.client();
+    for trackers in [
+        Vec::new(),
+        vec![ListedTracker {
+            object: "Tracker",
+            id: "trk_private",
+            tracking_code: "PRIVATE-TRACKING-NUMBER",
+        }],
+    ] {
+        let client = client.clone();
+        let task = tokio::spawn(async move { client.check_connection().await });
+        let request = provider.request().await;
+        assert_eq!(request.method, "GET");
+        assert_eq!(request.path, "/v2/trackers?page_size=1");
+        assert_eq!(
+            request.authorization.as_deref(),
+            Some("Basic dGVzdC1zZWNyZXQ6")
+        );
+        assert!(request.body.is_empty());
+        request.reply(Reply {
+            status: 200,
+            headers: Vec::new(),
+            body: serde_json::to_string(&Page {
+                has_more: !trackers.is_empty(),
+                trackers,
+            })
+            .unwrap(),
+        });
+        task.await.unwrap().unwrap();
+        // The response's pagination flag cannot cause extra reads or writes.
+        assert!(provider.incoming.try_recv().is_err());
+    }
+}
+
+#[tokio::test]
+async fn connection_check_redacts_authentication_errors_and_never_follows_redirects() {
+    let mut provider = Provider::start();
+    let capture = Provider::start();
+    let client = provider.client();
+    let task_client = client.clone();
+    let task = tokio::spawn(async move { task_client.check_connection().await });
+    provider.request().await.reply(Reply::error(401));
+    let error = task.await.unwrap().unwrap_err();
+    assert_eq!(error.to_string(), "EasyPost returned HTTP 401");
+    assert!(!format!("{error:?}").contains("test-secret"));
+
+    let task = tokio::spawn(async move { client.check_connection().await });
+    provider.request().await.reply(Reply {
+        status: 302,
+        headers: vec![("Location".into(), capture.base.clone())],
+        body: "test-secret and private account data".into(),
+    });
+    let error = task.await.unwrap().unwrap_err();
+    assert_eq!(error.to_string(), "EasyPost returned HTTP 302");
+    assert!(matches!(error, SyncError::Http { status: 302, .. }));
+    assert!(capture.incoming.is_empty());
+    assert!(provider.incoming.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn connection_check_rejects_invalid_and_oversized_success_responses() {
+    let mut provider = Provider::start();
+    let client = provider.client();
+    for body in [
+        "{test-secret: private-data}",
+        "{}",
+        r#"{"trackers":"private account data","has_more":false}"#,
+        r#"{"trackers":[{"object":"User"}],"has_more":false}"#,
+        r#"{"trackers":[{"object":"Tracker"},{"object":"Tracker"}],"has_more":false}"#,
+        r#"{"trackers":[],"has_more":"test-secret"}"#,
+    ] {
+        let client = client.clone();
+        let task = tokio::spawn(async move { client.check_connection().await });
+        provider.request().await.reply(Reply {
+            status: 200,
+            headers: Vec::new(),
+            body: body.into(),
+        });
+        let error = task.await.unwrap().unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "EasyPost returned an invalid connection-check response"
+        );
+        assert!(matches!(error, SyncError::InvalidConnectionResponse));
+    }
+    for headers in [
+        Vec::new(),
+        vec![("Transfer-Encoding".into(), "chunked".into())],
+    ] {
+        let client = client.clone();
+        let task = tokio::spawn(async move { client.check_connection().await });
+        provider.request().await.reply(Reply {
+            status: 200,
+            headers,
+            body: "test-secret".repeat(26 * 1024),
+        });
+        assert!(matches!(
+            task.await.unwrap(),
+            Err(SyncError::ResponseTooLarge)
+        ));
+    }
 }

@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.2.0
+
+- Pair the app and integration through Home Assistant discovery. Credentials
+  are generated and stored privately; setup no longer asks for an owner token
+  or internal hostname.
+- Give the integration a separate credential for shipment actions. Installation
+  checks and EasyPost connection checks remain owner-only.
+- Document HACS installation and show guidance when the other component is
+  missing.
+- Add installation checks for the app, database, integration, authentication,
+  read-only EasyPost access, and backup coverage.
+- Update SQLx, UUID, nixpkgs, and the checkout action.
+
 ## 0.1.1
 
 - Default to active deliveries, with delivered, all, and archived views.

@@ -8,7 +8,21 @@ One Rust process, a SQLite database, and a small Home Assistant adapter. Records
 and history stay local. EasyPost is optional; adding and editing shipments
 works when it is disabled or unavailable.
 
-## Run
+## Install on Home Assistant
+
+Install the **Shipments app** from the App Store to run the service and
+dashboard. Add `https://github.com/jessfraz/ha-packages` to **HACS → Custom
+repositories** as an **Integration**, download **Shipments**, and restart Home
+Assistant. Confirm the discovered integration in **Settings → Devices &
+services** to enable sensors and native actions. The app manages credentials
+automatically.
+
+See [installation and configuration](shipments/DOCS.md) for both installation
+steps, optional EasyPost tracking, and standalone Docker instructions. The app
+dashboard's **Installation → Run checks** verifies the service, Home Assistant
+connection, authentication, read-only EasyPost access, and backup coverage.
+
+## Run standalone
 
 ```sh
 nix develop
@@ -24,10 +38,6 @@ Set `EASYPOST_API_KEY` to enable tracking. Standalone tracker registration can
 incur EasyPost charges, and some carriers require their own credentials. The
 service makes no carrier requests until tracking is configured and a shipment
 has a tracking number. The provider key belongs to the server alone.
-
-For Docker and Home Assistant installation, see
-[the app instructions](shipments/DOCS.md). The app and the Python integration
-are separate installation artifacts in this repository.
 
 ## API
 
@@ -58,6 +68,8 @@ optional. There is no hard-delete endpoint; archive unwanted records.
 | POST | `/v1/shipments/{id}/refresh` | Queue a tracking check |
 | GET | `/v1/summary` | Read counts |
 | GET | `/v1/system` | Read synchronization health |
+| GET | `/v1/installation` | Read installation status with an owner credential |
+| POST | `/v1/installation/check` | Run the read-only provider check with an owner credential |
 
 Creates require `Idempotency-Key`. The committed response survives restarts;
 retrying the same request returns it. A different input with the same key
@@ -80,11 +92,12 @@ to continue, with an optional `limit` of up to 200.
 
 ## Agents and human corrections
 
-Set a separate `SHIPMENTS_AGENT_TOKEN` for ingestion clients. It can read, add,
-edit, attach evidence, and request tracking updates. It cannot set or clear
-manual corrections, archive, or restore. Human actions use the owner token or
-an authenticated Home Assistant administrator. The adapter derives the actor
-from Home Assistant authentication.
+For standalone ingestion, set a separate `SHIPMENTS_AGENT_TOKEN`. In the Home
+Assistant app, use the optional `agent_token` setting. This credential can
+read, add, edit, attach evidence, and request tracking updates. Manual
+corrections, archiving, and installation checks require an owner credential.
+Home Assistant status corrections and archiving require an authenticated
+administrator. The adapter derives the actor from Home Assistant authentication.
 
 An ingestion agent should look up a tracking or source reference, create or
 patch the record, and attach new evidence. The app handles tracking afterward.

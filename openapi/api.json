@@ -13,6 +13,58 @@
       }
     },
     "schemas": {
+      "BackupReport": {
+        "additionalProperties": false,
+        "properties": {
+          "last_backup": {
+            "format": "int64",
+            "nullable": true,
+            "type": "integer"
+          },
+          "status": {
+            "$ref": "#/components/schemas/BackupStatus"
+          }
+        },
+        "required": [
+          "status"
+        ],
+        "type": "object"
+      },
+      "BackupStatus": {
+        "enum": [
+          "complete",
+          "app_only",
+          "outdated",
+          "missing",
+          "unavailable",
+          "standalone"
+        ],
+        "type": "string"
+      },
+      "Check": {
+        "properties": {
+          "message": {
+            "type": "string"
+          },
+          "status": {
+            "$ref": "#/components/schemas/CheckStatus"
+          }
+        },
+        "required": [
+          "message",
+          "status"
+        ],
+        "type": "object"
+      },
+      "CheckStatus": {
+        "enum": [
+          "pass",
+          "attention",
+          "unavailable",
+          "not_applicable"
+        ],
+        "type": "string"
+      },
       "CreateShipment": {
         "additionalProperties": false,
         "properties": {
@@ -141,6 +193,54 @@
         },
         "required": [
           "items"
+        ],
+        "type": "object"
+      },
+      "InstallationReport": {
+        "properties": {
+          "authentication": {
+            "$ref": "#/components/schemas/Check"
+          },
+          "backend": {
+            "$ref": "#/components/schemas/Check"
+          },
+          "backup": {
+            "$ref": "#/components/schemas/Check"
+          },
+          "easypost": {
+            "$ref": "#/components/schemas/Check"
+          },
+          "integration": {
+            "$ref": "#/components/schemas/Check"
+          },
+          "last_backup": {
+            "format": "int64",
+            "nullable": true,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "authentication",
+          "backend",
+          "backup",
+          "easypost",
+          "integration"
+        ],
+        "type": "object"
+      },
+      "IntegrationPresence": {
+        "additionalProperties": false,
+        "properties": {
+          "backup": {
+            "$ref": "#/components/schemas/BackupReport"
+          },
+          "version": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "backup",
+          "version"
         ],
         "type": "object"
       },
@@ -463,7 +563,7 @@
   "info": {
     "description": "Persistent local shipment records, manual corrections, and carrier synchronization. Use a Bearer owner or ingestion token. Creates require Idempotency-Key; writes to an existing shipment require its quoted revision in If-Match.",
     "title": "Shipments API",
-    "version": "0.1.1"
+    "version": "0.2.0"
   },
   "openapi": "3.0.3",
   "paths": {
@@ -542,6 +642,90 @@
         },
         "tags": [
           "web"
+        ]
+      }
+    },
+    "/v1/installation": {
+      "get": {
+        "operationId": "installation",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InstallationReport"
+                }
+              }
+            },
+            "description": "successful operation"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Read local installation checks without contacting EasyPost.",
+        "tags": [
+          "system"
+        ]
+      }
+    },
+    "/v1/installation/check": {
+      "post": {
+        "operationId": "installation_check",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InstallationReport"
+                }
+              }
+            },
+            "description": "successful operation"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Explicitly check EasyPost using a read-only request, cached for one minute.",
+        "tags": [
+          "system"
+        ]
+      }
+    },
+    "/v1/integration/presence": {
+      "post": {
+        "operationId": "integration_presence",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/IntegrationPresence"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "resource updated"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Report a successful integration poll and its Supervisor backup inventory.",
+        "tags": [
+          "system"
         ]
       }
     },
