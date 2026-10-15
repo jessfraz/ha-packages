@@ -6,12 +6,16 @@ from unittest.mock import AsyncMock
 
 import pytest
 from homeassistant.components import frontend
+from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import Event, HomeAssistant, callback
+from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import issue_registry as ir
+from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 from homeassistant.helpers.event import async_track_state_change_event
 from homeassistant.helpers.storage import Store
 from pytest_homeassistant_custom_component.common import MockConfigEntry, MockUser
 
+from custom_components.shipments import sensor
 from custom_components.shipments.const import (
     CONF_ADDON_SLUG,
     CONF_BACKEND_URL,
@@ -19,6 +23,7 @@ from custom_components.shipments.const import (
     DOMAIN,
     SUMMARY_KEYS,
 )
+from custom_components.shipments.coordinator import ShipmentsCoordinator
 
 from .conftest import SHIPMENT_ID, Backend
 
@@ -80,6 +85,68 @@ async def test_count_sensors_expose_measurement_statistics(
             hass.states.get(f"sensor.shipments_{key}").attributes.get("state_class")
             == "measurement"
         )
+
+
+async def test_native_ids_are_stable_when_sensor_platform_finishes_last(
+    hass: HomeAssistant, backend: Backend, monkeypatch
+) -> None:
+    """Every platform must establish the same device before naming its entities."""
+    sensor_release = asyncio.Event()
+    native_platforms_added = asyncio.Event()
+    added_domains: set[str] = set()
+    original_setup = sensor.async_setup_entry
+
+    async def delayed_sensor_setup(
+        hass: HomeAssistant,
+        entry: ConfigEntry[ShipmentsCoordinator],
+        async_add_entities: AddConfigEntryEntitiesCallback,
+    ) -> None:
+        await sensor_release.wait()
+        await original_setup(hass, entry, async_add_entities)
+
+    @callback
+    def state_changed(event: Event) -> None:
+        domain = event.data["entity_id"].partition(".")[0]
+        if event.data["new_state"] is not None and domain in {
+            "event",
+            "calendar",
+            "binary_sensor",
+        }:
+            added_domains.add(domain)
+            if len(added_domains) == 3:
+                native_platforms_added.set()
+
+    unsubscribe = hass.bus.async_listen("state_changed", state_changed)
+    monkeypatch.setattr(sensor, "async_setup_entry", delayed_sensor_setup)
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        title="Mock Title",
+        data={CONF_BACKEND_URL: backend.url, CONF_TOKEN: "integration-token"},
+    )
+    entry.add_to_hass(hass)
+    setup = hass.async_create_task(hass.config_entries.async_setup(entry.entry_id))
+    try:
+        async with asyncio.timeout(5):
+            await native_platforms_added.wait()
+        assert hass.states.get("event.shipments") is not None
+        assert hass.states.get("calendar.shipments_inbound_deliveries") is not None
+        assert hass.states.get("binary_sensor.shipments_exceptions") is not None
+        assert hass.states.get("binary_sensor.shipments_sync_errors") is not None
+        device = dr.async_get(hass).async_get_device_by_identifier(
+            (DOMAIN, entry.entry_id), entry.entry_id
+        )
+        assert device is not None
+        assert device.name == "Shipments"
+        assert device.manufacturer == "Shipments"
+        assert device.model == "Shipment registry"
+        assert device.configuration_url == backend.url
+    finally:
+        sensor_release.set()
+        unsubscribe()
+        assert await setup
+        await hass.async_block_till_done(wait_background_tasks=True)
+    assert len(hass.states.async_all("event")) == 1
+    assert hass.states.get("sensor.shipments_active").state == "4"
 
 
 async def test_native_problem_indicators_and_label(

@@ -7,12 +7,12 @@ from homeassistant.components.sensor import (
 )
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
-from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from .const import DOMAIN, SENSOR_KEYS
+from .const import SENSOR_KEYS
 from .coordinator import ShipmentsCoordinator
+from .entity import shipments_device_info
 
 
 async def async_setup_entry(
@@ -22,8 +22,7 @@ async def async_setup_entry(
 ) -> None:
     """Add summary entities for the configured backend."""
     async_add_entities(
-        ShipmentCountSensor(entry.runtime_data, entry.entry_id, key)
-        for key in SENSOR_KEYS
+        ShipmentCountSensor(entry.runtime_data, entry, key) for key in SENSOR_KEYS
     )
 
 
@@ -33,22 +32,17 @@ class ShipmentCountSensor(CoordinatorEntity[ShipmentsCoordinator], SensorEntity)
     _attr_has_entity_name = True
 
     def __init__(
-        self, coordinator: ShipmentsCoordinator, entry_id: str, key: str
+        self,
+        coordinator: ShipmentsCoordinator,
+        entry: ConfigEntry[ShipmentsCoordinator],
+        key: str,
     ) -> None:
         super().__init__(coordinator)
         self.entity_description = SensorEntityDescription(
             key=key, translation_key=key, state_class=SensorStateClass.MEASUREMENT
         )
-        self._attr_unique_id = f"{entry_id}_{key}"
-        self._attr_device_info = DeviceInfo(
-            identifiers={(DOMAIN, entry_id)},
-            name="Shipments",
-            manufacturer="Shipments",
-            model="Shipment registry",
-            configuration_url="homeassistant://shipments"
-            if coordinator.config_entry.data.get("addon_slug")
-            else coordinator.config_entry.data["backend_url"],
-        )
+        self._attr_unique_id = f"{entry.entry_id}_{key}"
+        self._attr_device_info = shipments_device_info(entry)
 
     @property
     def suggested_object_id(self) -> str:
