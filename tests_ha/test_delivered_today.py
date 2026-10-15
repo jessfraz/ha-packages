@@ -6,6 +6,7 @@ from urllib.parse import urlencode
 
 import pytest
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers import issue_registry as ir
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.shipments.const import (
@@ -182,3 +183,57 @@ async def test_ha_bridge_preserves_delivery_day_bounds(
     response = await client.get(f"/api/shipments/v1/{route}", params=bounds)
     assert response.status == 200
     assert backend.requests[-1].query == bounds
+
+
+async def test_older_backend_does_not_publish_all_time_deliveries_as_today(
+    hass: HomeAssistant, entry, backend: Backend
+) -> None:
+    """Keep existing counts while refusing an unsupported day projection."""
+    current_version = backend.version
+    hass.config_entries.async_update_entry(
+        entry, data={**entry.data, CONF_ADDON_SLUG: "test_shipments"}
+    )
+    backend.responses[("POST", "/v1/integration/presence")] = (204, b"", {})
+    backend.version = "0.5.1"
+    backend.summaries["inbound"]["delivered"] = 99
+    # Older servers ignore unknown bounds and return the all-time total.
+    backend.delivery_summary["delivered"] = 99
+    backend.requests.clear()
+    await entry.runtime_data.async_refresh()
+    assert entry.runtime_data.last_update_success
+    assert "inbound_delivered_today" not in entry.runtime_data.data
+    assert (
+        hass.states.get("sensor.shipments_inbound_delivered_today").state
+        == "unavailable"
+    )
+    assert hass.states.get("sensor.shipments_active").state == "4"
+    assert hass.states.get("sensor.shipments_inbound_active").state == "3"
+    assert hass.states.get("sensor.shipments_outbound_active").state == "1"
+    assert not any("delivered_after" in request.query for request in backend.requests)
+    issue = ir.async_get(hass).async_get_issue(DOMAIN, "version_mismatch")
+    assert issue is not None
+    assert issue.translation_placeholders == {
+        "app_version": "0.5.1",
+        "integration_version": current_version,
+    }
+    presence = [
+        request
+        for request in backend.requests
+        if request.path == "/v1/integration/presence"
+    ][-1]
+    assert "delivery_day" not in json.loads(presence.body)
+
+    backend.version = current_version
+    backend.delivery_summary["delivered"] = 2
+    backend.requests.clear()
+    await entry.runtime_data.async_refresh()
+    assert entry.runtime_data.last_update_success
+    assert hass.states.get("sensor.shipments_inbound_delivered_today").state == "2"
+    assert not ir.async_get(hass).async_get_issue(DOMAIN, "version_mismatch")
+    assert any("delivered_after" in request.query for request in backend.requests)
+    presence = [
+        request
+        for request in backend.requests
+        if request.path == "/v1/integration/presence"
+    ][-1]
+    assert "delivery_day" in json.loads(presence.body)

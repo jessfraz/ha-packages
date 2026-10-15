@@ -50,6 +50,17 @@ class ShipmentCountSensor(CoordinatorEntity[ShipmentsCoordinator], SensorEntity)
         return self.entity_description.key
 
     @property
-    def native_value(self) -> int:
-        """Return the last coordinated value."""
-        return self.coordinator.data[self.entity_description.key]
+    def available(self) -> bool:
+        """A projection is available only when this backend supplied its value."""
+        data = self.coordinator.data
+        return (
+            super().available
+            and data is not None
+            and self.entity_description.key in data
+        )
+
+    @property
+    def native_value(self) -> int | None:
+        """Return only a count supported by the coordinated backend."""
+        data = self.coordinator.data
+        return data.get(self.entity_description.key) if data is not None else None

@@ -118,7 +118,8 @@ does not prove the carrier has created a label or is waiting for pickup.
 
 **Inbound delivered today** excludes outbound shipments and unknown delivery
 timestamps. Its day starts at midnight in Home Assistant's configured timezone,
-including daylight-saving changes. The dashboard's **Delivered today** filter
+including daylight-saving changes. The sensor stays unavailable while the app
+and integration versions differ. The dashboard's **Delivered today** filter
 uses the same window: `#view=delivered_today&direction=inbound`. The linkable
 **Tracking issues** card (`#view=tracking_issues`) matches the combined sync-error
 count. Failed carrier setup remains visible until explicitly retried after

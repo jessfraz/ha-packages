@@ -44,6 +44,7 @@ actual carrier delivery timestamps within Home Assistant's configured local
 day. It excludes outbound shipments and unknown timestamps, respects daylight
 saving, and links to `#view=delivered_today&direction=inbound` in the dashboard.
 The dashboard uses the same day boundaries even if your browser is elsewhere.
+The sensor stays unavailable while the app and integration versions differ.
 The **Tracking issues** card opens `#view=tracking_issues`, matching the combined
 sync-error count across both directions.
 
