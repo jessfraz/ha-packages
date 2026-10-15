@@ -21,6 +21,7 @@ let editing = null;
 let nextPage = null;
 let eventsPage = null;
 let createKey = null;
+let submittedCreatePayload = null;
 let listGeneration = 0;
 let detailGeneration = 0;
 let editorGeneration = 0;
@@ -853,6 +854,7 @@ function closeEditor(updateUrl = true) {
   editorGeneration += 1;
   editing = null;
   createKey = null;
+  submittedCreatePayload = null;
   setEditorSaving(false);
   if (byId("editor").open) byId("editor").close();
   if (reopen) guarded(() => show(reopen))();
@@ -864,6 +866,7 @@ function openEditor(shipment = null) {
   editorGeneration += 1;
   editing = shipment;
   createKey = shipment ? null : crypto.randomUUID();
+  submittedCreatePayload = null;
   setEditorSaving(false);
   const form = byId("edit-form");
   form.reset();
@@ -890,7 +893,7 @@ function setEditorSaving(saving) {
   byId("shipment-fields").disabled = saving;
   byId("save").disabled = saving;
   byId("save").textContent = saving ? "Saving…" : "Save shipment";
-  byId("edit-status").textContent = saving ? "Saving your shipment locally." : "";
+  byId("edit-status").textContent = saving ? "Verifying tracking and saving your shipment." : "";
 }
 
 function currentDetail(id, generation) {
@@ -1313,7 +1316,6 @@ byId("edit-form").addEventListener("submit", async (event) => {
   if (savingEditor || !byId("editor").open) return;
   const generation = editorGeneration;
   const shipment = editing;
-  const key = createKey;
   const form = event.target;
   const values = Object.fromEntries(new FormData(form));
   const input = {
@@ -1327,6 +1329,13 @@ byId("edit-form").addEventListener("submit", async (event) => {
       number: values.number.trim(),
     },
   };
+  const payload = JSON.stringify(input);
+  if (!shipment) {
+    if (submittedCreatePayload !== null && submittedCreatePayload !== payload)
+      createKey = crypto.randomUUID();
+    submittedCreatePayload = payload;
+  }
+  const key = createKey;
   byId("edit-error").textContent = "";
   setEditorSaving(true);
   try {
@@ -1336,7 +1345,7 @@ byId("edit-form").addEventListener("submit", async (event) => {
     const saved = await api(shipment ? `v1/shipments/${shipment.id}` : "v1/shipments", {
       method: shipment ? "PATCH" : "POST",
       headers,
-      body: JSON.stringify(input),
+      body: payload,
     });
     const current = generation === editorGeneration && byId("editor").open;
     if (current) {
