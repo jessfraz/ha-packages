@@ -80,6 +80,19 @@ pub enum TrackerRejection {
     NoCarrierAccount,
 }
 
+impl TrackerRejection {
+    pub fn error_code(self) -> &'static str {
+        match self {
+            Self::NoCarrierForCode => "tracking_unsupported",
+            Self::CarrierCodeMismatch => "tracking_carrier_mismatch",
+            Self::MultipleCarriersForCode => "tracking_carrier_ambiguous",
+            Self::InvalidParams => "tracking_invalid",
+            Self::InvalidTestCode => "tracking_test_key",
+            Self::NoCarrierAccount => "tracking_carrier_account_required",
+        }
+    }
+}
+
 #[derive(Deserialize)]
 struct TrackerError {
     error: TrackerErrorCode,
@@ -96,6 +109,8 @@ pub struct EasyPostClient {
     api_key: String,
     base: Url,
     requests: Arc<Mutex<RequestSchedule>>,
+    log: slog::Logger,
+    request_id: Option<String>,
 }
 
 struct RequestSchedule {
@@ -186,7 +201,76 @@ impl EasyPostClient {
                 cooldown: None,
                 rate_limits: 0,
             })),
+            log: crate::logging::logger(),
+            request_id: None,
         })
+    }
+
+    pub fn with_logger(mut self, log: slog::Logger) -> Self {
+        self.log = log;
+        self
+    }
+
+    pub fn with_request_id(&self, request_id: &str) -> Self {
+        let mut client = self.clone();
+        client.request_id = Some(request_id.into());
+        client
+    }
+
+    async fn observe<T>(
+        &self,
+        operation: &'static str,
+        future: impl std::future::Future<Output = Result<T, SyncError>>,
+    ) -> Result<T, SyncError> {
+        let request_id = self
+            .request_id
+            .clone()
+            .unwrap_or_else(|| Uuid::now_v7().to_string());
+        let started = Instant::now();
+        let result = future.await;
+        let error = result.as_ref().err();
+        let (outcome, error_code, provider_status, retry_after) = match error {
+            None => ("success", None, None, None),
+            Some(SyncError::Throttled { retry_after }) => (
+                "throttled",
+                Some("provider_throttled"),
+                None,
+                Some(*retry_after),
+            ),
+            Some(SyncError::Http {
+                status: 429,
+                retry_after,
+            }) => (
+                "rate_limited",
+                Some("provider_rate_limited"),
+                Some(429),
+                *retry_after,
+            ),
+            Some(SyncError::Http {
+                status,
+                retry_after,
+            }) => ("error", Some("provider_http"), Some(*status), *retry_after),
+            Some(SyncError::Rejected(rejection)) => {
+                ("rejected", Some(rejection.error_code()), None, None)
+            }
+            Some(error) => (
+                "error",
+                Some(match error {
+                    SyncError::Configuration => "provider_configuration",
+                    SyncError::Timeout => "provider_timeout",
+                    SyncError::Connection => "provider_connection",
+                    SyncError::ResponseTooLarge => "provider_response_too_large",
+                    _ => "provider_invalid_response",
+                }),
+                None,
+                None,
+            ),
+        };
+        slog::info!(self.log, "provider_request";
+            "request_id" => request_id, "operation" => operation, "outcome" => outcome,
+            "error_code" => error_code, "provider_status" => provider_status,
+            "retry_after_seconds" => retry_after, "duration_ms" => started.elapsed().as_millis());
+        result
     }
 
     // All clones share one outbound slot, including API verification and health
@@ -257,21 +341,24 @@ impl EasyPostClient {
     /// Check authenticated access with one read-only list request. No trackers
     /// are created, and no returned tracking or account details leave this call.
     pub async fn check_connection(&self) -> Result<(), SyncError> {
-        let url = self
-            .base
-            .join("trackers")
-            .map_err(|_| SyncError::Configuration)?;
-        let request = self
-            .client
-            .get(url)
-            .query(&[("page_size", 1_u8)])
-            .basic_auth(&self.api_key, Some(""));
-        let page: TrackerPage = serde_json::from_slice(&self.send(request).await?)
-            .map_err(|_| SyncError::InvalidConnectionResponse)?;
-        if page.trackers.len() > 1 {
-            return Err(SyncError::InvalidConnectionResponse);
-        }
-        Ok(())
+        self.observe("health", async {
+            let url = self
+                .base
+                .join("trackers")
+                .map_err(|_| SyncError::Configuration)?;
+            let request = self
+                .client
+                .get(url)
+                .query(&[("page_size", 1_u8)])
+                .basic_auth(&self.api_key, Some(""));
+            let page: TrackerPage = serde_json::from_slice(&self.send(request).await?)
+                .map_err(|_| SyncError::InvalidConnectionResponse)?;
+            if page.trackers.len() > 1 {
+                return Err(SyncError::InvalidConnectionResponse);
+            }
+            Ok(())
+        })
+        .await
     }
 
     pub async fn register(
@@ -279,25 +366,28 @@ impl EasyPostClient {
         tracking_code: &str,
         carrier: Option<&str>,
     ) -> Result<Tracker, SyncError> {
-        let url = self
-            .base
-            .join("trackers")
-            .map_err(|_| SyncError::Configuration)?;
-        let request = self
-            .client
-            .post(url)
-            .basic_auth(&self.api_key, Some(""))
-            .json(&RegisterTracker {
-                tracker: RegisterTracking {
-                    tracking_code,
-                    carrier,
-                },
-            });
-        let tracker = Self::read_tracker(&self.send(request).await?, tracking_code)?;
-        if carrier.is_some_and(|carrier| !carrier.eq_ignore_ascii_case(&tracker.carrier)) {
-            return Err(TrackerRejection::CarrierCodeMismatch.into());
-        }
-        Ok(tracker)
+        self.observe("register", async {
+            let url = self
+                .base
+                .join("trackers")
+                .map_err(|_| SyncError::Configuration)?;
+            let request = self
+                .client
+                .post(url)
+                .basic_auth(&self.api_key, Some(""))
+                .json(&RegisterTracker {
+                    tracker: RegisterTracking {
+                        tracking_code,
+                        carrier,
+                    },
+                });
+            let tracker = Self::read_tracker(&self.send(request).await?, tracking_code)?;
+            if carrier.is_some_and(|carrier| !carrier.eq_ignore_ascii_case(&tracker.carrier)) {
+                return Err(TrackerRejection::CarrierCodeMismatch.into());
+            }
+            Ok(tracker)
+        })
+        .await
     }
 
     pub async fn retrieve(
@@ -305,23 +395,26 @@ impl EasyPostClient {
         tracker_id: &str,
         tracking_code: &str,
     ) -> Result<Tracker, SyncError> {
-        if !valid_tracker_id(tracker_id) {
-            return Err(SyncError::InvalidResponse);
-        }
-        let mut url = self
-            .base
-            .join("trackers/")
-            .map_err(|_| SyncError::Configuration)?;
-        url.path_segments_mut()
-            .map_err(|_| SyncError::Configuration)?
-            .pop_if_empty()
-            .push(tracker_id);
-        let request = self.client.get(url).basic_auth(&self.api_key, Some(""));
-        let tracker = Self::read_tracker(&self.send(request).await?, tracking_code)?;
-        if tracker.id != tracker_id {
-            return Err(SyncError::InvalidResponse);
-        }
-        Ok(tracker)
+        self.observe("retrieve", async {
+            if !valid_tracker_id(tracker_id) {
+                return Err(SyncError::InvalidResponse);
+            }
+            let mut url = self
+                .base
+                .join("trackers/")
+                .map_err(|_| SyncError::Configuration)?;
+            url.path_segments_mut()
+                .map_err(|_| SyncError::Configuration)?
+                .pop_if_empty()
+                .push(tracker_id);
+            let request = self.client.get(url).basic_auth(&self.api_key, Some(""));
+            let tracker = Self::read_tracker(&self.send(request).await?, tracking_code)?;
+            if tracker.id != tracker_id {
+                return Err(SyncError::InvalidResponse);
+            }
+            Ok(tracker)
+        })
+        .await
     }
 
     fn read_tracker(body: &[u8], tracking_code: &str) -> Result<Tracker, SyncError> {
@@ -493,10 +586,12 @@ impl SyncWorker {
         .await?;
         let Some(claim) = claim else { return Ok(false) };
 
+        let mut client = self.client.with_request_id(&claim.lease_token);
+        client.log = client.log.new(slog::o!("shipment_id" => claim.id.clone()));
         let observation = match &claim.tracker_id {
-            Some(id) => self.client.retrieve(id, &claim.tracking_number).await,
+            Some(id) => client.retrieve(id, &claim.tracking_number).await,
             None => {
-                self.client
+                client
                     .register(&claim.tracking_number, claim.tracking_carrier.as_deref())
                     .await
             }

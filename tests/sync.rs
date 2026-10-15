@@ -1367,3 +1367,123 @@ async fn unscanned_labels_slow_down_until_carrier_status_changes() {
         );
     }
 }
+
+#[tokio::test]
+async fn provider_logs_correlate_requests_and_shipments_without_exposing_private_data() {
+    #[derive(Clone, Default)]
+    struct Capture(Arc<std::sync::Mutex<Vec<u8>>>);
+    impl Write for Capture {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    #[derive(Deserialize)]
+    struct Entry {
+        timestamp: String,
+        event: String,
+        request_id: uuid::Uuid,
+        shipment_id: Option<uuid::Uuid>,
+        operation: String,
+        outcome: String,
+        error_code: Option<String>,
+        duration_ms: u64,
+    }
+    let capture = Capture::default();
+    let mut provider = Provider::start();
+    let client = provider
+        .client()
+        .with_logger(shipments::logging::with_writer(capture.clone()));
+    let request_id = uuid::Uuid::now_v7();
+    let task_client = client.with_request_id(&request_id.to_string());
+    let task =
+        tokio::spawn(async move { task_client.register("PRIVATE-TRACKING-CODE", None).await });
+    provider.request().await.reply(Reply {
+        status: 422, headers: Vec::new(),
+        body: r#"{"error":{"code":"TRACKER.NO_CARRIER_FOR_CODE","message":"PRIVATE-TRACKING-CODE test-secret PRIVATE-PROVIDER-DATA"}}"#.into(),
+    });
+    assert!(task.await.unwrap().is_err());
+
+    let fixture = Fixture::new().await;
+    let shipment = fixture.shipment("PRIVATE-TRACKING-CODE").await;
+    let worker = SyncWorker::new(fixture.store.pool().clone(), client.clone());
+    observe(
+        &mut provider,
+        &worker,
+        "PRIVATE-TRACKING-CODE",
+        Status::Unknown,
+    )
+    .await;
+    let owner = "logging-test-owner-credential-at-least-32-bytes";
+    let server = shipments::api::start(
+        "127.0.0.1:0".parse().unwrap(),
+        Arc::new(shipments::api::Context::new(
+            fixture.store.clone(),
+            owner,
+            None,
+            Some(client),
+        )),
+    )
+    .unwrap();
+    let health = tokio::spawn(async move {
+        reqwest::Client::new()
+            .post(format!(
+                "http://{}/v1/installation/check",
+                server.local_addr()
+            ))
+            .bearer_auth(owner)
+            .send()
+            .await
+            .map(|response| (server, response))
+    });
+    provider.request().await.reply(Reply::error(401));
+    let (server, response) = health.await.unwrap().unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    let health_request_id =
+        uuid::Uuid::parse_str(response.headers()["x-request-id"].to_str().unwrap()).unwrap();
+    server.close().await.unwrap();
+    let bytes = capture.0.lock().unwrap().clone();
+    let output = String::from_utf8(bytes.clone()).unwrap();
+    for private in [
+        "PRIVATE-TRACKING-CODE",
+        "test-secret",
+        "PRIVATE-PROVIDER-DATA",
+        "trk_test",
+        "127.0.0.1",
+    ] {
+        assert!(
+            !output.contains(private),
+            "private provider data reached logs"
+        );
+    }
+    let entries: Vec<Entry> = serde_json::Deserializer::from_slice(&bytes)
+        .into_iter::<Entry>()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(entries.len(), 3);
+    assert_eq!(entries[0].event, "provider_request");
+    assert_eq!(entries[0].request_id, request_id);
+    assert_eq!(entries[0].operation, "register");
+    assert_eq!(entries[0].outcome, "rejected");
+    assert_eq!(
+        entries[0].error_code.as_deref(),
+        Some("tracking_unsupported")
+    );
+    assert_eq!(entries[1].shipment_id, Some(shipment.id));
+    assert_eq!(entries[1].outcome, "success");
+    assert!(entries[1].error_code.is_none());
+    assert_eq!(entries[2].request_id, health_request_id);
+    assert_eq!(entries[2].operation, "health");
+    assert_eq!(entries[2].outcome, "error");
+    for entry in entries {
+        time::OffsetDateTime::parse(
+            &entry.timestamp,
+            &time::format_description::well_known::Rfc3339,
+        )
+        .unwrap();
+        assert!(entry.duration_ms < 20_000);
+    }
+}

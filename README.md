@@ -171,6 +171,16 @@ attempt, respecting longer pending error backoff and earlier scheduled checks.
 An explicit terminal refresh allows one further check. Repeated failed terminal
 checks also respect the cooldown.
 
+The app writes JSON logs to stderr, visible in the Home Assistant app log or
+container logs. Entries include UTC timestamps, request IDs, safe route
+names, outcomes, durations, and error codes. Provider failures include HTTP
+status and retry timing when available. A tracking verification uses the same
+request ID as its API response; background checks include the local shipment
+ID. Find the request ID in the `X-Request-ID` response header or an error
+response's `request_id` field. Logs exclude credentials, tracking numbers,
+raw URLs, request bodies, and provider messages. Successful dashboard reads
+stay quiet.
+
 Home Assistant uses cold backups: the app stops while its persistent `/data`
 directory is copied. For standalone operation, stop the service before copying
 the database, or use SQLite's online backup facility. Do not copy only the main
