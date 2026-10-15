@@ -5,7 +5,6 @@ use std::sync::Arc;
 use tempfile::TempDir;
 
 const OWNER: &str = "owner-test-credential-at-least-32-bytes";
-const AGENT: &str = "agent-test-credential-at-least-32-bytes";
 const INTEGRATION: &str = "integration-test-credential-at-least-32-bytes";
 
 struct App {
@@ -14,6 +13,8 @@ struct App {
     server: HttpServer<Arc<api::Context>>,
     client: Client,
     url: String,
+    agent: String,
+    agent_id: uuid::Uuid,
 }
 impl App {
     async fn new(ingress_peer: Option<std::net::IpAddr>) -> Self {
@@ -28,12 +29,37 @@ impl App {
             .await
             .unwrap();
         let context = Arc::new(
-            api::Context::new(store.clone(), OWNER, Some(AGENT), ingress_peer, provider)
-                .with_integration(INTEGRATION),
+            api::Context::new(store.clone(), OWNER, None, provider).with_integration(INTEGRATION),
         );
-        let server = api::start("127.0.0.1:0".parse().unwrap(), context).unwrap();
+        let server = api::start("127.0.0.1:0".parse().unwrap(), context.clone()).unwrap();
+        let url = format!("http://{}", server.local_addr());
+        let created = Client::new()
+            .post(format!("{url}/v1/agents"))
+            .bearer_auth(OWNER)
+            .header("X-Remote-User-Id", "human")
+            .header("X-Shipments-Request", "1")
+            .json(&CreateAgent {
+                name: "Test importer".into(),
+            })
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(created.status(), StatusCode::CREATED);
+        let created: CreatedAgentCredential = created.json().await.unwrap();
+        let server = if let Some(peer) = ingress_peer {
+            server.close().await.unwrap();
+            api::start(
+                "127.0.0.1:0".parse().unwrap(),
+                Arc::new((*context).clone().for_ingress(peer)),
+            )
+            .unwrap()
+        } else {
+            server
+        };
         let url = format!("http://{}", server.local_addr());
         Self {
+            agent: created.token,
+            agent_id: created.credential.id,
             _dir: dir,
             store,
             server,
@@ -220,7 +246,7 @@ async fn owner_actions_are_separate_from_ingestion_identity() {
     let shipment: Shipment = app
         .client
         .post(format!("{}/v1/shipments", app.url))
-        .bearer_auth(AGENT)
+        .bearer_auth(&app.agent)
         .header("X-Shipments-Actor", "pretend-owner")
         .header("Idempotency-Key", "agent-add")
         .json(&body)
@@ -238,7 +264,7 @@ async fn owner_actions_are_separate_from_ingestion_identity() {
     assert_eq!(
         app.client
             .put(format!("{}{path}", app.url))
-            .bearer_auth(AGENT)
+            .bearer_auth(&app.agent)
             .header("If-Match", "\"1\"")
             .json(&correction)
             .send()
@@ -271,11 +297,11 @@ async fn owner_actions_are_separate_from_ingestion_identity() {
         .json()
         .await
         .unwrap();
-    assert_eq!(events.items[0].actor_id, "agent");
+    assert_eq!(events.items[0].actor_id, format!("agent:{}", app.agent_id));
     let system: System = app
         .client
         .get(format!("{}/v1/system", app.url))
-        .bearer_auth(AGENT)
+        .bearer_auth(&app.agent)
         .send()
         .await
         .unwrap()
@@ -595,7 +621,7 @@ async fn integration_credential_is_scoped_and_installation_requires_a_real_check
     assert_eq!(initial.authentication.status, CheckStatus::Attention);
     assert_eq!(initial.backup.status, CheckStatus::Unavailable);
     assert_eq!(initial.easypost.status, CheckStatus::NotApplicable);
-    for credential in [INTEGRATION, AGENT] {
+    for credential in [INTEGRATION, &app.agent] {
         for (method, path) in [
             (Method::GET, "/v1/installation"),
             (Method::POST, "/v1/installation/check"),
@@ -667,7 +693,7 @@ async fn integration_credential_is_scoped_and_installation_requires_a_real_check
             last_backup: Some(1_700_000_000),
         },
     };
-    for credential in [OWNER, AGENT] {
+    for credential in [OWNER, &app.agent] {
         assert_eq!(
             app.client
                 .post(format!("{}/v1/integration/presence", app.url))
@@ -771,5 +797,304 @@ async fn explicit_installation_probe_is_read_only_and_concurrent_checks_are_cach
         .await
         .unwrap();
     assert_eq!(cached.easypost.status, CheckStatus::Pass);
+    app.close().await;
+}
+
+#[tokio::test]
+async fn named_agents_are_private_individually_revocable_and_cannot_escalate() {
+    let app = App::new(None).await;
+    let created = app
+        .request(Method::POST, "/v1/agents")
+        .json(&CreateAgent {
+            name: "  Email importer  ".into(),
+        })
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(created.status(), StatusCode::CREATED);
+    assert_eq!(created.headers()["cache-control"], "no-store");
+    let created: CreatedAgentCredential = created.json().await.unwrap();
+    assert_eq!(created.credential.name, "Email importer");
+    assert_ne!(created.credential.id, app.agent_id);
+    assert!(created.token.starts_with("shp_"));
+    assert_eq!(created.token.len(), 68);
+    assert_ne!(created.token, app.agent);
+
+    let listed = app.request(Method::GET, "/v1/agents").send().await.unwrap();
+    assert_eq!(listed.headers()["cache-control"], "no-store");
+    let text = listed.text().await.unwrap();
+    assert!(!text.contains(&created.token));
+    assert!(!text.contains(&app.agent));
+    let listed: AgentCredentials = serde_json::from_str(&text).unwrap();
+    assert_eq!(listed.items.len(), 2);
+    assert_eq!(listed.items[0].id, created.credential.id);
+    let stored: Vec<u8> =
+        sqlx::query_scalar("SELECT token_digest FROM agent_credentials WHERE id = ?")
+            .bind(created.credential.id.to_string())
+            .fetch_one(app.store.pool())
+            .await
+            .unwrap();
+    assert_eq!(stored.len(), 32);
+    assert_ne!(stored, created.token.as_bytes());
+
+    let path = format!("/v1/agents/{}", created.credential.id);
+    for credential in [&app.agent, &created.token, INTEGRATION] {
+        for (method, endpoint) in [
+            (Method::GET, "/v1/agents"),
+            (Method::POST, "/v1/agents"),
+            (Method::DELETE, &path),
+        ] {
+            let response = app
+                .client
+                .request(method, format!("{}{endpoint}", app.url))
+                .bearer_auth(credential)
+                .header("X-Shipments-Actor", "ha:pretend-owner")
+                .json(&CreateAgent {
+                    name: "Not allowed".into(),
+                })
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        }
+    }
+    let shipment: Shipment = app
+        .client
+        .post(format!("{}/v1/shipments", app.url))
+        .bearer_auth(&created.token)
+        .header("Idempotency-Key", "named-agent")
+        .header("X-Shipments-Actor", "owner")
+        .json(&input("Imported parcel"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let events: ResultsPage<Event> = app
+        .request(
+            Method::GET,
+            &format!("/v1/shipments/{}/events", shipment.id),
+        )
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        events.items[0].actor_id,
+        format!("agent:{}", created.credential.id)
+    );
+    assert_eq!(
+        app.client
+            .put(format!("{}/v1/shipments/{}/archive", app.url, shipment.id))
+            .bearer_auth(&created.token)
+            .header("If-Match", "\"1\"")
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::FORBIDDEN
+    );
+
+    assert_eq!(
+        app.request(Method::DELETE, &path)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(
+        app.request(Method::DELETE, &path)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::NOT_FOUND
+    );
+    // Revocation affects the next request without restarting either listener.
+    for credential in [&created.token, "shp_invalid"] {
+        assert_eq!(
+            app.client
+                .get(format!("{}/v1/summary", app.url))
+                .bearer_auth(credential)
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::UNAUTHORIZED
+        );
+    }
+    for credential in [&app.agent, OWNER, INTEGRATION] {
+        assert_eq!(
+            app.client
+                .get(format!("{}/v1/summary", app.url))
+                .bearer_auth(credential)
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::OK
+        );
+    }
+    let events: ResultsPage<Event> = app
+        .request(
+            Method::GET,
+            &format!("/v1/shipments/{}/events", shipment.id),
+        )
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        events.items[0].actor_id,
+        format!("agent:{}", created.credential.id)
+    );
+    app.close().await;
+}
+
+#[tokio::test]
+async fn agent_names_and_concurrent_creation_limit_are_validated() {
+    let app = App::new(None).await;
+    for name in [
+        "".into(),
+        "   ".into(),
+        "line\nbreak".into(),
+        "a".repeat(101),
+        "🦆".repeat(26),
+    ] {
+        assert_eq!(
+            app.request(Method::POST, "/v1/agents")
+                .json(&CreateAgent { name })
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::BAD_REQUEST
+        );
+    }
+    for index in 1..31 {
+        assert_eq!(
+            app.request(Method::POST, "/v1/agents")
+                .json(&CreateAgent {
+                    name: format!("Importer {index}")
+                })
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::CREATED
+        );
+    }
+    let name = CreateAgent {
+        name: "Last slot".into(),
+    };
+    let (first, second) = tokio::join!(
+        app.request(Method::POST, "/v1/agents").json(&name).send(),
+        app.request(Method::POST, "/v1/agents").json(&name).send()
+    );
+    let mut statuses = [
+        first.unwrap().status().as_u16(),
+        second.unwrap().status().as_u16(),
+    ];
+    statuses.sort();
+    assert_eq!(statuses, [201, 409]);
+    let agents: AgentCredentials = app
+        .request(Method::GET, "/v1/agents")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(agents.items.len(), 32);
+    assert_eq!(
+        app.request(Method::DELETE, &format!("/v1/agents/{}", app.agent_id))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(
+        app.request(Method::POST, "/v1/agents")
+            .json(&name)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::CREATED
+    );
+    app.close().await;
+}
+
+#[tokio::test]
+async fn ingress_agent_management_requires_the_real_peer_user_and_browser_header() {
+    let app = App::new(Some("127.0.0.1".parse().unwrap())).await;
+    assert_eq!(
+        app.request(Method::POST, "/v1/agents")
+            .header("X-Shipments-Request", "1")
+            .json(&CreateAgent {
+                name: "Importer".into()
+            })
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        app.request(Method::POST, "/v1/agents")
+            .header("X-Remote-User-Id", "human")
+            .json(&CreateAgent {
+                name: "Importer".into()
+            })
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::FORBIDDEN
+    );
+    let response = app
+        .request(Method::POST, "/v1/agents")
+        .header("X-Remote-User-Id", "human")
+        .header("X-Shipments-Request", "1")
+        .json(&CreateAgent {
+            name: "Importer".into(),
+        })
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let created: CreatedAgentCredential = response.json().await.unwrap();
+    assert_eq!(
+        app.request(
+            Method::DELETE,
+            &format!("/v1/agents/{}", created.credential.id)
+        )
+        .header("X-Remote-User-Id", "human")
+        .send()
+        .await
+        .unwrap()
+        .status(),
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        app.request(
+            Method::DELETE,
+            &format!("/v1/agents/{}", created.credential.id)
+        )
+        .header("X-Remote-User-Id", "human")
+        .header("X-Shipments-Request", "1")
+        .send()
+        .await
+        .unwrap()
+        .status(),
+        StatusCode::NO_CONTENT
+    );
     app.close().await;
 }

@@ -37,6 +37,73 @@ footer {
   font-size: 12px;
   margin-left: 10px;
 }
+.optional-label {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 400;
+  margin-left: 10px;
+}
+.agent-form {
+  display: flex;
+  align-items: flex-end;
+  gap: 12px;
+  max-width: 560px;
+}
+.agent-form label {
+  flex: 1;
+  min-width: 0;
+  margin: 0;
+}
+.agent-form button {
+  white-space: nowrap;
+}
+#agent-status,
+#agent-error {
+  font-size: 13px;
+}
+#agent-secret {
+  background: var(--soft);
+  border-radius: 8px;
+  padding: 18px;
+  margin: 18px 0;
+}
+#agent-secret h3 {
+  margin-top: 0;
+}
+#agent-token {
+  font-family: ui-monospace, monospace;
+}
+.agent-token-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+#agent-list {
+  list-style: none;
+  padding: 0;
+  margin-bottom: 0;
+}
+.agent-credential {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  border-top: 1px solid var(--line);
+  padding: 14px 0;
+}
+.agent-credential strong {
+  font-size: 14px;
+  overflow-wrap: anywhere;
+}
+.agent-credential time {
+  display: block;
+  margin-top: 5px;
+  color: var(--muted);
+  font-size: 12px;
+}
+.agent-credential button {
+  flex-shrink: 0;
+}
 .installation-heading {
   display: flex;
   align-items: center;
@@ -427,6 +494,10 @@ footer {
     flex-direction: column;
     align-items: flex-start;
     gap: 0;
+  }
+  .agent-form {
+    flex-direction: column;
+    align-items: stretch;
   }
   .shipment {
     padding: 17px;

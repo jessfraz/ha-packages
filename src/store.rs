@@ -155,6 +155,76 @@ impl Store {
         &self.pool
     }
 
+    pub async fn create_agent(
+        &self,
+        name: &str,
+        digest: &[u8; 32],
+    ) -> Result<AgentCredential, Error> {
+        let name = name.trim();
+        valid_text(name, "agent name", 100)?;
+        let mut tx = self.transaction().await?;
+        // The writer lock makes the credential limit atomic across processes.
+        let count: i64 = sqlx::query_scalar("SELECT count(*) FROM agent_credentials")
+            .fetch_one(&mut *tx)
+            .await?;
+        if count >= 32 {
+            return Err(Error::Conflict(
+                "revoke an agent before creating another (limit 32)".into(),
+            ));
+        }
+        let (id, name, created_at) = sqlx::query_as::<_, (String, String, String)>(
+            "INSERT INTO agent_credentials (id, name, token_digest) VALUES (?, ?, ?) RETURNING id, name, created_at",
+        )
+        .bind(Uuid::now_v7().to_string())
+        .bind(name)
+        .bind(digest.as_slice())
+        .fetch_one(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(AgentCredential {
+            id: parse_id(&id)?,
+            name,
+            created_at,
+        })
+    }
+
+    pub async fn agents(&self) -> Result<AgentCredentials, Error> {
+        let rows = sqlx::query_as::<_, (String, String, String)>(
+            "SELECT id, name, created_at FROM agent_credentials ORDER BY id DESC LIMIT 32",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(AgentCredentials {
+            items: rows
+                .into_iter()
+                .map(|(id, name, created_at)| {
+                    Ok(AgentCredential {
+                        id: parse_id(&id)?,
+                        name,
+                        created_at,
+                    })
+                })
+                .collect::<Result<_, Error>>()?,
+        })
+    }
+
+    pub async fn agent_identity(&self, digest: &[u8; 32]) -> Result<Option<Uuid>, Error> {
+        sqlx::query_scalar::<_, String>("SELECT id FROM agent_credentials WHERE token_digest = ?")
+            .bind(digest.as_slice())
+            .fetch_optional(&self.pool)
+            .await?
+            .map(|id| parse_id(&id))
+            .transpose()
+    }
+
+    pub async fn revoke_agent(&self, id: Uuid) -> Result<bool, Error> {
+        let deleted = sqlx::query("DELETE FROM agent_credentials WHERE id = ?")
+            .bind(id.to_string())
+            .execute(&self.pool)
+            .await?;
+        Ok(deleted.rows_affected() != 0)
+    }
+
     /// Drain callers before closing. Flush committed WAL frames explicitly:
     /// a pool's background connection cleanup can outlive close().await.
     pub async fn close(&self) -> Result<(), Error> {

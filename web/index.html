@@ -41,6 +41,32 @@
           <p id="backup-date" class="muted"></p>
           <a href="https://github.com/jessfraz/ha-packages/blob/main/shipments/DOCS.md" target="_blank" rel="noopener noreferrer">Installation and pairing instructions ↗</a>
         </details>
+        <details id="agent-access" class="installation" hidden>
+          <summary>Agent access <span class="optional-label">Optional</span></summary>
+          <p class="muted">Give each agent its own credential. Agents can read shipments, add or edit records, and refresh tracking. They cannot make manual corrections, archive shipments, or manage credentials.</p>
+          <form id="agent-form" class="agent-form">
+            <label for="agent-name">Agent name<input id="agent-name" name="name" required maxlength="100" autocomplete="off" placeholder="e.g. Parcel assistant"></label>
+            <button id="create-agent">Create credential</button>
+          </form>
+          <p id="agent-status" role="status" aria-live="polite"></p>
+          <p id="agent-error" role="alert"></p>
+          <section id="agent-secret" aria-labelledby="agent-secret-title" hidden>
+            <h3 id="agent-secret-title">Save this token</h3>
+            <p class="muted">This token is shown once. Copy it before choosing Done, closing Agent access, or creating another credential. If you lose it, revoke the credential and create a new one.</p>
+            <label for="agent-token">Agent token<input id="agent-token" type="password" readonly autocomplete="off" spellcheck="false"></label>
+            <div class="agent-token-actions">
+              <button id="copy-agent-token" type="button">Copy token</button>
+              <button id="show-agent-token" class="quiet" type="button" aria-pressed="false">Show token</button>
+              <button id="dismiss-agent-token" class="quiet" type="button">Done</button>
+            </div>
+            <p id="agent-copy-status" class="muted" role="status" aria-live="polite"></p>
+          </section>
+          <div class="installation-heading">
+            <h3>Active credentials</h3>
+            <button id="refresh-agents" class="quiet" type="button">Refresh credentials</button>
+          </div>
+          <ul id="agent-list" aria-label="Active agent credentials"></ul>
+        </details>
         <div id="summary" class="summary" aria-label="Shipment summary"></div>
         <div class="toolbar">
           <form id="search">

@@ -27,7 +27,6 @@ from custom_components.shipments.const import (
 )
 
 OWNER_TOKEN = "test-owner-credential-at-least-32-characters"
-AGENT_TOKEN = "test-agent-credential-at-least-32-characters"
 PREFIX = "/api/shipments/v1"
 
 
@@ -73,7 +72,6 @@ async def rust_backend(
         arguments.extend(("--options", str(options)))
     else:
         environment["SHIPMENTS_API_TOKEN"] = OWNER_TOKEN
-        environment["SHIPMENTS_AGENT_TOKEN"] = AGENT_TOKEN
     origin = f"http://127.0.0.1:{unused_tcp_port}"
     process = await asyncio.create_subprocess_exec(
         str(await asyncio.to_thread(binary.resolve)),

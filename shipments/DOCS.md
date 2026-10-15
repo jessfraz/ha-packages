@@ -79,7 +79,19 @@ inventory and coverage; restore testing is a separate step.
 | Option | Purpose |
 | --- | --- |
 | `easypost_api_key` | Enables carrier tracking through EasyPost. |
-| `agent_token` | Separate, restricted credential for ingestion agents. |
+
+## Agent access
+
+Open **Agent access** in the app dashboard. Enter an **Agent name** and select
+**Create credential** for each ingestion agent. Use **Copy token** to save the
+token in your password manager, then select **Done**. It is shown only once.
+Select **Revoke** beside an active credential to remove its access. If a token
+is lost, revoke that credential and create another.
+
+An agent can read, add, and edit shipments, attach evidence, and request
+tracking updates. It cannot make manual status corrections, archive records,
+run installation checks, or manage credentials. Credential hashes are saved
+in SQLite and survive restarts.
 
 For clients on another machine, enable the app's optional `8080/tcp` network
 port and use the Home Assistant host address. All requests to that port
@@ -123,7 +135,7 @@ docker run --detach --name shipments --restart unless-stopped \
   --publish 127.0.0.1:8080:8080 \
   --mount type=volume,source=shipments-data,target=/data \
   --env SHIPMENTS_API_TOKEN \
-  ghcr.io/jessfraz/ha-packages:0.2.1
+  ghcr.io/jessfraz/ha-packages:0.2.2
 ```
 
 Open `http://127.0.0.1:8080` and enter the token. Save it in your password
@@ -143,6 +155,7 @@ The SQLite database is stored in `/data/shipments.sqlite3`. Home Assistant
 stops the app before backing up this directory. Back up both the app and Home
 Assistant configuration to preserve the database and paired integration.
 Treat backups as private: they include shipment details and saved credentials.
+They preserve agent access and revocations at the time of the backup.
 
 Stop the app before copying the database manually so its WAL is checkpointed.
 Restore both parts to recover the database, settings, and paired integration.

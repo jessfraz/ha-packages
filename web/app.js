@@ -32,6 +32,11 @@ let listController = null;
 let refreshTimer = null;
 let showInstallation = false;
 let installationInitialized = false;
+let agentCredentials = [];
+let agentBusy = false;
+let agentSession = 0;
+let agentTokenGeneration = 0;
+let issuedAgentId = null;
 
 class ApiError extends Error {
   constructor(message, status) {
@@ -67,6 +72,7 @@ async function api(path, options = {}) {
     ...options,
     headers,
   });
+  if (response.status === 204) return null;
   const body = await response.json();
   if (!response.ok) {
     throw new ApiError(
@@ -94,6 +100,18 @@ async function connect() {
   byId("dashboard").hidden = false;
   byId("add").hidden = false;
   showInstallation = system.credential_role === "owner";
+  agentSession += 1;
+  agentCredentials = [];
+  clearAgentToken();
+  byId("agent-access").hidden = !showInstallation;
+  byId("installation").hidden = !showInstallation;
+  byId("agent-list").replaceChildren();
+  byId("agent-status").textContent = "";
+  byId("agent-error").textContent = "";
+  byId("create-agent").textContent = "Create credential";
+  setAgentBusy(false);
+  if (!showInstallation) byId("agent-access").open = false;
+  else if (byId("agent-access").open) loadAgents();
   byId("health").textContent = system.provider_enabled
     ? `${system.pending_syncs} tracking checks scheduled · ${system.sync_errors} sync errors`
     : "Carrier tracking is off. Local records and manual controls are available.";
@@ -302,6 +320,210 @@ byId("check-installation").addEventListener("click", guarded(async () => {
     button.textContent = "Run checks";
   }
 }));
+
+function clearAgentToken() {
+  agentTokenGeneration += 1;
+  issuedAgentId = null;
+  byId("agent-token").value = "";
+  byId("agent-token").type = "password";
+  byId("agent-secret").hidden = true;
+  byId("agent-copy-status").textContent = "";
+  byId("show-agent-token").textContent = "Show token";
+  byId("show-agent-token").setAttribute("aria-pressed", "false");
+}
+
+function setAgentBusy(busy) {
+  agentBusy = busy;
+  byId("create-agent").disabled = busy;
+  byId("agent-name").disabled = busy;
+  byId("refresh-agents").disabled = busy;
+  byId("agent-list").setAttribute("aria-busy", String(busy));
+  for (const button of byId("agent-list").querySelectorAll("button")) {
+    button.disabled = busy;
+  }
+}
+
+function renderAgents() {
+  const list = byId("agent-list");
+  list.replaceChildren();
+  if (!agentCredentials.length) {
+    list.append(
+      element("li", "No agent credentials. Create one when you are ready to connect an agent.", "muted"),
+    );
+    return;
+  }
+  for (const credential of agentCredentials) {
+    const row = element("li", undefined, "agent-credential");
+    const description = element("div");
+    const created = element(
+      "time",
+      `Created ${new Date(credential.created_at).toLocaleString()}`,
+    );
+    created.dateTime = credential.created_at;
+    description.append(element("strong", credential.name), created);
+    const revoke = element("button", "Revoke", "quiet");
+    revoke.type = "button";
+    revoke.disabled = agentBusy;
+    revoke.setAttribute("aria-label", `Revoke access for ${credential.name}`);
+    revoke.addEventListener("click", () => revokeAgent(credential, revoke));
+    row.append(description, revoke);
+    list.append(row);
+  }
+}
+
+async function loadAgents() {
+  if (!showInstallation || agentBusy) return;
+  const session = agentSession;
+  setAgentBusy(true);
+  byId("agent-error").textContent = "";
+  byId("agent-status").textContent = "Loading agent credentials…";
+  try {
+    const page = await api("v1/agents");
+    if (session !== agentSession) return;
+    agentCredentials = page.items;
+    if (
+      issuedAgentId &&
+      !agentCredentials.some((item) => item.id === issuedAgentId)
+    ) {
+      clearAgentToken();
+      byId("agent-status").textContent = "The displayed credential was revoked. Its token has been cleared.";
+    } else {
+      byId("agent-status").textContent = "";
+    }
+    renderAgents();
+  } catch (error) {
+    if (session === agentSession) {
+      byId("agent-status").textContent = "";
+      byId("agent-error").textContent = `Could not load credentials. ${error.message} Use Refresh credentials to retry.`;
+    }
+  } finally {
+    if (session === agentSession) setAgentBusy(false);
+  }
+}
+
+async function revokeAgent(credential, button) {
+  if (!showInstallation || agentBusy) return;
+  const session = agentSession;
+  setAgentBusy(true);
+  button.textContent = "Revoking…";
+  byId("agent-error").textContent = "";
+  byId("agent-status").textContent = `Revoking access for ${credential.name}…`;
+  try {
+    await api(`v1/agents/${credential.id}`, { method: "DELETE" });
+    if (session !== agentSession) return;
+    agentCredentials = agentCredentials.filter((item) => item.id !== credential.id);
+    if (issuedAgentId === credential.id) clearAgentToken();
+    renderAgents();
+    byId("agent-status").textContent = `Access revoked for ${credential.name}.`;
+  } catch (error) {
+    if (session === agentSession) {
+      byId("agent-status").textContent = "";
+      byId("agent-error").textContent = `Could not confirm revocation for ${credential.name}. ${error.message} Refresh credentials to check before retrying.`;
+    }
+  } finally {
+    if (session === agentSession) {
+      button.textContent = "Revoke";
+      setAgentBusy(false);
+    }
+  }
+}
+
+byId("agent-access").addEventListener("toggle", () => {
+  if (byId("agent-access").open) {
+    loadAgents();
+  } else {
+    const hadToken = Boolean(issuedAgentId);
+    clearAgentToken();
+    if (hadToken) byId("agent-status").textContent = "Token cleared from this tab. If you did not save it, revoke that credential and create a new one.";
+  }
+});
+
+byId("refresh-agents").addEventListener("click", loadAgents);
+byId("agent-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  if (!showInstallation || agentBusy) return;
+  const name = byId("agent-name").value.trim();
+  if (!name) {
+    byId("agent-error").textContent = "Enter a name for this agent.";
+    byId("agent-name").focus();
+    return;
+  }
+  const session = agentSession;
+  const hadToken = Boolean(issuedAgentId);
+  clearAgentToken();
+  const generation = agentTokenGeneration;
+  setAgentBusy(true);
+  byId("create-agent").textContent = "Creating…";
+  byId("agent-error").textContent = "";
+  byId("agent-status").textContent = "Creating agent credential…";
+  try {
+    const created = await api("v1/agents", {
+      method: "POST",
+      body: JSON.stringify({ name }),
+    });
+    if (session !== agentSession) return;
+    agentCredentials.unshift(created.credential);
+    renderAgents();
+    byId("agent-form").reset();
+    if (generation === agentTokenGeneration && byId("agent-access").open) {
+      issuedAgentId = created.credential.id;
+      byId("agent-secret-title").textContent = `Save the token for ${created.credential.name}`;
+      byId("agent-token").value = created.token;
+      byId("agent-secret").hidden = false;
+      byId("agent-status").textContent = "Credential created. Copy the token now; it cannot be shown again.";
+      byId("agent-token").focus();
+    } else {
+      byId("agent-status").textContent = `${created.credential.name} was created, but its one-time token was dismissed. Revoke it and create a new credential.`;
+    }
+  } catch (error) {
+    if (session === agentSession) {
+      byId("agent-status").textContent = "";
+      byId("agent-error").textContent = `Could not confirm credential creation. ${error.message} Refresh credentials before retrying; revoke any new credential whose token you did not receive.${hadToken ? " The previous token was cleared. If you did not save it, revoke that credential and create another." : ""}`;
+    }
+  } finally {
+    if (session === agentSession) {
+      byId("create-agent").textContent = "Create credential";
+      setAgentBusy(false);
+    }
+  }
+});
+
+byId("copy-agent-token").addEventListener("click", async () => {
+  const input = byId("agent-token");
+  if (!input.value) return;
+  const generation = agentTokenGeneration;
+  const button = byId("copy-agent-token");
+  button.disabled = true;
+  try {
+    await navigator.clipboard.writeText(input.value);
+    if (generation === agentTokenGeneration) byId("agent-copy-status").textContent = "Token copied.";
+  } catch {
+    if (generation !== agentTokenGeneration) return;
+    input.type = "text";
+    byId("show-agent-token").textContent = "Hide token";
+    byId("show-agent-token").setAttribute("aria-pressed", "true");
+    input.focus();
+    input.select();
+    byId("agent-copy-status").textContent = "Automatic copying is unavailable here. The token is selected; use your device’s Copy command.";
+  } finally {
+    button.disabled = false;
+  }
+});
+
+byId("show-agent-token").addEventListener("click", () => {
+  const input = byId("agent-token");
+  const show = input.type === "password";
+  input.type = show ? "text" : "password";
+  byId("show-agent-token").textContent = show ? "Hide token" : "Show token";
+  byId("show-agent-token").setAttribute("aria-pressed", String(show));
+});
+
+byId("dismiss-agent-token").addEventListener("click", () => {
+  clearAgentToken();
+  byId("agent-status").textContent = "Token dismissed. If you did not save it, revoke that credential and create a new one.";
+  byId("agent-name").focus();
+});
+window.addEventListener("pagehide", clearAgentToken);
 
 async function refreshDashboard() {
   if (listController || document.hidden || byId("dashboard").hidden) return;
