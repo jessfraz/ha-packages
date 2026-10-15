@@ -750,7 +750,12 @@ async fn explicit_installation_probe_is_read_only_and_concurrent_checks_are_cach
     for response in [first.unwrap(), second.unwrap()] {
         assert_eq!(response.status(), StatusCode::OK);
         let checked: InstallationReport = response.json().await.unwrap();
-        assert_eq!(checked.easypost.status, CheckStatus::Pass);
+        assert_eq!(
+            checked.easypost.status,
+            CheckStatus::Pass,
+            "{}",
+            checked.easypost.message
+        );
     }
     let request = received.recv().unwrap();
     assert!(request.starts_with("GET /trackers?page_size=1 "));

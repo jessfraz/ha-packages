@@ -61,6 +61,7 @@ pub struct Installation {
     supervised: bool,
     presence: Mutex<Option<(Instant, IntegrationPresence)>>,
     provider: Mutex<Option<(Instant, Check)>>,
+    probe: Mutex<()>,
 }
 
 impl Installation {
@@ -69,6 +70,7 @@ impl Installation {
             supervised,
             presence: Mutex::new(None),
             provider: Mutex::new(None),
+            probe: Mutex::new(()),
         }
     }
 
@@ -80,10 +82,13 @@ impl Installation {
         let Some(provider) = provider else {
             return;
         };
-        // Serialize and cache explicit checks to avoid turning a refresh button
-        // into unbounded provider traffic. Routine dashboard polling is local.
-        let mut state = self.provider.lock().await;
-        if state
+        // Serialize outbound probes separately from their short-lived cached
+        // results. Readers never wait for a provider network request.
+        let _probe = self.probe.lock().await;
+        if self
+            .provider
+            .lock()
+            .await
             .as_ref()
             .is_some_and(|(at, _)| at.elapsed() < Duration::from_secs(60))
         {
@@ -96,7 +101,7 @@ impl Installation {
                 message: error.to_string(),
             },
         };
-        *state = Some((Instant::now(), result));
+        *self.provider.lock().await = Some((Instant::now(), result));
     }
 
     pub async fn report(&self, provider_enabled: bool) -> InstallationReport {
@@ -133,7 +138,8 @@ impl Installation {
                 status: CheckStatus::NotApplicable,
                 message: "EasyPost is not configured. Manual shipment records still work.".into(),
             }
-        } else if let Ok(provider) = self.provider.try_lock() {
+        } else {
+            let provider = self.provider.lock().await;
             if let Some((at, result)) = provider.as_ref() {
                 if at.elapsed() < Duration::from_secs(300) {
                     result.clone()
@@ -145,8 +151,6 @@ impl Installation {
                     "EasyPost is configured. Run checks to verify the key and connectivity.",
                 )
             }
-        } else {
-            Check::attention("The EasyPost connection check is running.")
         };
         let backup = match recent.map(|(_, report)| &report.backup.status) {
             None if !self.supervised => Check { status: CheckStatus::NotApplicable, message: "Standalone server. Stop it before backing up its database and credentials. Home Assistant backup inventory is not available here.".into() },
@@ -208,6 +212,36 @@ mod tests {
         BackupReport, BackupStatus, CheckStatus, Installation, IntegrationPresence, valid_presence,
     };
     use std::time::{Duration, Instant};
+
+    #[tokio::test]
+    async fn completed_probe_remains_visible_to_a_report_while_a_cached_check_is_queued() {
+        use crate::{installation::Check, sync::EasyPostClient};
+        use std::future::Future;
+        use std::task::{Context, Waker};
+
+        let installation = Installation::new(true);
+        let provider =
+            EasyPostClient::for_loopback("unused-cached-check-key", "http://127.0.0.1:9/").unwrap();
+        let mut cache = installation.provider.lock().await;
+        *cache = Some((Instant::now(), Check::pass("Completed provider check")));
+        let mut queued_check = Box::pin(installation.check_provider(Some(&provider)));
+        // Reserve the FIFO mutex permit for another cached check. The report
+        // must still return the completed result after that reader resumes.
+        assert!(
+            queued_check
+                .as_mut()
+                .poll(&mut Context::from_waker(Waker::noop()))
+                .is_pending()
+        );
+        drop(cache);
+        let (report, ()) = tokio::join!(biased; installation.report(true), queued_check);
+        assert_eq!(
+            report.easypost.status,
+            CheckStatus::Pass,
+            "{}",
+            report.easypost.message
+        );
+    }
 
     #[tokio::test]
     async fn stale_integration_cannot_claim_loaded_authenticated_or_backup_coverage() {

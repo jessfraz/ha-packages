@@ -4,6 +4,8 @@
 
 - Load Supervisor support only when Home Assistant manages apps, so the
   integration also loads on minimal Home Assistant Core installations.
+- Preserve completed EasyPost check results when several callers run
+  installation checks at the same time.
 
 ## 0.2.0
 
