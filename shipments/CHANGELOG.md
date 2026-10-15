@@ -18,6 +18,7 @@
   badges. Add an inbound Delivered today sensor and filtered view using
   actual carrier delivery timestamps and Home Assistant's local day,
   including daylight-saving changes.
+- Fix the inbound calendar's missing icon by using a supported delivery icon.
 - Keep provider wire formats and recovery policy behind the shipping API
   trait. EasyPost remains the configured backend. Include safe native request
   IDs in redacted error logs, and keep filtered pagination within its cursor
