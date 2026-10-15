@@ -43,6 +43,7 @@ jobs:
           RELEASE_TAG: ${{ github.ref_name }}
         run: |
           python3 - <<'PY'
+          import json
           import os
           import pathlib
           import re
@@ -50,9 +51,13 @@ jobs:
 
           version = os.environ["RELEASE_TAG"].removeprefix("v")
           crate = tomllib.loads(pathlib.Path("Cargo.toml").read_text())
+          python = tomllib.loads(pathlib.Path("pyproject.toml").read_text())
+          integration = json.loads(pathlib.Path("custom_components/shipments/manifest.json").read_text())
           app = pathlib.Path("shipments/config.yaml").read_text()
           app_version = re.search(r'^version: "([^"]+)"$', app, re.MULTILINE)
           assert crate["package"]["version"] == version, "Cargo version differs from tag"
+          assert python["project"]["version"] == version, "Python version differs from tag"
+          assert integration["version"] == version, "Integration version differs from tag"
           assert app_version and app_version[1] == version, "App version differs from tag"
           PY
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
