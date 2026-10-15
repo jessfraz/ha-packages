@@ -11,6 +11,119 @@ use sqlx::{
 };
 use uuid::Uuid;
 
+#[tokio::test]
+async fn provider_migration_clarifies_unsupported_errors_without_changing_registration_state() {
+    let directory = tempfile::tempdir().unwrap();
+    let old_migrations = directory.path().join("old-migrations");
+    std::fs::create_dir(&old_migrations).unwrap();
+    let source = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("migrations");
+    for entry in std::fs::read_dir(source).unwrap() {
+        let entry = entry.unwrap();
+        let name = entry.file_name();
+        let name = name.to_str().unwrap();
+        let version: i64 = name.split_once('_').unwrap().0.parse().unwrap();
+        if version < 10 {
+            std::fs::copy(entry.path(), old_migrations.join(name)).unwrap();
+        }
+    }
+    let database = directory.path().join("upgrade.sqlite3");
+    let legacy = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(
+            SqliteConnectOptions::new()
+                .filename(&database)
+                .create_if_missing(true)
+                .foreign_keys(true),
+        )
+        .await
+        .unwrap();
+    Migrator::new(old_migrations.as_path())
+        .await
+        .unwrap()
+        .run(&legacy)
+        .await
+        .unwrap();
+    let unsupported = Uuid::now_v7();
+    let other_error = Uuid::now_v7();
+    for (id, number, code, native) in [
+        (
+            unsupported,
+            "9400100000000000000001",
+            "tracking_unsupported",
+            "TRACKER.NO_CARRIER_FOR_CODE",
+        ),
+        (
+            other_error,
+            "9400100000000000000002",
+            "tracking_invalid",
+            "TRACKER.INVALID_PARAMS",
+        ),
+    ] {
+        sqlx::query(
+            "INSERT INTO shipments (id,title,tracking_carrier,tracking_number,registration_state,
+             last_error,last_error_code,last_provider_status,last_provider_error_code,
+             attempts,next_attempt_at,registration_started_at)
+             VALUES (?,'Upgrade parcel','usps',?,'rejected',
+             'Old provider error',?,422,?,3,NULL,946684800)",
+        )
+        .bind(id.to_string())
+        .bind(number)
+        .bind(code)
+        .bind(native)
+        .execute(&legacy)
+        .await
+        .unwrap();
+    }
+    legacy.close().await;
+
+    // Repeated normal opens prove the migration is durable and does not retry
+    // rejected registrations or rewrite unrelated provider errors.
+    for _ in 0..2 {
+        let store = Store::open(&database).await.unwrap();
+        let migrated = store.get(unsupported).await.unwrap();
+        assert_eq!(
+            migrated.sync.last_error.as_deref(),
+            Some(
+                "Tracking is unavailable from the configured provider (EasyPost): no supported carrier was found. This does not mean the tracking number is invalid. Check provider support and the selected carrier before changing the number."
+            )
+        );
+        assert_eq!(
+            migrated.sync.provider,
+            shipments::shipping_api::types::ProviderId::EasyPost
+        );
+        assert_eq!(
+            migrated.sync.registration_state,
+            shipments::models::RegistrationState::Rejected
+        );
+        assert_eq!(migrated.sync.registration_started_at, Some(946684800));
+        assert_eq!(
+            migrated.sync.error_code.as_deref(),
+            Some("tracking_unsupported")
+        );
+        assert_eq!(
+            migrated.sync.provider_error_code.as_deref(),
+            Some("TRACKER.NO_CARRIER_FOR_CODE")
+        );
+        assert_eq!(migrated.sync.provider_status, Some(422));
+        assert_eq!(migrated.sync.attempts, 3);
+        assert!(migrated.sync.next_attempt_at.is_none());
+        assert!(migrated.sync.tracker_id.is_none());
+        assert_eq!(migrated.tracking.number, "9400100000000000000001");
+        assert_eq!(migrated.tracking.carrier, Some("USPS".parse().unwrap()));
+        assert_eq!(
+            store
+                .get(other_error)
+                .await
+                .unwrap()
+                .sync
+                .last_error
+                .as_deref(),
+            Some("Old provider error")
+        );
+        store.close().await.unwrap();
+    }
+}
+
 fn legacy_shipment(tracking: Option<Tracking>, archived: bool) -> Shipment<Option<Tracking>> {
     let id = Uuid::now_v7();
     Shipment {
@@ -34,6 +147,7 @@ fn legacy_shipment(tracking: Option<Tracking>, archived: bool) -> Shipment<Optio
             key: id.to_string(),
         }],
         sync: SyncState {
+            provider: Default::default(),
             registration_state: Default::default(),
             registration_started_at: None,
             error_code: None,

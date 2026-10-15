@@ -1,3 +1,6 @@
+use shipments::shipping_api::easypost::EasyPostClient;
+use shipments::shipping_api::error::Rejection as TrackerRejection;
+use shipments::shipping_api::error::{Error as ShippingError, ErrorKind};
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
@@ -12,7 +15,7 @@ use shipments::models::{
     TrackingLocation, UpdateShipment,
 };
 use shipments::store::Store;
-use shipments::sync::{EasyPostClient, SyncError, SyncWorker, TrackerRejection};
+use shipments::sync::SyncWorker;
 use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
 
 struct Fixture {
@@ -298,7 +301,7 @@ impl Provider {
     }
 
     fn worker(&self, store: &Store) -> SyncWorker {
-        SyncWorker::new(store.pool().clone(), self.client())
+        SyncWorker::new(store.pool().clone(), std::sync::Arc::new(self.client()))
     }
 
     async fn request(&mut self) -> Incoming {
@@ -1000,7 +1003,7 @@ async fn provider_client_bounds_responses_rejects_redirects_and_redacts_parse_er
         body: "test-secret".into(),
     });
     let error = task.await.unwrap().unwrap_err();
-    assert!(matches!(error, SyncError::Http { status: 302, .. }));
+    assert!(matches!(error.kind, ErrorKind::Http { status: 302, .. }));
     assert_eq!(error.to_string(), "EasyPost returned HTTP 302");
     assert!(provider.incoming.try_recv().is_err());
 
@@ -1013,7 +1016,10 @@ async fn provider_client_bounds_responses_rejects_redirects_and_redacts_parse_er
     });
     assert!(matches!(
         task.await.unwrap(),
-        Err(SyncError::ResponseTooLarge)
+        Err(ShippingError {
+            kind: ErrorKind::ResponseTooLarge,
+            ..
+        })
     ));
 
     let task = tokio::spawn(async move { client.register("TRACK9", None).await });
@@ -1030,7 +1036,10 @@ async fn provider_client_bounds_responses_rejects_redirects_and_redacts_parse_er
     let client = provider.client();
     assert!(matches!(
         client.retrieve("../credential-capture", "TRACK9").await,
-        Err(SyncError::InvalidResponse)
+        Err(ShippingError {
+            kind: ErrorKind::InvalidResponse,
+            ..
+        })
     ));
     let task = tokio::spawn(async move { client.retrieve("trk_requested", "TRACK9").await });
     provider
@@ -1039,7 +1048,10 @@ async fn provider_client_bounds_responses_rejects_redirects_and_redacts_parse_er
         .tracker("TRACK9", Status::InTransit);
     assert!(matches!(
         task.await.unwrap(),
-        Err(SyncError::InvalidResponse)
+        Err(ShippingError {
+            kind: ErrorKind::InvalidResponse,
+            ..
+        })
     ));
 }
 
@@ -1073,8 +1085,8 @@ async fn registration_accepts_unscanned_trackers_and_checks_the_returned_carrier
         .tracker("TRACK-NO-SCANS", Status::Unknown);
     let error = task.await.unwrap().unwrap_err();
     assert!(matches!(
-        error,
-        SyncError::Rejected(TrackerRejection::CarrierCodeMismatch)
+        error.kind,
+        ErrorKind::Rejected(TrackerRejection::CarrierCodeMismatch)
     ));
     assert_eq!(error.provider_error_code(), None);
 }
@@ -1176,7 +1188,10 @@ async fn registration_requires_a_valid_carrier_and_tracker_contract() {
         });
         assert!(matches!(
             task.await.unwrap(),
-            Err(SyncError::InvalidResponse)
+            Err(ShippingError {
+                kind: ErrorKind::InvalidResponse,
+                ..
+            })
         ));
     }
 }
@@ -1242,7 +1257,7 @@ async fn documented_tracker_rejections_are_typed_and_redact_provider_details() {
         });
         let error = task.await.unwrap().unwrap_err();
         assert!(
-            matches!(error, SyncError::ProviderRejected { rejection: actual, status, .. } if actual == expected && status == if index % 2 == 0 { 400 } else { 422 })
+            matches!(error.kind, ErrorKind::ProviderRejected { rejection: actual, status, .. } if actual == expected && status == if index % 2 == 0 { 400 } else { 422 })
         );
         for text in [error.to_string(), format!("{error:?}")] {
             assert!(!text.contains("test-secret"));
@@ -1270,8 +1285,8 @@ async fn unknown_authentication_and_outage_errors_remain_generic_and_bounded() {
         });
         let error = task.await.unwrap().unwrap_err();
         assert!(matches!(
-            error,
-            SyncError::Http {
+            error.kind,
+            ErrorKind::Http {
                 status: 422,
                 retry_after: None
             }
@@ -1289,7 +1304,7 @@ async fn unknown_authentication_and_outage_errors_remain_generic_and_bounded() {
         });
         let error = task.await.unwrap().unwrap_err();
         assert!(
-            matches!(error, SyncError::Http { status: actual, retry_after: Some(600) } if actual == status)
+            matches!(error.kind, ErrorKind::Http { status: actual, retry_after: Some(600) } if actual == status)
         );
         assert_eq!(
             error.to_string(),
@@ -1312,7 +1327,7 @@ async fn unknown_authentication_and_outage_errors_remain_generic_and_bounded() {
             ),
         });
         let error = task.await.unwrap().unwrap_err();
-        assert!(matches!(error, SyncError::Http { status: 422, .. }));
+        assert!(matches!(error.kind, ErrorKind::Http { status: 422, .. }));
         assert_eq!(error.provider_error_code(), None);
     }
 }
@@ -1386,7 +1401,7 @@ async fn connection_check_redacts_authentication_errors_and_never_follows_redire
     });
     let error = task.await.unwrap().unwrap_err();
     assert_eq!(error.to_string(), "EasyPost returned HTTP 302");
-    assert!(matches!(error, SyncError::Http { status: 302, .. }));
+    assert!(matches!(error.kind, ErrorKind::Http { status: 302, .. }));
     assert!(capture.incoming.is_empty());
     assert!(provider.incoming.try_recv().is_err());
 }
@@ -1415,7 +1430,7 @@ async fn connection_check_rejects_invalid_and_oversized_success_responses() {
             error.to_string(),
             "EasyPost returned an invalid connection-check response"
         );
-        assert!(matches!(error, SyncError::InvalidConnectionResponse));
+        assert!(matches!(error.kind, ErrorKind::InvalidConnectionResponse));
     }
     for headers in [
         Vec::new(),
@@ -1430,7 +1445,10 @@ async fn connection_check_rejects_invalid_and_oversized_success_responses() {
         });
         assert!(matches!(
             task.await.unwrap(),
-            Err(SyncError::ResponseTooLarge)
+            Err(ShippingError {
+                kind: ErrorKind::ResponseTooLarge,
+                ..
+            })
         ));
     }
 }
@@ -1441,7 +1459,10 @@ async fn rate_limit_pauses_all_provider_operations_and_leaves_other_shipments_du
     let shipment = fixture.shipment("WAITING-TRACK").await;
     let mut provider = Provider::start();
     let client = provider.client();
-    let worker = SyncWorker::new(fixture.store.pool().clone(), client.clone());
+    let worker = SyncWorker::new(
+        fixture.store.pool().clone(),
+        std::sync::Arc::new(client.clone()),
+    );
     let task_client = client.clone();
     let task = tokio::spawn(async move { task_client.register("LIMITED-TRACK", None).await });
     let mut reply = Reply::error(429);
@@ -1449,9 +1470,12 @@ async fn rate_limit_pauses_all_provider_operations_and_leaves_other_shipments_du
     provider.request().await.reply(reply);
     assert!(matches!(
         task.await.unwrap(),
-        Err(SyncError::Http {
-            status: 429,
-            retry_after: Some(600)
+        Err(ShippingError {
+            kind: ErrorKind::Http {
+                status: 429,
+                retry_after: Some(600)
+            },
+            ..
         })
     ));
 
@@ -1479,9 +1503,12 @@ async fn rate_limit_pauses_all_provider_operations_and_leaves_other_shipments_du
     provider.request().await.reply(Reply::error(429));
     assert!(matches!(
         task.await.unwrap(),
-        Err(SyncError::Http {
-            status: 429,
-            retry_after: Some(60)
+        Err(ShippingError {
+            kind: ErrorKind::Http {
+                status: 429,
+                retry_after: Some(60)
+            },
+            ..
         })
     ));
     assert!(client.check_connection().await.is_err());
@@ -1559,6 +1586,7 @@ async fn provider_logs_correlate_requests_and_shipments_without_exposing_private
     }
     #[derive(Deserialize)]
     struct Entry {
+        provider: shipments::shipping_api::types::ProviderId,
         timestamp: String,
         event: String,
         request_id: uuid::Uuid,
@@ -1587,7 +1615,10 @@ async fn provider_logs_correlate_requests_and_shipments_without_exposing_private
 
     let fixture = Fixture::new().await;
     let shipment = fixture.shipment("PRIVATE-TRACKING-CODE").await;
-    let worker = SyncWorker::new(fixture.store.pool().clone(), client.clone());
+    let worker = SyncWorker::new(
+        fixture.store.pool().clone(),
+        std::sync::Arc::new(client.clone()),
+    );
     observe(
         &mut provider,
         &worker,
@@ -1602,7 +1633,7 @@ async fn provider_logs_correlate_requests_and_shipments_without_exposing_private
             fixture.store.clone(),
             owner,
             None,
-            Some(client),
+            Some(std::sync::Arc::new(client)),
         )),
     )
     .unwrap();
@@ -1668,6 +1699,10 @@ async fn provider_logs_correlate_requests_and_shipments_without_exposing_private
     assert_eq!(entries[3].operation, "health");
     assert_eq!(entries[3].outcome, "error");
     for entry in entries {
+        assert_eq!(
+            entry.provider,
+            shipments::shipping_api::types::ProviderId::EasyPost
+        );
         time::OffsetDateTime::parse(
             &entry.timestamp,
             &time::format_description::well_known::Rfc3339,
@@ -2019,16 +2054,19 @@ async fn native_error_codes_preserve_http_status_and_retry_advice_on_all_error_r
         assert_eq!(error.provider_error_code(), Some("CREDENTIALS_NOT_FOUND"));
         assert_eq!(error.error_code(), "tracking_carrier_credentials_required");
         assert!(matches!(
-            error,
-            SyncError::ProviderRejected {
+            error.kind,
+            ErrorKind::ProviderRejected {
                 retry_after: Some(600),
                 ..
             }
         ));
         assert!(matches!(
             client.check_connection().await,
-            Err(SyncError::Throttled {
-                retry_after: 599..=601
+            Err(ShippingError {
+                kind: ErrorKind::Throttled {
+                    retry_after: 599..=601
+                },
+                ..
             })
         ));
         assert!(provider.incoming.try_recv().is_err());

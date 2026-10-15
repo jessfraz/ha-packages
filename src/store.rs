@@ -1,4 +1,9 @@
-use crate::{carrier::Carrier, error::Error, models::*, sync::Tracker};
+use crate::{
+    carrier::Carrier,
+    error::Error,
+    models::*,
+    shipping_api::types::{ProviderId, Tracker},
+};
 use sha2::{Digest, Sha256};
 use sqlx::{
     FromRow, QueryBuilder, Sqlite, SqlitePool, Transaction,
@@ -14,6 +19,7 @@ pub struct Store {
 
 #[derive(FromRow)]
 struct Record {
+    tracking_provider: ProviderId,
     id: String,
     revision: i64,
     title: String,
@@ -105,6 +111,7 @@ impl Record {
             updated_at: self.updated_at,
             sources,
             sync: SyncState {
+                provider: self.tracking_provider,
                 registration_state: match self.registration_state.as_str() {
                     "pending" => RegistrationState::Pending,
                     "registered" => RegistrationState::Registered,
@@ -750,7 +757,7 @@ impl Store {
         }
         if shipment.sync.registration_state == RegistrationState::Rejected {
             return Err(Error::Conflict(
-                "EasyPost rejected this tracking registration. Correct the tracking number or carrier before requesting another refresh.".into(),
+                "Tracking registration needs attention. Review the shipment's provider error and carrier support before retrying or changing its tracking number.".into(),
             ));
         }
         // Refreshes coalesce without disturbing an in-flight check or a retry.

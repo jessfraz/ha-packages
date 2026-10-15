@@ -1,8 +1,8 @@
 use crate::{
     installation::{Installation, InstallationReport, IntegrationPresence, valid_presence},
     models::*,
+    shipping_api::ShippingApi,
     store::{Store, validate_create, validate_update},
-    sync::EasyPostClient,
 };
 use anyhow::{Context as _, Result, anyhow};
 use dropshot::ClientErrorStatusCode as StatusCode;
@@ -28,7 +28,7 @@ pub struct Context {
     owner_digest: [u8; 32],
     integration_digest: Option<[u8; 32]>,
     ingress_peer: Option<IpAddr>,
-    provider: Option<EasyPostClient>,
+    provider: Option<Arc<dyn ShippingApi>>,
     installation: Arc<Installation>,
 }
 
@@ -37,7 +37,7 @@ impl Context {
         store: Store,
         owner: &str,
         ingress_peer: Option<IpAddr>,
-        provider: Option<EasyPostClient>,
+        provider: Option<Arc<dyn ShippingApi>>,
     ) -> Self {
         Self {
             store,
@@ -699,8 +699,11 @@ async fn installation_check(
     let provider = context
         .provider
         .as_ref()
-        .map(|provider| provider.with_request_id(&request.request_id));
-    context.installation.check_provider(provider.as_ref()).await;
+        .map(|provider| provider.for_request(&request.request_id, None));
+    context
+        .installation
+        .check_provider(provider.as_deref())
+        .await;
     installation_report(&request).await.map(HttpResponseOk)
 }
 

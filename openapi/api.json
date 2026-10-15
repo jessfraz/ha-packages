@@ -590,6 +590,13 @@
         ],
         "type": "object"
       },
+      "ProviderId": {
+        "description": "Durable tracker ownership, separate from the package carrier. Add providers only when an implementation and configuration are available.",
+        "enum": [
+          "easypost"
+        ],
+        "type": "string"
+      },
       "RegistrationState": {
         "enum": [
           "pending",
@@ -1051,6 +1058,9 @@
             "nullable": true,
             "type": "integer"
           },
+          "provider": {
+            "$ref": "#/components/schemas/ProviderId"
+          },
           "provider_error_code": {
             "nullable": true,
             "type": "string"
@@ -1080,6 +1090,7 @@
         },
         "required": [
           "attempts",
+          "provider",
           "registration_state"
         ],
         "type": "object"
@@ -1189,7 +1200,7 @@
   "info": {
     "description": "Persistent local shipment records, manual corrections, and carrier synchronization. Use a Bearer owner or ingestion token. Creates require Idempotency-Key; writes to an existing shipment require its quoted revision in If-Match.",
     "title": "Shipments API",
-    "version": "0.5.1"
+    "version": "0.5.2"
   },
   "openapi": "3.0.3",
   "paths": {

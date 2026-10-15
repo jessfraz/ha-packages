@@ -1,3 +1,4 @@
+use shipments::shipping_api::easypost::EasyPostClient;
 use std::{
     io::{Read, Write},
     net::{TcpListener, TcpStream},
@@ -18,7 +19,7 @@ use shipments::{
         UpdateShipment,
     },
     store::Store,
-    sync::{EasyPostClient, SyncWorker},
+    sync::SyncWorker,
 };
 use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
 
@@ -199,7 +200,9 @@ impl Provider {
     fn worker(&self, store: &Store) -> SyncWorker {
         SyncWorker::new(
             store.pool().clone(),
-            EasyPostClient::for_loopback("registration-test-key", &self.base).unwrap(),
+            std::sync::Arc::new(
+                EasyPostClient::for_loopback("registration-test-key", &self.base).unwrap(),
+            ),
         )
     }
     async fn request(&mut self) -> Incoming {
@@ -512,7 +515,7 @@ async fn unknown_post_outcome_is_durable_and_empty_reconciliation_retries_same_i
 }
 
 #[tokio::test]
-async fn invalid_tracking_is_rejected_with_provider_code_and_status_without_repeated_calls() {
+async fn unsupported_provider_preserves_tracking_number_and_explains_support_without_retrying() {
     let fixture = Fixture::new().await;
     let shipment = fixture.shipment().await;
     let mut provider = Provider::new();
@@ -535,14 +538,17 @@ async fn invalid_tracking_is_rejected_with_provider_code_and_status_without_repe
         Some("tracking_unsupported")
     );
     assert_eq!(rejected.sync.provider_status, Some(422));
+    assert_eq!(
+        rejected.sync.provider_error_code.as_deref(),
+        Some("TRACKER.NO_CARRIER_FOR_CODE")
+    );
+    assert_eq!(rejected.tracking, shipment.tracking);
     assert!(rejected.sync.next_attempt_at.is_none());
-    assert!(
-        rejected
-            .sync
-            .last_error
-            .as_ref()
-            .unwrap()
-            .contains("Check the tracking number")
+    assert_eq!(
+        rejected.sync.last_error.as_deref(),
+        Some(
+            "Tracking is unavailable from the configured provider (EasyPost): no supported carrier was found. This does not mean the tracking number is invalid. Check provider support and the selected carrier before changing the number."
+        )
     );
     fixture.due(shipment.id).await;
     assert!(!worker.tick().await.unwrap());

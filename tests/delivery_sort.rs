@@ -9,8 +9,8 @@ use shipments::{
         CarrierEvent, CarrierTracking, CreateShipment, SetOverride, Shipment, Source, Status,
         Tracking,
     },
+    shipping_api::types::Tracker,
     store::Store,
-    sync::Tracker,
 };
 use sqlx::SqlitePool;
 use uuid::Uuid;

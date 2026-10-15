@@ -11,8 +11,8 @@ use shipments::{
         CreateShipment, Direction, Event, Patch, RegistrationState, Shipment, Source, Tracking,
         UpdateShipment,
     },
+    shipping_api::easypost::EasyPostClient,
     store::Store,
-    sync::EasyPostClient,
 };
 
 const OWNER: &str = "pending-api-owner-credential-at-least-32-bytes";
@@ -81,7 +81,7 @@ async fn creates_commit_pending_records_sources_history_and_replays_without_prov
             store.clone(),
             OWNER,
             None,
-            Some(provider),
+            Some(std::sync::Arc::new(provider)),
         )),
         shipments::logging::with_writer(capture.clone()),
     )

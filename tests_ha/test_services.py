@@ -164,14 +164,17 @@ async def test_add_tracked_shipment_without_requesting_response(
 async def test_action_reports_public_backend_error(
     hass: HomeAssistant, hass_user, entry, backend: Backend
 ) -> None:
+    message = (
+        "Tracking is unavailable from the configured provider (EasyPost): "
+        "no supported carrier was found. "
+        "This does not mean the tracking number is invalid. "
+        "Check provider support and the selected carrier before changing the number."
+    )
     backend.responses[("POST", "/v1/shipments")] = (
         422,
         json.dumps(
             {
-                "message": (
-                    "EasyPost does not support this carrier. "
-                    "Check the tracking number and carrier."
-                ),
+                "message": message,
                 "error_code": "tracking_unsupported",
                 "private_details": "private-provider-credential",
             }
@@ -192,7 +195,7 @@ async def test_action_reports_public_backend_error(
         )
     assert "HTTP 422" in str(caught.value)
     assert "tracking_unsupported" in str(caught.value)
-    assert "Check the tracking number and carrier." in str(caught.value)
+    assert message in str(caught.value)
     assert "private-provider-credential" not in str(caught.value)
 
 

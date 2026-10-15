@@ -1,7 +1,7 @@
 //! Live install checks. A recent authenticated adapter heartbeat establishes
 //! that Home Assistant actually loaded the integration and reached this app.
 
-use crate::sync::EasyPostClient;
+use crate::shipping_api::ShippingApi;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -99,7 +99,7 @@ impl Installation {
             })
     }
 
-    pub async fn check_provider(&self, provider: Option<&EasyPostClient>) {
+    pub async fn check_provider(&self, provider: Option<&dyn ShippingApi>) {
         let Some(provider) = provider else {
             return;
         };
@@ -116,12 +116,13 @@ impl Installation {
             return;
         }
         let mut result = match provider.check_connection().await {
-            Ok(()) => Check::pass(
-                "Last check: EasyPost accepted the key and allowed read-only tracking access.",
-            ),
+            Ok(()) => Check::pass(&format!(
+                "Last check: {} accepted the key and allowed read-only tracking access.",
+                provider.id().name()
+            )),
             Err(error) => Check {
                 status: CheckStatus::Attention,
-                message: format!("Last EasyPost check failed: {error}"),
+                message: format!("Last {} check failed: {error}", provider.id().name()),
                 checked_at: None,
             },
         };
@@ -273,7 +274,7 @@ mod tests {
 
     #[tokio::test]
     async fn completed_probe_remains_visible_to_a_report_while_a_cached_check_is_queued() {
-        use crate::{installation::Check, sync::EasyPostClient};
+        use crate::{installation::Check, shipping_api::easypost::EasyPostClient};
         use std::future::Future;
         use std::task::{Context, Waker};
 
@@ -338,7 +339,7 @@ mod tests {
 
     #[tokio::test]
     async fn explicit_provider_probe_replaces_a_previous_pass_and_debounces_rechecks() {
-        use crate::sync::EasyPostClient;
+        use crate::shipping_api::easypost::EasyPostClient;
         use std::time::{SystemTime, UNIX_EPOCH};
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
 

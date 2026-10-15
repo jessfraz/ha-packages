@@ -26,14 +26,23 @@ impl App {
     }
     async fn with_provider(
         ingress_peer: Option<std::net::IpAddr>,
-        provider: Option<shipments::sync::EasyPostClient>,
+        provider: Option<shipments::shipping_api::easypost::EasyPostClient>,
     ) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(&dir.path().join("shipments.sqlite3"))
             .await
             .unwrap();
         let context = Arc::new(
-            api::Context::new(store.clone(), OWNER, None, provider).with_integration(INTEGRATION),
+            api::Context::new(
+                store.clone(),
+                OWNER,
+                None,
+                provider.map(|provider| {
+                    std::sync::Arc::new(provider)
+                        as std::sync::Arc<dyn shipments::shipping_api::ShippingApi>
+                }),
+            )
+            .with_integration(INTEGRATION),
         );
         let server = api::start("127.0.0.1:0".parse().unwrap(), context.clone()).unwrap();
         let url = format!("http://{}", server.local_addr());
@@ -787,7 +796,7 @@ async fn integration_credential_is_scoped_and_installation_requires_a_real_check
 async fn explicit_installation_probe_is_read_only_and_concurrent_checks_are_cached() {
     use shipments::{
         installation::{CheckStatus, InstallationReport},
-        sync::EasyPostClient,
+        shipping_api::easypost::EasyPostClient,
     };
     use std::io::{Read, Write};
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -1167,7 +1176,7 @@ struct RegisteredTracker {
     public_url: String,
 }
 struct ProviderFixture {
-    client: shipments::sync::EasyPostClient,
+    client: shipments::shipping_api::easypost::EasyPostClient,
     state: Arc<std::sync::Mutex<ProviderState>>,
     stop: Arc<std::sync::atomic::AtomicBool>,
     thread: Option<std::thread::JoinHandle<()>>,
@@ -1263,7 +1272,7 @@ impl ProviderFixture {
             }
         });
         Self {
-            client: shipments::sync::EasyPostClient::for_loopback(
+            client: shipments::shipping_api::easypost::EasyPostClient::for_loopback(
                 "disposable-test-key",
                 &format!("http://{address}/"),
             )
@@ -1377,8 +1386,10 @@ async fn every_api_role_rejects_missing_or_invalid_local_tracking_before_provide
 async fn unscanned_tracking_is_saved_pending_then_registered_and_replays_make_no_requests() {
     let app = App::new(None).await;
     let provider = app.provider_fixture.as_ref().unwrap();
-    let worker =
-        shipments::sync::SyncWorker::new(app.store.pool().clone(), provider.client.clone());
+    let worker = shipments::sync::SyncWorker::new(
+        app.store.pool().clone(),
+        std::sync::Arc::new(provider.client.clone()),
+    );
     for (index, status) in [Status::Unknown, Status::PreTransit]
         .into_iter()
         .enumerate()
@@ -1480,8 +1491,10 @@ async fn unscanned_tracking_is_saved_pending_then_registered_and_replays_make_no
 async fn tracking_changes_save_pending_and_later_provider_rejection_preserves_the_new_input() {
     let app = App::new(None).await;
     let provider = app.provider_fixture.as_ref().unwrap();
-    let worker =
-        shipments::sync::SyncWorker::new(app.store.pool().clone(), provider.client.clone());
+    let worker = shipments::sync::SyncWorker::new(
+        app.store.pool().clone(),
+        std::sync::Arc::new(provider.client.clone()),
+    );
     let created: Shipment = app
         .create("Parcel", "identity-change")
         .await
@@ -1683,8 +1696,10 @@ async fn provider_failures_are_visible_on_durable_records_with_safe_codes_and_ht
         let created: Shipment = response.json().await.unwrap();
         assert_eq!(created.sync.registration_state, RegistrationState::Pending);
         assert_eq!(provider.calls(), 0);
-        let worker =
-            shipments::sync::SyncWorker::new(app.store.pool().clone(), provider.client.clone());
+        let worker = shipments::sync::SyncWorker::new(
+            app.store.pool().clone(),
+            std::sync::Arc::new(provider.client.clone()),
+        );
         assert!(worker.tick().await.unwrap());
         let persisted: Shipment = app
             .request(Method::GET, &format!("/v1/shipments/{}", created.id))
@@ -1702,6 +1717,15 @@ async fn provider_failures_are_visible_on_durable_records_with_safe_codes_and_ht
         let message = persisted.sync.last_error.as_deref().unwrap();
         assert!(!message.contains("private-provider-detail"));
         assert!(!message.contains(&created.tracking.number));
+        if code == "tracking_unsupported" {
+            assert_eq!(
+                persisted.sync.provider_error_code.as_deref(),
+                Some("TRACKER.NO_CARRIER_FOR_CODE")
+            );
+            assert!(message.contains("configured provider (EasyPost)"));
+            assert!(message.contains("This does not mean the tracking number is invalid."));
+            assert!(message.contains("Check provider support and the selected carrier"));
+        }
         assert_eq!(
             persisted.sync.next_attempt_at.is_some(),
             state == RegistrationState::Pending
@@ -1733,8 +1757,10 @@ async fn provider_failures_are_visible_on_durable_records_with_safe_codes_and_ht
 async fn shared_provider_cooldown_keeps_new_api_creates_durable_and_worker_requests_paused() {
     let app = App::new(None).await;
     let provider = app.provider_fixture.as_ref().unwrap();
-    let worker =
-        shipments::sync::SyncWorker::new(app.store.pool().clone(), provider.client.clone());
+    let worker = shipments::sync::SyncWorker::new(
+        app.store.pool().clone(),
+        std::sync::Arc::new(provider.client.clone()),
+    );
     let response = app.create("Limited parcel", "limited").await;
     assert_eq!(response.status(), StatusCode::CREATED);
     let first: Shipment = response.json().await.unwrap();

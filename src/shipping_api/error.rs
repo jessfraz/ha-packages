@@ -1,0 +1,204 @@
+use std::fmt;
+
+use crate::shipping_api::types::ProviderId;
+
+/// Safe, normalized failures. Never retain provider free text, request URLs,
+/// credentials or response bodies. Native codes must be static adapter values.
+pub struct Error {
+    pub provider: ProviderId,
+    pub kind: ErrorKind,
+}
+
+#[derive(Debug)]
+pub enum ErrorKind {
+    Configuration,
+    Timeout,
+    Connection,
+    Http {
+        status: u16,
+        retry_after: Option<i64>,
+    },
+    Throttled {
+        retry_after: i64,
+    },
+    Rejected(Rejection),
+    ProviderRejected {
+        rejection: Rejection,
+        code: &'static str,
+        status: u16,
+        retry_after: Option<i64>,
+    },
+    RegistrationAmbiguous,
+    RegistrationExpired,
+    ResponseTooLarge,
+    InvalidResponse,
+    InvalidConnectionResponse,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Rejection {
+    NoCarrierForCode,
+    CarrierCodeMismatch,
+    MultipleCarriersForCode,
+    InvalidParams,
+    InvalidTestCode,
+    NoCarrierAccount,
+    CarrierCredentialsMissing,
+}
+
+impl Error {
+    pub fn new(provider: ProviderId, kind: ErrorKind) -> Self {
+        Self { provider, kind }
+    }
+
+    pub fn error_code(&self) -> &'static str {
+        match &self.kind {
+            ErrorKind::Rejected(rejection) | ErrorKind::ProviderRejected { rejection, .. } => {
+                rejection.error_code()
+            }
+            ErrorKind::RegistrationAmbiguous => "registration_ambiguous",
+            ErrorKind::RegistrationExpired => "registration_expired",
+            ErrorKind::Configuration => "provider_configuration",
+            ErrorKind::Timeout => "provider_timeout",
+            ErrorKind::Connection => "provider_connection",
+            ErrorKind::Http {
+                status: 401 | 403, ..
+            } => "tracking_provider_credentials",
+            ErrorKind::Http { status: 429, .. } => "tracking_verification_rate_limited",
+            ErrorKind::Http { .. } => "provider_http",
+            ErrorKind::Throttled { .. } => "provider_throttled",
+            ErrorKind::ResponseTooLarge => "provider_response_too_large",
+            ErrorKind::InvalidResponse | ErrorKind::InvalidConnectionResponse => {
+                "provider_invalid_response"
+            }
+        }
+    }
+
+    pub fn provider_status(&self) -> Option<u16> {
+        match self.kind {
+            ErrorKind::Http { status, .. } | ErrorKind::ProviderRejected { status, .. } => {
+                Some(status)
+            }
+            _ => None,
+        }
+    }
+
+    pub fn provider_error_code(&self) -> Option<&'static str> {
+        match self.kind {
+            ErrorKind::ProviderRejected { code, .. } => Some(code),
+            _ => None,
+        }
+    }
+
+    pub fn retry_after(&self) -> Option<i64> {
+        match self.kind {
+            ErrorKind::Http { retry_after, .. }
+            | ErrorKind::ProviderRejected { retry_after, .. } => retry_after,
+            ErrorKind::Throttled { retry_after } => Some(retry_after),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn set_retry_after(&mut self, value: i64) {
+        match &mut self.kind {
+            ErrorKind::Http { retry_after, .. }
+            | ErrorKind::ProviderRejected { retry_after, .. } => *retry_after = Some(value),
+            _ => {}
+        }
+    }
+
+    pub fn rejects_registration(&self) -> bool {
+        matches!(
+            self.kind,
+            ErrorKind::Rejected(
+                Rejection::NoCarrierForCode
+                    | Rejection::CarrierCodeMismatch
+                    | Rejection::MultipleCarriersForCode
+                    | Rejection::InvalidParams
+            ) | ErrorKind::ProviderRejected {
+                rejection: Rejection::NoCarrierForCode
+                    | Rejection::CarrierCodeMismatch
+                    | Rejection::MultipleCarriersForCode
+                    | Rejection::InvalidParams,
+                ..
+            } | ErrorKind::RegistrationAmbiguous
+                | ErrorKind::RegistrationExpired
+        )
+    }
+}
+
+impl Rejection {
+    pub fn error_code(self) -> &'static str {
+        match self {
+            Self::NoCarrierForCode => "tracking_unsupported",
+            Self::CarrierCodeMismatch => "tracking_carrier_mismatch",
+            Self::MultipleCarriersForCode => "tracking_carrier_ambiguous",
+            Self::InvalidParams => "tracking_invalid",
+            Self::InvalidTestCode => "tracking_test_key",
+            Self::NoCarrierAccount => "tracking_carrier_account_required",
+            Self::CarrierCredentialsMissing => "tracking_carrier_credentials_required",
+        }
+    }
+}
+
+impl fmt::Display for Error {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let provider = self.provider.name();
+        match &self.kind {
+            ErrorKind::Configuration => write!(f, "invalid {provider} client configuration"),
+            ErrorKind::Timeout => write!(f, "{provider} request timed out"),
+            ErrorKind::Connection => write!(f, "{provider} connection failed"),
+            ErrorKind::Http { status, .. } => write!(f, "{provider} returned HTTP {status}"),
+            ErrorKind::Throttled { retry_after } => write!(
+                f,
+                "{provider} requests are paused; retry in {retry_after} seconds"
+            ),
+            ErrorKind::RegistrationAmbiguous => write!(
+                f,
+                "{provider} returned multiple possible trackers for this registration. Select the correct carrier before retrying; no new tracker was created."
+            ),
+            ErrorKind::RegistrationExpired => write!(
+                f,
+                "The original {provider} registration could not be confirmed within its duplicate-protection window. Review the tracker in {provider} before registering it again; no new tracker was created."
+            ),
+            ErrorKind::ResponseTooLarge => write!(f, "{provider} response exceeded the size limit"),
+            ErrorKind::InvalidResponse => write!(f, "{provider} returned an invalid tracker"),
+            ErrorKind::InvalidConnectionResponse => write!(
+                f,
+                "{provider} returned an invalid connection-check response"
+            ),
+            ErrorKind::Rejected(rejection) | ErrorKind::ProviderRejected { rejection, .. } => {
+                format_rejection(*rejection, provider, f)
+            }
+        }
+    }
+}
+
+impl std::error::Error for Error {}
+
+impl fmt::Debug for Error {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ShippingError")
+            .field("provider", &self.provider)
+            .field("error_code", &self.error_code())
+            .field("status", &self.provider_status())
+            .field("retry_after", &self.retry_after())
+            .finish()
+    }
+}
+
+fn format_rejection(
+    rejection: Rejection,
+    provider: &str,
+    f: &mut fmt::Formatter<'_>,
+) -> fmt::Result {
+    match rejection {
+                Rejection::NoCarrierForCode => write!(f, "Tracking is unavailable from the configured provider ({provider}): no supported carrier was found. This does not mean the tracking number is invalid. Check provider support and the selected carrier before changing the number."),
+                Rejection::CarrierCodeMismatch => f.write_str("The tracking number does not match the selected carrier. Check the number and carrier."),
+                Rejection::MultipleCarriersForCode => f.write_str("The tracking number matches multiple carriers. Specify its carrier."),
+                Rejection::InvalidParams => write!(f, "{provider} could not accept this tracking number and carrier. Check both values."),
+                Rejection::InvalidTestCode => write!(f, "This {provider} test key accepts only {provider} test tracking numbers. Use a production key for real shipments."),
+                Rejection::NoCarrierAccount => write!(f, "The {provider} account needs a carrier account for this carrier. Configure it in {provider} and try again."),
+                Rejection::CarrierCredentialsMissing => write!(f, "{provider} has no credentials for this carrier. Configure this carrier in {provider}, then retry. This does not mean the tracking number is invalid."),
+    }
+}

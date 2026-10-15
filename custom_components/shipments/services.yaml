@@ -1,6 +1,6 @@
 add:
   name: Add shipment
-  description: Add a delivery after EasyPost accepts its tracking number.
+  description: Save a shipment with its tracking number and register tracking in the background.
   fields:
     title:
       name: Title
