@@ -32,7 +32,7 @@ impl ProviderId {
     pub const fn for_carrier(carrier: Option<Carrier>) -> Self {
         match carrier {
             Some(Carrier::DoorDash) => Self::DoorDash,
-            Some(Carrier::SpeedX | Carrier::Sway) => Self::AfterShip,
+            Some(Carrier::SpeedX | Carrier::Sway | Carrier::Veho) => Self::AfterShip,
             _ => Self::EasyPost,
         }
     }

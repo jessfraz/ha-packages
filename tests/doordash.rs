@@ -631,7 +631,8 @@ async fn carrier_routing_never_falls_back_to_a_different_tracking_provider() {
         (0, Carrier::DoorDash, ProviderId::DoorDash, "doordash"),
         (1, Carrier::SpeedX, ProviderId::AfterShip, "aftership"),
         (2, Carrier::Sway, ProviderId::AfterShip, "aftership"),
-        (3, Carrier::Usps, ProviderId::EasyPost, "easypost"),
+        (3, Carrier::Veho, ProviderId::AfterShip, "aftership"),
+        (4, Carrier::Usps, ProviderId::EasyPost, "easypost"),
     ] {
         let mut body = input(carrier, (carrier == Carrier::DoorDash).then_some(LINK));
         body.tracking.number = format!("ROUTING{index}123456");
@@ -656,14 +657,14 @@ async fn carrier_routing_never_falls_back_to_a_different_tracking_provider() {
     }
     let mut detected = input(Carrier::Usps, None);
     detected.tracking.carrier = None;
-    detected.tracking.number = "ROUTING4123456".into();
+    detected.tracking.number = "ROUTING5123456".into();
     let response = app.create(&detected, "autodetect").await;
     assert_eq!(response.status(), StatusCode::CREATED);
     let resolved: Shipment = response.json().await.unwrap();
     assert_eq!(resolved.tracking.carrier, Carrier::Usps);
     assert_eq!(resolved.sync.provider, ProviderId::EasyPost);
-    assert_eq!(app.calls.lock().unwrap()[4].provider, ProviderId::EasyPost);
-    assert_eq!(app.calls.lock().unwrap().len(), 5);
+    assert_eq!(app.calls.lock().unwrap()[5].provider, ProviderId::EasyPost);
+    assert_eq!(app.calls.lock().unwrap().len(), 6);
     let mut system: WireSystem = app
         .request(Method::GET, "/v1/system")
         .send()
@@ -681,8 +682,45 @@ async fn carrier_routing_never_falls_back_to_a_different_tracking_provider() {
 }
 
 #[tokio::test]
+async fn changing_tracking_to_veho_verifies_and_saves_aftership_ownership() {
+    let app = App::new().await;
+    let created: Shipment = app
+        .create(&input(Carrier::Usps, None), "before-veho")
+        .await
+        .json()
+        .await
+        .unwrap();
+    let response = app
+        .patch(&created, input(Carrier::Veho, None).tracking)
+        .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let updated: Shipment = response.json().await.unwrap();
+    assert_eq!(updated.tracking.carrier, Carrier::Veho);
+    assert_eq!(updated.sync.provider, ProviderId::AfterShip);
+    assert_eq!(
+        updated.sync.registration_state,
+        RegistrationState::Registered
+    );
+    assert_ne!(updated.sync.tracker_id, created.sync.tracker_id);
+    let calls = app.calls.lock().unwrap().clone();
+    assert_eq!(calls.len(), 2);
+    assert_eq!(calls[0].provider, ProviderId::EasyPost);
+    assert_eq!(calls[1].provider, ProviderId::AfterShip);
+    assert_eq!(calls[1].operation, "verify");
+    let durable = app.store.get(updated.id).await.unwrap();
+    assert_eq!(durable.sync.provider, ProviderId::AfterShip);
+    assert_eq!(durable.sync.tracker_id, updated.sync.tracker_id);
+    app.close().await;
+}
+
+#[tokio::test]
 async fn missing_required_provider_is_actionable_and_never_falls_back_to_easypost() {
-    for carrier in [Carrier::DoorDash, Carrier::SpeedX, Carrier::Sway] {
+    for carrier in [
+        Carrier::DoorDash,
+        Carrier::SpeedX,
+        Carrier::Sway,
+        Carrier::Veho,
+    ] {
         let app = App::with_providers(&[ProviderId::EasyPost]).await;
         let response = app
             .create(

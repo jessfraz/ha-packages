@@ -6,15 +6,21 @@
     <meta name="color-scheme" content="light dark">
     <title>Shipments</title>
     <link rel="stylesheet" href="style.css">
-    <script src="app.js" defer></script>
+    <script src="app.js" type="module"></script>
   </head>
-  <body>
+  <body data-home-assistant="false">
     <header>
       <h1>Shipments</h1>
       <button id="add">Add shipment</button>
     </header>
     <main>
       <p id="notice" role="status" aria-live="polite"></p>
+      <section id="startup-connection" class="connection" aria-labelledby="connection-title" hidden>
+        <h2 id="connection-title">Connecting to Home Assistant</h2>
+        <p id="connection-status" role="status" aria-live="polite">Waiting for Home Assistant to connect. Your shipments will open automatically.</p>
+        <p class="muted">Home Assistant handles pairing and authentication. If this continues, check the Shipments integration in Settings → Devices &amp; services.</p>
+        <button id="retry-connection" type="button" class="quiet">Try again now</button>
+      </section>
       <form id="login" hidden>
         <h2>Connect</h2>
         <p class="muted">Enter your shipment API token. It stays in this tab’s memory.</p>

@@ -924,20 +924,37 @@ async fn schema(
 }
 
 fn static_response(
-    content: &'static str,
+    content: impl Into<Body>,
     content_type: &'static str,
 ) -> Result<Response<Body>, HttpError> {
     Response::builder().header("content-type",content_type).header("cache-control","no-store")
         .header("content-security-policy","default-src 'self'; script-src 'self'; style-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'")
-        .header("x-content-type-options","nosniff").body(Body::from(content)).map_err(|error|HttpError::for_internal_error(error.to_string()))
+        .header("x-content-type-options","nosniff").body(content.into()).map_err(|error|HttpError::for_internal_error(error.to_string()))
 }
 
 #[endpoint {method=GET,path="/",tags=["web"]}]
 async fn index(request: RequestContext<Arc<Context>>) -> Result<Response<Body>, HttpError> {
     ingress_access(&request)?;
     static_response(
-        include_str!("../web/index.html"),
+        include_str!("../web/index.html").replace(
+            "data-home-assistant=\"false\"",
+            if request.context().ingress_peer.is_some() {
+                "data-home-assistant=\"true\""
+            } else {
+                "data-home-assistant=\"false\""
+            },
+        ),
         "text/html; charset=utf-8",
+    )
+}
+#[endpoint {method=GET,path="/connection.js",tags=["web"]}]
+async fn connection_script(
+    request: RequestContext<Arc<Context>>,
+) -> Result<Response<Body>, HttpError> {
+    ingress_access(&request)?;
+    static_response(
+        include_str!("../web/connection.js"),
+        "text/javascript; charset=utf-8",
     )
 }
 #[endpoint {method=GET,path="/app.js",tags=["web"]}]
@@ -956,7 +973,7 @@ async fn style(request: RequestContext<Arc<Context>>) -> Result<Response<Body>, 
 
 pub fn description() -> Result<ApiDescription<Arc<Context>>> {
     let mut api = ApiDescription::new();
-    let endpoints: [dropshot::ApiEndpoint<Arc<Context>>; 26] = [
+    let endpoints: [dropshot::ApiEndpoint<Arc<Context>>; 27] = [
         shipments_list.into(),
         carriers_list.into(),
         shipments_create.into(),
@@ -982,6 +999,7 @@ pub fn description() -> Result<ApiDescription<Arc<Context>>> {
         schema.into(),
         index.into(),
         script.into(),
+        connection_script.into(),
         style.into(),
     ];
     for endpoint in endpoints {
