@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock
 import pytest
 from homeassistant.components import frontend
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import Event, HomeAssistant, callback
+from homeassistant.core import Event, EventStateChangedData, HomeAssistant, callback
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
@@ -25,7 +25,7 @@ from custom_components.shipments.const import (
 )
 from custom_components.shipments.coordinator import ShipmentsCoordinator
 
-from .conftest import SHIPMENT_ID, Backend
+from .conftest import SHIPMENT_ID, Backend, get_state
 
 
 def status_event(
@@ -67,7 +67,7 @@ def capture_events(hass: HomeAssistant) -> list[int]:
     delivered: list[int] = []
 
     @callback
-    def changed(event: Event) -> None:
+    def changed(event: Event[EventStateChangedData]) -> None:
         state = event.data["new_state"]
         if state and state.state != "unavailable" and "event_id" in state.attributes:
             delivered.append(state.attributes["event_id"])
@@ -79,10 +79,10 @@ def capture_events(hass: HomeAssistant) -> list[int]:
 async def test_count_sensors_expose_measurement_statistics(
     hass: HomeAssistant, entry
 ) -> None:
-    assert hass.states.get("sensor.shipments_active").state == "4"
+    assert get_state(hass, "sensor.shipments_active").state == "4"
     for key in SUMMARY_KEYS:
         assert (
-            hass.states.get(f"sensor.shipments_{key}").attributes.get("state_class")
+            get_state(hass, f"sensor.shipments_{key}").attributes.get("state_class")
             == "measurement"
         )
 
@@ -146,24 +146,24 @@ async def test_native_ids_are_stable_when_sensor_platform_finishes_last(
         assert await setup
         await hass.async_block_till_done(wait_background_tasks=True)
     assert len(hass.states.async_all("event")) == 1
-    assert hass.states.get("sensor.shipments_active").state == "4"
+    assert get_state(hass, "sensor.shipments_active").state == "4"
 
 
 async def test_native_problem_indicators_and_label(
     hass: HomeAssistant, entry, backend: Backend
 ) -> None:
     assert (
-        hass.states.get("sensor.shipments_expected").attributes["friendly_name"]
+        get_state(hass, "sensor.shipments_expected").attributes["friendly_name"]
         == "Shipments Awaiting pickup"
     )
-    assert hass.states.get("binary_sensor.shipments_exceptions").state == "off"
-    assert hass.states.get("binary_sensor.shipments_sync_errors").state == "on"
+    assert get_state(hass, "binary_sensor.shipments_exceptions").state == "off"
+    assert get_state(hass, "binary_sensor.shipments_sync_errors").state == "on"
     backend.summaries[""].update(exceptions=2, sync_errors=0)
     await entry.runtime_data.async_refresh()
-    assert hass.states.get("binary_sensor.shipments_exceptions").state == "on"
-    assert hass.states.get("binary_sensor.shipments_sync_errors").state == "off"
+    assert get_state(hass, "binary_sensor.shipments_exceptions").state == "on"
+    assert get_state(hass, "binary_sensor.shipments_sync_errors").state == "off"
     assert (
-        hass.states.get("binary_sensor.shipments_exceptions").attributes["device_class"]
+        get_state(hass, "binary_sensor.shipments_exceptions").attributes["device_class"]
         == "problem"
     )
 
@@ -177,7 +177,7 @@ async def test_event_pages_emit_each_persisted_transition_and_resume_after_reloa
     await entry.runtime_data.async_refresh()
     await hass.async_block_till_done()
     assert delivered == [1, 2, 3]
-    attributes = hass.states.get("event.shipments").attributes
+    attributes = get_state(hass, "event.shipments").attributes
     assert {
         key: attributes[key]
         for key in (
@@ -211,7 +211,7 @@ async def test_event_pages_emit_each_persisted_transition_and_resume_after_reloa
     assert await hass.config_entries.async_setup(entry.entry_id)
     await hass.async_block_till_done(wait_background_tasks=True)
     assert delivered[-3:] == [4, 5, 6]
-    assert hass.states.get("event.shipments").attributes.get("event_id") == 6
+    assert get_state(hass, "event.shipments").attributes.get("event_id") == 6
     assert await Store(hass, 1, f"shipments.{entry.entry_id}.events").async_load() == {
         "after": 6
     }
@@ -219,7 +219,7 @@ async def test_event_pages_emit_each_persisted_transition_and_resume_after_reloa
         request.query for request in backend.requests if request.path == "/v1/events"
     ]
     assert queries == [{"limit": "200", "after": "3"}]
-    assert hass.states.get("event.shipments").attributes["event_id"] == 6
+    assert get_state(hass, "event.shipments").attributes["event_id"] == 6
 
 
 async def test_feed_failure_does_not_reset_cursor_or_break_counts_calendar(
@@ -228,10 +228,10 @@ async def test_feed_failure_does_not_reset_cursor_or_break_counts_calendar(
     delivered = capture_events(hass)
     backend.responses[("GET", "/v1/events?limit=200&after=0")] = (503, b"{}", {})
     await entry.runtime_data.async_refresh()
-    assert hass.states.get("event.shipments").state == "unavailable"
-    assert hass.states.get("sensor.shipments_active").state == "4"
+    assert get_state(hass, "event.shipments").state == "unavailable"
+    assert get_state(hass, "sensor.shipments_active").state == "4"
     assert (
-        hass.states.get("calendar.shipments_inbound_deliveries").state != "unavailable"
+        get_state(hass, "calendar.shipments_inbound_deliveries").state != "unavailable"
     )
     assert ir.async_get(hass).async_get_issue(DOMAIN, "event_stream_unavailable")
     feed_page(backend, 0, [status_event(1)])
@@ -247,8 +247,8 @@ async def test_summary_recovery_delivers_each_queued_native_event(
     delivered = capture_events(hass)
     backend.responses[("GET", "/v1/summary")] = (503, b"{}", {})
     await entry.runtime_data.async_refresh()
-    assert hass.states.get("sensor.shipments_active").state == "unavailable"
-    assert hass.states.get("event.shipments").state == "unavailable"
+    assert get_state(hass, "sensor.shipments_active").state == "unavailable"
+    assert get_state(hass, "event.shipments").state == "unavailable"
     del backend.responses[("GET", "/v1/summary")]
     feed_page(backend, 0, [status_event(1), status_event(2, "delivered")], more=True)
     feed_page(backend, 2, [status_event(3, "exception")])
@@ -292,7 +292,7 @@ async def test_failed_checkpoint_readback_replays_delivered_event(
     await entry.runtime_data.async_refresh()
     await hass.async_block_till_done()
     assert delivered == [1]
-    assert hass.states.get("event.shipments").state == "unavailable"
+    assert get_state(hass, "event.shipments").state == "unavailable"
     monkeypatch.setattr(store, "async_save", original_save)
     await entry.runtime_data.async_refresh()
     await hass.async_block_till_done()
@@ -330,7 +330,7 @@ async def test_invalid_event_page_never_checkpoints_past_unseen_data(
     assert await Store(hass, 1, f"shipments.{entry.entry_id}.events").async_load() == {
         "after": 0
     }
-    assert hass.states.get("sensor.shipments_active").state == "4"
+    assert get_state(hass, "sensor.shipments_active").state == "4"
 
 
 async def test_unload_during_event_read_does_not_deliver_or_advance_checkpoint(
@@ -428,6 +428,7 @@ async def test_version_mismatch_repairs_clear_when_versions_match(
     backend.version = "0.0.1"
     await entry.runtime_data.async_refresh()
     issue = ir.async_get(hass).async_get_issue(DOMAIN, "version_mismatch")
+    assert issue is not None
     assert issue.translation_placeholders == {
         "app_version": "0.0.1",
         "integration_version": current,

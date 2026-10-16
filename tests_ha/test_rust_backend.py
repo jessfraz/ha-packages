@@ -11,7 +11,13 @@ from pathlib import Path
 import pytest
 from aiohttp import ClientError, ClientTimeout
 from homeassistant.config_entries import SOURCE_HASSIO, SOURCE_USER, ConfigEntryState
-from homeassistant.core import Context, Event, HomeAssistant, callback
+from homeassistant.core import (
+    Context,
+    Event,
+    EventStateChangedData,
+    HomeAssistant,
+    callback,
+)
 from homeassistant.data_entry_flow import FlowResultType
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
@@ -27,6 +33,8 @@ from custom_components.shipments.const import (
     DOMAIN,
     SENSOR_KEYS,
 )
+
+from .conftest import get_state
 
 OWNER_TOKEN = "test-owner-credential-at-least-32-characters"
 INTEGRATION_TOKEN = "test-integration-credential-at-least-32-characters"
@@ -254,9 +262,9 @@ async def test_ha_to_rust_contract(
     # Burst writes share the integration's existing refresh cooldown.
     async_fire_time_changed(hass, dt_util.utcnow() + timedelta(seconds=11))
     await hass.async_block_till_done()
-    assert hass.states.get("sensor.shipments_expected").state == "2"
-    assert hass.states.get("sensor.shipments_inbound_active").state == "1"
-    assert hass.states.get("sensor.shipments_outbound_active").state == "1"
+    assert get_state(hass, "sensor.shipments_expected").state == "2"
+    assert get_state(hass, "sensor.shipments_inbound_active").state == "1"
+    assert get_state(hass, "sensor.shipments_outbound_active").state == "1"
 
     # Core authenticates the regular user; the bridge denies their confirmation.
     forbidden = await user.put(
@@ -289,9 +297,9 @@ async def test_ha_to_rust_contract(
     # HA coalesces burst refreshes; advance its clock through the cooldown.
     async_fire_time_changed(hass, dt_util.utcnow() + timedelta(seconds=22))
     await hass.async_block_till_done()
-    assert hass.states.get("sensor.shipments_delivered").state == "1"
-    assert hass.states.get("sensor.shipments_inbound_active").state == "0"
-    assert hass.states.get("sensor.shipments_outbound_active").state == "1"
+    assert get_state(hass, "sensor.shipments_delivered").state == "1"
+    assert get_state(hass, "sensor.shipments_inbound_active").state == "0"
+    assert get_state(hass, "sensor.shipments_outbound_active").state == "1"
 
     conflict = await admin.patch(
         f"{PREFIX}/shipments/{shipment_id}",
@@ -322,20 +330,20 @@ async def test_ha_to_rust_contract(
         )
     async_fire_time_changed(hass, dt_util.utcnow() + timedelta(seconds=33))
     await hass.async_block_till_done()
-    assert hass.states.get("sensor.shipments_active").state == "2"
-    assert hass.states.get("sensor.shipments_inbound_active").state == "1"
-    assert hass.states.get("sensor.shipments_inbound_out_for_delivery").state == "1"
-    assert hass.states.get("sensor.shipments_outbound_active").state == "1"
-    assert hass.states.get("sensor.shipments_exceptions").state == "1"
-    assert hass.states.get("sensor.shipments_inbound_exceptions").state == "0"
-    assert hass.states.get("sensor.shipments_outbound_exceptions").state == "1"
+    assert get_state(hass, "sensor.shipments_active").state == "2"
+    assert get_state(hass, "sensor.shipments_inbound_active").state == "1"
+    assert get_state(hass, "sensor.shipments_inbound_out_for_delivery").state == "1"
+    assert get_state(hass, "sensor.shipments_outbound_active").state == "1"
+    assert get_state(hass, "sensor.shipments_exceptions").state == "1"
+    assert get_state(hass, "sensor.shipments_inbound_exceptions").state == "0"
+    assert get_state(hass, "sensor.shipments_outbound_exceptions").state == "1"
 
     # Three persisted transitions occur between polls and finish at the same
     # summary. Native events must deliver all three, independent of count deltas.
     transitions: list[str] = []
 
     @callback
-    def changed(event: Event) -> None:
+    def changed(event: Event[EventStateChangedData]) -> None:
         state = event.data["new_state"]
         if state and state.state != "unavailable" and "event_type" in state.attributes:
             transitions.append(state.attributes["event_type"])
@@ -364,8 +372,8 @@ async def test_ha_to_rust_contract(
         await entry.runtime_data.async_refresh()
         await hass.async_block_till_done()
         assert transitions == ["delivered", "exception", "out_for_delivery"]
-        assert hass.states.get("sensor.shipments_active").state == "2"
-        attributes = hass.states.get("event.shipments").attributes
+        assert get_state(hass, "sensor.shipments_active").state == "2"
+        attributes = get_state(hass, "event.shipments").attributes
         assert attributes["shipment_id"] == shipment_id
         assert attributes["title"] == "Updated office supplies"
         assert attributes["carrier"] == "USPS"
@@ -378,7 +386,7 @@ async def test_ha_to_rust_contract(
     await override("delivered")
     assert await hass.config_entries.async_setup(entry.entry_id)
     await hass.async_block_till_done(wait_background_tasks=True)
-    attributes = hass.states.get("event.shipments").attributes
+    attributes = get_state(hass, "event.shipments").attributes
     assert attributes["event_type"] == "delivered"
     assert attributes["event_id"] > last_event_id
 
@@ -450,7 +458,7 @@ async def test_app_generated_pairing_and_loaded_check_in(
     assert entry.data[CONF_ADDON_SLUG] == addon_slug
     assert entry.data[CONF_BACKEND_URL] == rust_backend.origin
     for key in SENSOR_KEYS:
-        assert hass.states.get(f"sensor.shipments_{key}").state == "0"
+        assert get_state(hass, f"sensor.shipments_{key}").state == "0"
 
     async with session.get(
         f"{rust_backend.origin}/v1/installation",

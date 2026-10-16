@@ -197,6 +197,7 @@ async def test_discovery_requires_confirmation_before_contact_or_save(
     )
     assert result["type"] is FlowResultType.FORM
     assert result["step_id"] == "hassio_confirm"
+    assert result["data_schema"] is not None
     assert result["data_schema"].schema == {}
     assert not backend.requests
     assert not hass.config_entries.async_entries(DOMAIN)
@@ -398,6 +399,7 @@ async def test_app_reauth_discovers_replacement_without_token_form(
         data=existing.data,
     )
     assert result["step_id"] == "hassio_confirm"
+    assert result["data_schema"] is not None
     assert result["data_schema"].schema == {}
     assert not backend.requests
     assert existing.data[CONF_TOKEN] == "old-token"

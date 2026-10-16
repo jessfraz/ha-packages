@@ -9,7 +9,7 @@ from uuid import UUID
 import pytest
 from aiohttp import web
 from homeassistant.auth.const import GROUP_ID_USER
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, State
 from homeassistant.loader import async_get_integration
 from pytest_homeassistant_custom_component.common import MockConfigEntry, MockUser
 
@@ -25,6 +25,13 @@ SUMMARY = {
     "sync_errors": 1,
 }
 SHIPMENT_ID = "0193c69f-e5c4-7e93-b6cb-8172dacb617e"
+
+
+def get_state(hass: HomeAssistant, entity_id: str) -> State:
+    """Read a native entity and fail clearly if the integration did not create it."""
+    state = hass.states.get(entity_id)
+    assert state is not None, f"Missing Home Assistant entity: {entity_id}"
+    return state
 
 
 @dataclass(frozen=True)
@@ -269,6 +276,7 @@ def custom_integrations(enable_custom_integrations) -> None:
 async def hass_user(hass: HomeAssistant, local_auth) -> MockUser:
     """An authenticated HA user without administrator privileges."""
     group = await hass.auth.async_get_group(GROUP_ID_USER)
+    assert group is not None
     return MockUser(groups=[group]).add_to_hass(hass)
 
 

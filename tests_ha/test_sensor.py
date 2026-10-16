@@ -8,7 +8,7 @@ from homeassistant.exceptions import ConfigEntryAuthFailed
 
 from custom_components.shipments.const import DOMAIN, SENSOR_KEYS
 
-from .conftest import SUMMARY, Backend
+from .conftest import SUMMARY, Backend, get_state
 
 
 async def test_summary_entities_and_unload(hass: HomeAssistant, entry) -> None:
@@ -45,7 +45,7 @@ async def test_failed_summary_marks_entities_unavailable(
     )
     del backend.responses[("GET", "/v1/summary")]
     await entry.runtime_data.async_refresh()
-    assert hass.states.get("sensor.shipments_active").state == "4"
+    assert get_state(hass, "sensor.shipments_active").state == "4"
 
 
 async def test_direction_counts_keep_existing_sensors_combined(
@@ -123,6 +123,6 @@ async def test_direction_summary_failure_keeps_the_last_complete_snapshot(
     del backend.responses[("GET", path)]
     await entry.runtime_data.async_refresh()
     assert entry.runtime_data.last_update_success
-    assert hass.states.get("sensor.shipments_active").state == "100"
-    assert hass.states.get("sensor.shipments_inbound_active").state == "3"
-    assert hass.states.get("sensor.shipments_outbound_active").state == "1"
+    assert get_state(hass, "sensor.shipments_active").state == "100"
+    assert get_state(hass, "sensor.shipments_inbound_active").state == "3"
+    assert get_state(hass, "sensor.shipments_outbound_active").state == "1"

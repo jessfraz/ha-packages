@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.5.7
+
+- Type-check the Home Assistant integration and its tests with pinned ty in CI,
+  alongside Ruff linting and formatting. Keep the local checks documented and
+  dependencies locked.
+- Use Home Assistant's native entity attributes and cache invalidation for
+  shipment counts, package details, and problem indicators. Check missing test
+  entities explicitly and match native event and service-response types.
+
 ## 0.5.6
 
 - Show a reconnecting screen during Home Assistant startup instead of asking
