@@ -23,7 +23,7 @@ steps, provider configuration, and standalone Docker instructions. The app
 dashboard's **Installation → Run checks** verifies the service, Home Assistant
 connection, app/integration version match, authentication, read-only EasyPost
 access, and backup coverage. Update both the app and HACS integration to
-**0.5.6**, then restart Home Assistant.
+**0.5.7**, then restart Home Assistant.
 
 The supervised integration adds a stable **Shipments** sidebar panel at
 `/shipments`, available to ordinary Home Assistant users. Status corrections,
@@ -439,6 +439,7 @@ cargo test --locked --all-features
 uv sync --frozen
 uv run --frozen ruff check custom_components tests_ha
 uv run --frozen ruff format --check custom_components tests_ha
+uv run --frozen ty check --error-on-warning
 SHIPMENTS_TEST_BINARY="$PWD/target/debug/shipments" uv run --frozen pytest tests_ha
 ```
 

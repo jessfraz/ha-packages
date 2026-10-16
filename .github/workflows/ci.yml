@@ -46,6 +46,7 @@ jobs:
       - run: uv sync --frozen
       - run: uv run --frozen ruff check custom_components tests_ha
       - run: uv run --frozen ruff format --check custom_components tests_ha
+      - run: uv run --frozen ty check --error-on-warning
       - run: uv run --frozen pytest tests_ha
         env:
           SHIPMENTS_TEST_BINARY: ${{ github.workspace }}/target/debug/shipments

@@ -6,7 +6,7 @@ from homeassistant.components.binary_sensor import (
     BinarySensorEntityDescription,
 )
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
@@ -42,7 +42,13 @@ class ShipmentProblem(CoordinatorEntity[ShipmentsCoordinator], BinarySensorEntit
         )
         self._attr_unique_id = f"{entry.entry_id}_{key}_problem"
         self._attr_device_info = shipments_device_info(entry)
+        self._update_attributes()
 
-    @property
-    def is_on(self) -> bool:
-        return self.coordinator.data[self.entity_description.key] > 0
+    @callback
+    def _handle_coordinator_update(self) -> None:
+        """Invalidate HA's cached value when the coordinator publishes data."""
+        self._update_attributes()
+        super()._handle_coordinator_update()
+
+    def _update_attributes(self) -> None:
+        self._attr_is_on = self.coordinator.data[self.entity_description.key] > 0

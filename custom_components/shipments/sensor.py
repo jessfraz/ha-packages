@@ -6,14 +6,14 @@ from homeassistant.components.sensor import (
     SensorStateClass,
 )
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import SENSOR_KEYS
 from .coordinator import ShipmentsCoordinator
 from .entity import shipments_device_info
-from .models import ShipmentItems, ShipmentItemsAttributes
+from .models import ShipmentItems
 
 
 async def async_setup_entry(
@@ -45,6 +45,7 @@ class ShipmentCountSensor(CoordinatorEntity[ShipmentsCoordinator], SensorEntity)
         )
         self._attr_unique_id = f"{entry.entry_id}_{key}"
         self._attr_device_info = shipments_device_info(entry)
+        self._update_attributes()
 
     @property
     def suggested_object_id(self) -> str:
@@ -61,19 +62,23 @@ class ShipmentCountSensor(CoordinatorEntity[ShipmentsCoordinator], SensorEntity)
             and self.entity_description.key in data
         )
 
-    @property
-    def native_value(self) -> int | None:
-        """Return only a count supported by the coordinated backend."""
-        data = self.coordinator.data
-        return data.get(self.entity_description.key) if data is not None else None
+    @callback
+    def _handle_coordinator_update(self) -> None:
+        """Update HA's native attributes before publishing the new snapshot."""
+        self._update_attributes()
+        super()._handle_coordinator_update()
 
-    @property
-    def extra_state_attributes(self) -> ShipmentItemsAttributes | None:
-        """Expose only the two bounded dashboard lists, never stale item data."""
+    def _update_attributes(self) -> None:
+        """Use the entity attributes that invalidate HA's property caches."""
+        data = self.coordinator.data
         key = self.entity_description.key
+        self._attr_native_value = data.get(key) if data is not None else None
         if key not in {"inbound_delivered_today", "inbound_out_for_delivery"}:
-            return None
+            self._attr_extra_state_attributes = {}
+            return
         projection = (
             self.coordinator.shipment_items.get(key) if self.available else None
         )
-        return (projection or ShipmentItems()).attributes()
+        self._attr_extra_state_attributes = dict(
+            (projection or ShipmentItems()).attributes()
+        )

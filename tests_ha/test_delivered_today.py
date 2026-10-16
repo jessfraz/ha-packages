@@ -16,7 +16,7 @@ from custom_components.shipments.const import (
     DOMAIN,
 )
 
-from .conftest import Backend
+from .conftest import Backend, get_state
 
 
 @pytest.mark.parametrize(
@@ -91,12 +91,12 @@ async def test_today_count_rolls_over_at_ha_midnight(
     freezer.move_to(datetime.fromisoformat("2026-10-15T06:59:59+00:00"))
     backend.delivery_summary["delivered"] = 3
     await entry.runtime_data.async_refresh()
-    assert hass.states.get("sensor.shipments_inbound_delivered_today").state == "3"
+    assert get_state(hass, "sensor.shipments_inbound_delivered_today").state == "3"
     freezer.move_to(datetime.fromisoformat("2026-10-15T07:00:00+00:00"))
     backend.delivery_summary["delivered"] = 0
     backend.requests.clear()
     await entry.runtime_data.async_refresh()
-    assert hass.states.get("sensor.shipments_inbound_delivered_today").state == "0"
+    assert get_state(hass, "sensor.shipments_inbound_delivered_today").state == "0"
     today = next(
         request for request in backend.requests if "delivered_after" in request.query
     )
@@ -121,7 +121,7 @@ async def test_failed_today_count_does_not_publish_partial_sensor_snapshot(
     assert not entry.runtime_data.last_update_success
     assert entry.runtime_data.data == previous
     assert (
-        hass.states.get("sensor.shipments_inbound_delivered_today").state
+        get_state(hass, "sensor.shipments_inbound_delivered_today").state
         == "unavailable"
     )
 
@@ -205,12 +205,12 @@ async def test_older_backend_does_not_publish_all_time_deliveries_as_today(
     assert entry.runtime_data.last_update_success
     assert "inbound_delivered_today" not in entry.runtime_data.data
     assert (
-        hass.states.get("sensor.shipments_inbound_delivered_today").state
+        get_state(hass, "sensor.shipments_inbound_delivered_today").state
         == "unavailable"
     )
-    assert hass.states.get("sensor.shipments_active").state == "4"
-    assert hass.states.get("sensor.shipments_inbound_active").state == "3"
-    assert hass.states.get("sensor.shipments_outbound_active").state == "1"
+    assert get_state(hass, "sensor.shipments_active").state == "4"
+    assert get_state(hass, "sensor.shipments_inbound_active").state == "3"
+    assert get_state(hass, "sensor.shipments_outbound_active").state == "1"
     assert not any("delivered_after" in request.query for request in backend.requests)
     issue = ir.async_get(hass).async_get_issue(DOMAIN, "version_mismatch")
     assert issue is not None
@@ -230,7 +230,7 @@ async def test_older_backend_does_not_publish_all_time_deliveries_as_today(
     backend.requests.clear()
     await entry.runtime_data.async_refresh()
     assert entry.runtime_data.last_update_success
-    assert hass.states.get("sensor.shipments_inbound_delivered_today").state == "2"
+    assert get_state(hass, "sensor.shipments_inbound_delivered_today").state == "2"
     assert not ir.async_get(hass).async_get_issue(DOMAIN, "version_mismatch")
     assert any("delivered_after" in request.query for request in backend.requests)
     presence = [

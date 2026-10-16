@@ -16,7 +16,7 @@ from homeassistant.exceptions import ConfigEntryAuthFailed
 from homeassistant.helpers.recorder import async_initialize_recorder
 from homeassistant.setup import async_setup_component
 
-from .conftest import SHIPMENT_ID, Backend, FixtureShipment, ReceivedRequest
+from .conftest import SHIPMENT_ID, Backend, FixtureShipment, ReceivedRequest, get_state
 
 TODAY_ENTITY = "sensor.shipments_inbound_delivered_today"
 ARRIVING_ENTITY = "sensor.shipments_inbound_out_for_delivery"
@@ -85,7 +85,7 @@ async def test_empty_item_lists_are_present_and_use_two_bounded_requests(
     backend.requests.clear()
     await refresh_day(hass, entry, freezer, backend)
     for entity_id in (TODAY_ENTITY, ARRIVING_ENTITY):
-        state = hass.states.get(entity_id)
+        state = get_state(hass, entity_id)
         assert state.state == "0"
         assert state.attributes.get("items") == [], "Count sensor lacks package items"
         assert state.attributes["items_truncated"] is False
@@ -140,7 +140,7 @@ async def test_one_item_preserves_title_and_exposes_only_safe_deep_link_fields(
     backend.shipment_rows = [delivered, arriving]
     await refresh_day(hass, entry, freezer, backend)
     for entity_id, row in ((TODAY_ENTITY, delivered), (ARRIVING_ENTITY, arriving)):
-        state = hass.states.get(entity_id)
+        state = get_state(hass, entity_id)
         assert state.state == "1"
         assert state.attributes["items_truncated"] is False
         items = state.attributes["items"]
@@ -166,7 +166,7 @@ async def test_one_item_preserves_title_and_exposes_only_safe_deep_link_fields(
             "Private recipient",
         ):
             assert private not in attributes
-    assert "items" not in hass.states.get("sensor.shipments_active").attributes
+    assert "items" not in get_state(hass, "sensor.shipments_active").attributes
 
 
 async def test_items_exclude_outbound_archived_and_other_days_and_keep_sort_order(
@@ -211,13 +211,13 @@ async def test_items_exclude_outbound_archived_and_other_days_and_keep_sort_orde
         shipment(11, archived=True),
     ]
     await refresh_day(hass, entry, freezer, backend)
-    today = hass.states.get(TODAY_ENTITY)
+    today = get_state(hass, TODAY_ENTITY)
     assert today.state == "2"
     assert [item["id"] for item in today.attributes["items"]] == [
         latest.id,
         at_start.id,
     ]
-    arriving = hass.states.get(ARRIVING_ENTITY)
+    arriving = get_state(hass, ARRIVING_ENTITY)
     assert arriving.state == "3"
     assert [item["id"] for item in arriving.attributes["items"]] == [
         first_arrival.id,
@@ -246,7 +246,7 @@ async def test_sensor_details_are_capped_without_losing_the_authoritative_count(
     ]
     backend.requests.clear()
     await refresh_day(hass, entry, freezer, backend)
-    state = hass.states.get(TODAY_ENTITY if delivered else ARRIVING_ENTITY)
+    state = get_state(hass, TODAY_ENTITY if delivered else ARRIVING_ENTITY)
     assert state.state == str(count)
     items = state.attributes["items"]
     assert len(items) == min(count, 20)
@@ -320,16 +320,16 @@ async def test_bad_arriving_page_never_publishes_a_partial_snapshot(
     await entry.runtime_data.async_refresh()
     assert not entry.runtime_data.last_update_success
     assert entry.runtime_data.data == previous
-    assert hass.states.get(ARRIVING_ENTITY).state == "unavailable"
+    assert get_state(hass, ARRIVING_ENTITY).state == "unavailable"
     assert entry.runtime_data.shipment_items == previous_items
-    assert not hass.states.get(ARRIVING_ENTITY).attributes.get("items")
-    assert hass.states.get("sensor.shipments_active").state == "unavailable"
+    assert not get_state(hass, ARRIVING_ENTITY).attributes.get("items")
+    assert get_state(hass, "sensor.shipments_active").state == "unavailable"
     if failure == "auth":
         assert isinstance(entry.runtime_data.last_exception, ConfigEntryAuthFailed)
     del backend.responses[("GET", path)]
     await entry.runtime_data.async_refresh()
     assert entry.runtime_data.last_update_success
-    assert hass.states.get("sensor.shipments_active").state == "100"
+    assert get_state(hass, "sensor.shipments_active").state == "100"
 
 
 @pytest.mark.parametrize(
@@ -360,7 +360,7 @@ async def test_delivered_page_rejects_rows_outside_the_same_local_day(
     await entry.runtime_data.async_refresh()
     assert not entry.runtime_data.last_update_success
     assert entry.runtime_data.data == previous
-    assert hass.states.get(TODAY_ENTITY).state == "unavailable"
+    assert get_state(hass, TODAY_ENTITY).state == "unavailable"
 
 
 async def test_missing_cursor_does_not_claim_the_truncated_snapshot_is_complete(
@@ -386,7 +386,7 @@ async def test_missing_cursor_does_not_claim_the_truncated_snapshot_is_complete(
     await entry.runtime_data.async_refresh()
     assert not entry.runtime_data.last_update_success
     assert entry.runtime_data.data == previous
-    assert hass.states.get(ARRIVING_ENTITY).state == "unavailable"
+    assert get_state(hass, ARRIVING_ENTITY).state == "unavailable"
 
 
 async def test_mixed_version_keeps_arriving_details_but_does_not_request_today_items(
@@ -396,8 +396,8 @@ async def test_mixed_version_keeps_arriving_details_but_does_not_request_today_i
     backend.requests.clear()
     await entry.runtime_data.async_refresh()
     assert entry.runtime_data.last_update_success
-    assert hass.states.get(TODAY_ENTITY).state == "unavailable"
-    arriving = hass.states.get(ARRIVING_ENTITY)
+    assert get_state(hass, TODAY_ENTITY).state == "unavailable"
+    arriving = get_state(hass, ARRIVING_ENTITY)
     assert arriving.state == "1"
     assert len(arriving.attributes["items"]) == 1
     assert len(shipment_requests(backend)) == 1
@@ -413,7 +413,7 @@ async def test_package_details_stay_available_live_but_are_excluded_from_recorde
     await hass.async_block_till_done()
     await recording.async_block_till_done()
     for entity_id in (TODAY_ENTITY, ARRIVING_ENTITY):
-        live = hass.states.get(entity_id)
+        live = get_state(hass, entity_id)
         assert live.state == "2"
         assert len(live.attributes["items"]) == 2
         history = await recording.async_add_executor_job(

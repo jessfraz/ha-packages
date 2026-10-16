@@ -14,6 +14,7 @@ cargo deny check advisories licenses sources
 uv sync --frozen
 uv run --frozen ruff check custom_components tests_ha
 uv run --frozen ruff format --check custom_components tests_ha
+uv run --frozen ty check --error-on-warning
 cargo build --locked --bin shipments
 SHIPMENTS_TEST_BINARY="$PWD/target/debug/shipments" uv run --frozen pytest tests_ha
 actionlint

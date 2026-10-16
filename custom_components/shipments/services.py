@@ -6,7 +6,12 @@ from uuid import UUID, uuid4
 
 import probatio as vol
 from aiohttp import ClientError
-from homeassistant.core import HomeAssistant, ServiceCall, SupportsResponse
+from homeassistant.core import (
+    HomeAssistant,
+    ServiceCall,
+    ServiceResponse,
+    SupportsResponse,
+)
 from homeassistant.exceptions import (
     HomeAssistantError,
     ServiceValidationError,
@@ -90,7 +95,7 @@ def _response_data(response: BackendResponse) -> ShipmentActionResponse:
 def async_register_services(hass: HomeAssistant) -> None:
     """Keep actions available for editing even when the backend is unloaded."""
 
-    async def handle(call: ServiceCall) -> ShipmentActionResponse | None:
+    async def handle(call: ServiceCall) -> ServiceResponse:
         method, path, admin_only = SERVICE_ACTIONS[call.service]
         user_id = call.context.user_id
         user = await hass.auth.async_get_user(user_id) if user_id else None
@@ -169,7 +174,14 @@ def async_register_services(hass: HomeAssistant) -> None:
             raise HomeAssistantError("Cannot contact the Shipments backend") from None
         _check_response(response, credential=credential)
         await coordinator.async_request_refresh()
-        return _response_data(response) if call.return_response else None
+        if not call.return_response:
+            return None
+        result = _response_data(response)
+        return {
+            "id": result["id"],
+            "revision": result["revision"],
+            "status": result["status"],
+        }
 
     for name in SERVICE_ACTIONS:
         if name == "add":
