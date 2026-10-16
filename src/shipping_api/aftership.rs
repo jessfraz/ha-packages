@@ -39,6 +39,8 @@ enum Courier {
     SpeedX,
     #[serde(rename = "sway-webhook")]
     Sway,
+    #[serde(rename = "veho")]
+    Veho,
 }
 
 impl Courier {
@@ -46,6 +48,7 @@ impl Courier {
         match carrier {
             Some(Carrier::SpeedX) => Ok(Self::SpeedX),
             Some(Carrier::Sway) => Ok(Self::Sway),
+            Some(Carrier::Veho) => Ok(Self::Veho),
             _ => Err(provider_error(ErrorKind::Rejected(
                 Rejection::NoCarrierForCode,
             ))),
@@ -56,6 +59,7 @@ impl Courier {
         match self {
             Self::SpeedX => "speedx",
             Self::Sway => "sway-webhook",
+            Self::Veho => "veho",
         }
     }
 
@@ -63,6 +67,7 @@ impl Courier {
         match self {
             Self::SpeedX => Carrier::SpeedX,
             Self::Sway => Carrier::Sway,
+            Self::Veho => Carrier::Veho,
         }
     }
 }
@@ -1261,6 +1266,75 @@ mod tests {
         assert_eq!(tracker.status, Status::Unknown);
         assert!(tracker.carrier_tracking.events.is_empty());
         assert_eq!(tracker.carrier_tracking.delivered_at, None);
+        server.no_request();
+    }
+
+    #[tokio::test]
+    async fn veho_registration_adopts_existing_history_without_a_tracking_import() {
+        let mut server = Server::new();
+        let client = server.client();
+        let task = tokio::spawn(async move {
+            client
+                .prepare_registration(registration(Carrier::Veho))
+                .await
+        });
+        let mut existing = pending();
+        existing.slug = "veho";
+        existing.tag = "Delivered";
+        existing.subtag = "Delivered_001";
+        existing.shipment_delivery_date = Some("2026-01-02T13:00:00-05:00");
+        existing.checkpoints = vec![FixtureCheckpoint {
+            tag: "Delivered",
+            subtag: "Delivered_001",
+            checkpoint_time: "2026-01-02T13:00:00-05:00",
+            created_at: "2026-01-02T18:01:00Z",
+            message: "Package delivered",
+            source: "carrier",
+        }];
+        let lookup = server.request("GET", "trackings").await;
+        let url = Url::parse(&format!("http://localhost{}", lookup.target)).unwrap();
+        assert!(
+            url.query_pairs()
+                .any(|(key, value)| key == "slug" && value == "veho")
+        );
+        lookup.json(200, page(vec![existing]));
+        let tracker = task.await.unwrap().unwrap().register().await.unwrap();
+        assert_eq!(tracker.provider, ProviderId::AfterShip);
+        assert_eq!(tracker.id, ID);
+        assert_eq!(tracker.carrier, Carrier::Veho);
+        assert_eq!(tracker.status, Status::Delivered);
+        assert_eq!(tracker.carrier_tracking.events.len(), 1);
+        assert_eq!(
+            tracker.carrier_tracking.delivered_at.as_deref(),
+            Some("2026-01-02T18:00:00Z")
+        );
+        server.no_request();
+    }
+
+    #[tokio::test]
+    async fn new_veho_registration_uses_its_canonical_slug_without_shipper_credentials() {
+        let mut server = Server::new();
+        let client = server.client();
+        let task = tokio::spawn(async move {
+            client
+                .prepare_registration(registration(Carrier::Veho))
+                .await
+        });
+        server.empty_lookup().await;
+        server.detect("veho").await;
+        let task = tokio::spawn(task.await.unwrap().unwrap().register());
+        let request = server.request("POST", "trackings").await;
+        let body: RequestedTracking = serde_json::from_slice(&request.body).unwrap();
+        assert_eq!(body.tracking_number, NUMBER);
+        assert_eq!(body.slug, "veho");
+        assert_eq!(body.courier_connection_id, None);
+        let mut tracker = pending();
+        tracker.slug = "veho";
+        request.json(201, tracker);
+        let tracker = task.await.unwrap().unwrap();
+        assert_eq!(tracker.provider, ProviderId::AfterShip);
+        assert_eq!(tracker.carrier, Carrier::Veho);
+        assert!(tracker.carrier_tracking.events.is_empty());
         server.no_request();
     }
 

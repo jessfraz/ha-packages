@@ -9,6 +9,7 @@ Run the checks before opening a pull request:
 cargo fmt --check
 cargo clippy --locked --all --benches --tests --examples --all-features -- -D warnings
 cargo test --locked --all-features
+node --test tests_web/*.mjs
 cargo deny check advisories licenses sources
 uv sync --frozen
 uv run --frozen ruff check custom_components tests_ha

@@ -817,6 +817,59 @@ fn generated_openapi_matches_the_committed_contract() {
 }
 
 #[tokio::test]
+async fn browser_authentication_mode_comes_only_from_the_listener() {
+    let standalone = App::new(None).await;
+    let html = standalone
+        .request(Method::GET, "/?home_assistant=true")
+        .header("X-Remote-User-Id", "human")
+        .header("X-Forwarded-For", "172.30.32.2")
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert!(html.contains("data-home-assistant=\"false\""));
+    let module = standalone
+        .request(Method::GET, "/connection.js")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(module.status(), StatusCode::OK);
+    assert_eq!(
+        module.headers()["content-type"],
+        "text/javascript; charset=utf-8"
+    );
+    assert_eq!(module.headers()["cache-control"], "no-store");
+    standalone.close().await;
+
+    let ingress = App::new(Some("127.0.0.1".parse().unwrap())).await;
+    let html = ingress
+        .request(Method::GET, "/")
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert!(html.contains("data-home-assistant=\"true\""));
+    ingress.close().await;
+
+    let forbidden = App::new(Some("172.30.32.2".parse().unwrap())).await;
+    assert_eq!(
+        forbidden
+            .request(Method::GET, "/connection.js")
+            .header("X-Forwarded-For", "172.30.32.2")
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::FORBIDDEN
+    );
+    forbidden.close().await;
+}
+
+#[tokio::test]
 async fn integration_credential_is_scoped_and_installation_requires_a_real_check_in() {
     use shipments::installation::{
         BackupReport, BackupStatus, CheckStatus, InstallationReport, IntegrationPresence,

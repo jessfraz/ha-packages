@@ -55,6 +55,12 @@ in its documentation.
 
 ## Check the installation
 
+After a restart, the Home Assistant dashboard waits for its authenticated
+connection and retries automatically. Leave it open; no API token is needed.
+If it stays on the connecting screen, check the Shipments integration in
+**Settings → Devices & services**. The standalone dashboard still requires
+its API token.
+
 Open the app dashboard, expand **Installation**, and select **Run checks**.
 
 | Check | What it verifies |
@@ -73,7 +79,7 @@ paired, check the integration for a connection or authentication error.
 
 Version mismatch is a separate warning: connectivity and authentication can
 pass while the two installed versions differ. Update both the app through the
-App Store and the integration through HACS to **0.5.5**, then restart Home
+App Store and the integration through HACS to **0.5.6**, then restart Home
 Assistant. Without a recent integration check-in, the version match is
 unverified.
 
@@ -201,7 +207,7 @@ rename an entity in Home Assistant.
 | Option | Purpose |
 | --- | --- |
 | `easypost_api_key` | Enables tracking verification before saving and background tracking updates. |
-| `aftership_api_key` | Enables SpeedX and Sway / Returnmates tracking through AfterShip. |
+| `aftership_api_key` | Enables SpeedX, Sway / Returnmates, and Veho tracking through AfterShip. |
 
 DoorDash requires its original recipient tracking link rather than an API key.
 Other carriers and automatic carrier detection use EasyPost. Provider keys
@@ -215,9 +221,12 @@ Existing records migrate to inbound. The default list shows both directions
 together; use the optional direction filters to narrow it.
 Leave **Carrier** on **Auto-detect**, or
 choose its canonical EasyPost carrier when detection is ambiguous.
-Select **SpeedX** or **Sway / Returnmates** explicitly to use AfterShip.
+Select **SpeedX**, **Sway / Returnmates**, or **Veho** explicitly to use
+AfterShip.
 Configure the AfterShip key in the app; these carriers do not fall back to
-EasyPost if verification fails.
+EasyPost if verification fails. Existing Veho shipments migrate automatically:
+the next update reconciles AfterShip imports before registering a tracker.
+History is retained; shipments do not need to be recreated.
 For FedEx, the **FedEx Default (EasyPost account)** choice uses EasyPost's
 Wallet route. **FedEx (your carrier account)** requires separately configured
 FedEx credentials. If the provider reports `CREDENTIALS_NOT_FOUND`, correct

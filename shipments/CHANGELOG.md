@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.5.6
+
+- Show a reconnecting screen during Home Assistant startup instead of asking
+  for an API token. Retry automatically with bounded requests and backoff,
+  preserve deep links, and pause while the page is hidden.
+- Route Veho through AfterShip. Migrate existing records automatically while
+  preserving history and reconciling existing imports before registration.
+
 ## 0.5.5
 
 - Track DoorDash directly from its original recipient link. Require and verify

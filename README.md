@@ -23,7 +23,7 @@ steps, provider configuration, and standalone Docker instructions. The app
 dashboard's **Installation → Run checks** verifies the service, Home Assistant
 connection, app/integration version match, authentication, read-only EasyPost
 access, and backup coverage. Update both the app and HACS integration to
-**0.5.5**, then restart Home Assistant.
+**0.5.6**, then restart Home Assistant.
 
 The supervised integration adds a stable **Shipments** sidebar panel at
 `/shipments`, available to ordinary Home Assistant users. Status corrections,
@@ -94,7 +94,7 @@ without whitespace. The integration token is optional when running without
 Home Assistant.
 
 `EASYPOST_API_KEY` enables EasyPost verification and background updates.
-`AFTERSHIP_API_KEY` enables tracking for **SpeedX** and **Sway / Returnmates**
+`AFTERSHIP_API_KEY` enables tracking for **SpeedX**, **Sway / Returnmates**, and **Veho**
 through AfterShip. Select those carriers explicitly; they do not fall back to
 EasyPost. **DoorDash** uses its original recipient tracking link and requires
 no API key. Other carriers use EasyPost, including automatic carrier detection.
@@ -423,7 +423,7 @@ clients. Never try a different provider automatically after an uncertain
 registration outcome.
 
 `aftership.rs` owns AfterShip authentication, carrier slugs and tracker
-reconciliation for SpeedX and Sway. `doordash.rs` implements read-only
+reconciliation for SpeedX, Sway, and Veho. `doordash.rs` implements read-only
 recipient tracking, with a fixed URL allowlist, response and transport bounds,
 typed observations and no JavaScript execution. Its HTML hydration parser is
 a website adapter, not a stable public API contract; changed or ambiguous data

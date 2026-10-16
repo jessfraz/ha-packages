@@ -1,4 +1,4 @@
-"use strict";
+import { waitForConnection } from "./connection.js";
 
 const byId = (id) => document.getElementById(id);
 const labels = {
@@ -35,6 +35,9 @@ let activeDirection = "all";
 let routeGeneration = 0;
 let applyingRoute = false;
 let connected = false;
+let initialRoutePending = true;
+const homeAssistant = document.body.dataset.homeAssistant === "true";
+let connectionController = null;
 let homeAssistantPrefix = null;
 let homeAssistantPath = null;
 let listController = null;
@@ -223,6 +226,9 @@ async function api(path, options = {}) {
   const response = await fetch(new URL(path, document.baseURI), {
     ...options,
     headers,
+    signal: options.method && options.method !== "GET" ? options.signal
+      : options.signal ? AbortSignal.any([options.signal, AbortSignal.timeout(15_000)])
+        : AbortSignal.timeout(15_000),
   });
   if (response.status === 204) return null;
   const body = await response.json();
@@ -263,8 +269,9 @@ function renderServiceStatus(system, checked) {
   byId("app-footer").hidden = false;
 }
 
-async function connect() {
-  const [system, carriers] = await Promise.all([api("v1/system"), api("v1/carriers")]);
+async function connect(signal) {
+  const [system, carriers] = await Promise.all([api("v1/system", { signal }), api("v1/carriers", { signal })]);
+  signal?.throwIfAborted();
   const carrierField = byId("edit-form").elements.namedItem("carrier");
   carrierField.replaceChildren(element("option", "Auto-detect"));
   carrierField.firstElementChild.value = "";
@@ -275,6 +282,7 @@ async function connect() {
     DHLExpressDefault: "DHL Express Default (EasyPost account)",
     SpeedX: "SpeedX (AfterShip)",
     Sway: "Sway / Returnmates (AfterShip)",
+    Veho: "Veho (AfterShip)",
     DoorDash: "DoorDash (original tracking link)",
   };
   for (const carrier of carriers) {
@@ -284,15 +292,52 @@ async function connect() {
   }
   enabledProviders = new Set(system.enabled_providers);
   byId("login").hidden = true;
+  byId("startup-connection").hidden = true;
   byId("dashboard").hidden = false;
   byId("add").hidden = false;
   setOwnerAccess(system.credential_role === "owner", true);
   renderServiceStatus(system, false);
   connected = true;
+}
+
+async function openDashboard() {
   try {
     await applyRoute(true);
+    initialRoutePending = false;
+  } catch (error) {
+    notice(`Could not load shipments. ${error.message} The list will retry automatically.`, true);
   } finally {
     scheduleRefresh();
+  }
+}
+
+async function startConnection() {
+  connectionController?.abort();
+  if (document.hidden) return;
+  const controller = new AbortController();
+  connectionController = controller;
+  if (homeAssistant) {
+    byId("login").hidden = true;
+    byId("startup-connection").hidden = false;
+    byId("connection-status").textContent = "Waiting for Home Assistant to connect. Your shipments will open automatically.";
+  }
+  try {
+    await waitForConnection(connect, {
+      homeAssistant,
+      signal: controller.signal,
+      onWaiting(error) {
+        byId("connection-status").textContent = error.status === 401
+          ? "Waiting for Home Assistant to authenticate this view. Retrying automatically…"
+          : error.status === 403
+            ? "Home Assistant has not granted access to this view. Check your access to Shipments; we’ll keep retrying."
+            : "Shipments is reconnecting after startup. Retrying automatically…";
+      },
+    });
+    if (!controller.signal.aborted) await openDashboard();
+  } catch (error) {
+    if (controller.signal.aborted) return;
+    byId("login").hidden = false;
+    if (![401, 403].includes(error.status)) notice(error.message, true);
   }
 }
 
@@ -829,6 +874,12 @@ window.addEventListener("pagehide", clearAgentToken);
 
 async function refreshDashboard() {
   if (listController || document.hidden || byId("dashboard").hidden) return;
+  if (initialRoutePending) {
+    await applyRoute(true);
+    initialRoutePending = false;
+    notice("");
+    return;
+  }
   await load();
   if (selected && byId("detail").open && !byId("editor").open &&
       !byId("override-form").elements.namedItem("reason").value.trim())
@@ -1309,6 +1360,11 @@ byId("view").addEventListener(
 byId("refresh").addEventListener("click", guarded(refreshDashboard));
 document.addEventListener("visibilitychange", () => {
   clearTimeout(refreshTimer);
+  if (!connected) {
+    if (document.hidden) connectionController?.abort();
+    else startConnection();
+    return;
+  }
   if (!document.hidden) {
     guarded(async () => {
       try {
@@ -1332,6 +1388,7 @@ byId("login").addEventListener(
     await connect();
     byId("login").reset();
     notice("");
+    await openDashboard();
   }),
 );
 
@@ -1472,16 +1529,17 @@ window.addEventListener("message", guarded(async event => {
 if (window.parent !== window)
   window.parent.postMessage({ type: "home-assistant/subscribe-properties" }, location.origin);
 window.addEventListener("pagehide", () => {
+  connectionController?.abort();
+  clearTimeout(refreshTimer);
   if (window.parent !== window)
     window.parent.postMessage({ type: "home-assistant/unsubscribe-properties" }, location.origin);
 });
+window.addEventListener("pageshow", event => {
+  if (!event.persisted) return;
+  if (!connected) startConnection();
+  else scheduleRefresh();
+});
+byId("retry-connection").addEventListener("click", startConnection);
 
 byId("add").hidden = true;
-connect().catch((error) => {
-  byId("login").hidden = false;
-  if (
-    !error.message.includes("authentication") &&
-    !error.message.includes("credential")
-  )
-    notice(error.message, true);
-});
+startConnection();
