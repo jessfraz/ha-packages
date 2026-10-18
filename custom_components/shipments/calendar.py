@@ -9,6 +9,8 @@ from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from homeassistant.util import dt as dt_util
 
+from .client import normalize_backend_url
+from .const import CONF_ADDON_SLUG, CONF_BACKEND_URL
 from .coordinator import ShipmentsCoordinator
 from .entity import shipments_device_info
 
@@ -36,6 +38,14 @@ class InboundDeliveryCalendar(CoordinatorEntity[ShipmentsCoordinator], CalendarE
         super().__init__(coordinator)
         self._attr_unique_id = f"{entry.entry_id}_inbound_deliveries"
         self._attr_device_info = shipments_device_info(entry)
+        self._attr_extra_state_attributes = {
+            "shipments_calendar": True,
+            "shipments_app_url": (
+                "/shipments/shipments/"
+                if entry.data.get(CONF_ADDON_SLUG)
+                else f"{normalize_backend_url(entry.data[CONF_BACKEND_URL])}/"
+            ),
+        }
 
     @property
     def event(self) -> CalendarEvent | None:

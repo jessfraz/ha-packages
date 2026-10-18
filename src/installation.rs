@@ -1,7 +1,7 @@
 //! Live install checks. A recent authenticated adapter heartbeat establishes
 //! that Home Assistant actually loaded the integration and reached this app.
 
-use crate::{delivery::DeliveryDay, shipping_api::ShippingApi};
+use crate::{delivery::DeliveryDay, error::Error, shipping_api::ShippingApi, store::Store};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -39,8 +39,9 @@ pub struct IntegrationPresence {
     pub delivery_day: Option<DeliveryDay>,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq, sqlx::Type)]
 #[serde(rename_all = "snake_case")]
+#[sqlx(rename_all = "snake_case")]
 pub enum CheckStatus {
     Pass,
     Attention,
@@ -70,8 +71,14 @@ pub struct InstallationReport {
 pub struct Installation {
     supervised: bool,
     presence: Mutex<Option<(Instant, IntegrationPresence)>>,
-    provider: Mutex<Option<(Instant, Check)>>,
+    provider: Mutex<Option<ProviderCheck>>,
     probe: Mutex<()>,
+}
+
+struct ProviderCheck {
+    fingerprint: Option<[u8; 32]>,
+    last_probe_at: Option<Instant>,
+    result: Check,
 }
 
 impl Installation {
@@ -101,21 +108,54 @@ impl Installation {
             })
     }
 
-    pub async fn check_provider(&self, provider: Option<&dyn ShippingApi>) {
+    pub async fn restore_provider_check(
+        &self,
+        provider: Option<&dyn ShippingApi>,
+        store: &Store,
+    ) -> Result<(), Error> {
+        let fingerprint = provider.and_then(ShippingApi::connection_fingerprint);
+        // Serialize only local cache restoration with completed-result updates.
+        // A slow reader must not overwrite a newly completed provider probe.
+        let mut cached = self.provider.lock().await;
+        if cached
+            .as_ref()
+            .is_some_and(|cached| cached.fingerprint == fingerprint)
+        {
+            return Ok(());
+        }
+        *cached = None;
+        if let (Some(provider), Some(fingerprint)) = (provider, fingerprint)
+            && let Some(result) = store.provider_check(provider.id(), &fingerprint).await?
+        {
+            *cached = Some(ProviderCheck {
+                fingerprint: Some(fingerprint),
+                // Wall-clock diagnostic age is not a monotonic probe deadline.
+                last_probe_at: None,
+                result,
+            });
+        }
+        Ok(())
+    }
+
+    pub async fn check_provider(
+        &self,
+        provider: Option<&dyn ShippingApi>,
+        store: &Store,
+    ) -> Result<(), Error> {
         let Some(provider) = provider else {
-            return;
+            return Ok(());
         };
+        let fingerprint = provider.connection_fingerprint();
         // Serialize outbound probes separately from their completed result.
         // Readers never wait for a provider network request.
         let _probe = self.probe.lock().await;
-        if self
-            .provider
-            .lock()
-            .await
-            .as_ref()
-            .is_some_and(|(at, _)| at.elapsed() < Duration::from_secs(60))
-        {
-            return;
+        if self.provider.lock().await.as_ref().is_some_and(|cached| {
+            cached.fingerprint == fingerprint
+                && cached
+                    .last_probe_at
+                    .is_some_and(|at| at.elapsed() < Duration::from_secs(60))
+        }) {
+            return Ok(());
         }
         let mut result = match provider.check_connection().await {
             Ok(()) => Check::pass(&format!(
@@ -128,11 +168,22 @@ impl Installation {
                 checked_at: None,
             },
         };
-        result.checked_at = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .ok()
-            .map(|elapsed| elapsed.as_secs());
-        *self.provider.lock().await = Some((Instant::now(), result));
+        if let Some(fingerprint) = fingerprint {
+            result = store
+                .save_provider_check(provider.id(), &fingerprint, &result)
+                .await?;
+        } else {
+            result.checked_at = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .ok()
+                .map(|elapsed| elapsed.as_secs());
+        }
+        *self.provider.lock().await = Some(ProviderCheck {
+            fingerprint,
+            last_probe_at: Some(Instant::now()),
+            result,
+        });
+        Ok(())
     }
 
     pub async fn delivery_day(&self) -> Option<DeliveryDay> {
@@ -206,8 +257,8 @@ impl Installation {
             }
         } else {
             let provider = self.provider.lock().await;
-            if let Some((_, result)) = provider.as_ref() {
-                result.clone()
+            if let Some(cached) = provider.as_ref() {
+                cached.result.clone()
             } else {
                 Check::attention(
                     "EasyPost is configured. Run checks to verify the key and connectivity.",
@@ -292,16 +343,28 @@ mod tests {
 
     #[tokio::test]
     async fn completed_probe_remains_visible_to_a_report_while_a_cached_check_is_queued() {
-        use crate::{installation::Check, shipping_api::easypost::EasyPostClient};
+        use crate::{
+            installation::{Check, ProviderCheck},
+            shipping_api::{ShippingApi, easypost::EasyPostClient},
+            store::Store,
+        };
         use std::future::Future;
         use std::task::{Context, Waker};
 
         let installation = Installation::new(true);
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("checks.sqlite3"))
+            .await
+            .unwrap();
         let provider =
             EasyPostClient::for_loopback("unused-cached-check-key", "http://127.0.0.1:9/").unwrap();
         let mut cache = installation.provider.lock().await;
-        *cache = Some((Instant::now(), Check::pass("Completed provider check")));
-        let mut queued_check = Box::pin(installation.check_provider(Some(&provider)));
+        *cache = Some(ProviderCheck {
+            fingerprint: provider.connection_fingerprint(),
+            last_probe_at: Some(Instant::now()),
+            result: Check::pass("Completed provider check"),
+        });
+        let mut queued_check = Box::pin(installation.check_provider(Some(&provider), &store));
         // Reserve the FIFO mutex permit for another cached check. The report
         // must still return the completed result after that reader resumes.
         assert!(
@@ -311,7 +374,8 @@ mod tests {
                 .is_pending()
         );
         drop(cache);
-        let (report, ()) = tokio::join!(biased; installation.report(true), queued_check);
+        let (report, checked) = tokio::join!(biased; installation.report(true), queued_check);
+        checked.unwrap();
         assert_eq!(
             report.easypost.status,
             CheckStatus::Pass,
@@ -322,7 +386,7 @@ mod tests {
 
     #[tokio::test]
     async fn old_successful_provider_diagnostic_keeps_its_result_and_timestamp() {
-        use crate::installation::Check;
+        use crate::installation::{Check, ProviderCheck};
 
         #[derive(serde::Deserialize)]
         struct DiagnosticTime {
@@ -334,8 +398,11 @@ mod tests {
             r#"{"status":"pass","message":"Last EasyPost check succeeded.","checked_at":1700000000}"#,
         )
         .unwrap();
-        *installation.provider.lock().await =
-            Some((Instant::now() - Duration::from_secs(86_400), result));
+        *installation.provider.lock().await = Some(ProviderCheck {
+            fingerprint: None,
+            last_probe_at: Some(Instant::now() - Duration::from_secs(86_400)),
+            result,
+        });
 
         let report = installation.report(true).await;
         assert_eq!(
@@ -362,10 +429,14 @@ mod tests {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
         let installation = Installation::new(false);
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::store::Store::open(&dir.path().join("checks.sqlite3"))
+            .await
+            .unwrap();
         for (status, expected) in [(200, CheckStatus::Pass), (401, CheckStatus::Attention)] {
-            if let Some((at, result)) = installation.provider.lock().await.as_mut() {
-                *at = Instant::now() - Duration::from_secs(61);
-                result.checked_at = Some(1);
+            if let Some(cached) = installation.provider.lock().await.as_mut() {
+                cached.last_probe_at = Some(Instant::now() - Duration::from_secs(61));
+                cached.result.checked_at = Some(1);
             }
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let origin = format!("http://{}/", listener.local_addr().unwrap());
@@ -397,7 +468,10 @@ mod tests {
                 .unwrap()
                 .as_secs();
             tokio::time::timeout(Duration::from_secs(3), async {
-                installation.check_provider(Some(&provider)).await;
+                installation
+                    .check_provider(Some(&provider), &store)
+                    .await
+                    .unwrap();
                 server.await.unwrap();
             })
             .await
@@ -417,7 +491,10 @@ mod tests {
             }
             // The HTTP fixture has closed. Rechecks within a minute retain the
             // completed result instead of attempting another connection.
-            installation.check_provider(Some(&provider)).await;
+            installation
+                .check_provider(Some(&provider), &store)
+                .await
+                .unwrap();
             let cached = installation.report(true).await.easypost;
             assert_eq!(cached.status, checked.status);
             assert_eq!(cached.message, checked.message);

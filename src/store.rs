@@ -1,6 +1,7 @@
 use crate::{
     carrier::Carrier,
     error::Error,
+    installation::{Check, CheckStatus},
     models::*,
     shipping_api::types::{ProviderId, Tracker},
 };
@@ -15,6 +16,25 @@ use uuid::Uuid;
 #[derive(Clone)]
 pub struct Store {
     pool: SqlitePool,
+}
+
+#[derive(FromRow)]
+struct ProviderCheckRecord {
+    status: CheckStatus,
+    message: String,
+    checked_at: i64,
+}
+
+impl ProviderCheckRecord {
+    fn into_check(self) -> Result<Check, Error> {
+        Ok(Check {
+            status: self.status,
+            message: self.message,
+            checked_at: Some(u64::try_from(self.checked_at).map_err(|_| {
+                Error::Invalid("stored provider check timestamp is invalid".into())
+            })?),
+        })
+    }
 }
 
 #[derive(FromRow)]
@@ -311,6 +331,50 @@ impl Store {
 
     pub fn pool(&self) -> &SqlitePool {
         &self.pool
+    }
+
+    pub async fn provider_check(
+        &self,
+        provider: ProviderId,
+        fingerprint: &[u8; 32],
+    ) -> Result<Option<Check>, Error> {
+        sqlx::query_as::<_, ProviderCheckRecord>(
+            r#"SELECT status, message, checked_at
+               FROM provider_connection_checks
+               WHERE provider = ? AND fingerprint = ?"#,
+        )
+        .bind(provider)
+        .bind(fingerprint.as_slice())
+        .fetch_optional(&self.pool)
+        .await?
+        .map(ProviderCheckRecord::into_check)
+        .transpose()
+    }
+
+    pub async fn save_provider_check(
+        &self,
+        provider: ProviderId,
+        fingerprint: &[u8; 32],
+        check: &Check,
+    ) -> Result<Check, Error> {
+        sqlx::query_as::<_, ProviderCheckRecord>(
+            r#"INSERT INTO provider_connection_checks
+                   (provider, fingerprint, status, message, checked_at)
+               VALUES (?, ?, ?, ?, unixepoch())
+               ON CONFLICT(provider) DO UPDATE SET
+                   fingerprint = excluded.fingerprint,
+                   status = excluded.status,
+                   message = excluded.message,
+                   checked_at = excluded.checked_at
+               RETURNING status, message, checked_at"#,
+        )
+        .bind(provider)
+        .bind(fingerprint.as_slice())
+        .bind(&check.status)
+        .bind(&check.message)
+        .fetch_one(&self.pool)
+        .await?
+        .into_check()
     }
 
     pub async fn create_agent(

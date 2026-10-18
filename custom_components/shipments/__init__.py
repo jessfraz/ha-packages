@@ -1,6 +1,10 @@
 """Home Assistant adapter for the local Shipments service."""
 
+from pathlib import Path
+from urllib.parse import urlencode
+
 from homeassistant.components import frontend
+from homeassistant.components.http import StaticPathConfig
 from homeassistant.config_entries import ConfigEntry, ConfigEntryState
 from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant, callback
@@ -21,6 +25,15 @@ type ShipmentsConfigEntry = ConfigEntry[ShipmentsCoordinator]
 async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     """Install the authenticated view once, independent of reloads."""
     hass.http.register_view(ShipmentsView(hass))
+    await hass.http.async_register_static_paths(
+        [
+            StaticPathConfig(
+                "/shipments-static/calendar-links.js",
+                str(Path(__file__).parent / "frontend" / "calendar-links.js"),
+                False,
+            )
+        ]
+    )
     async_register_services(hass)
     return True
 
@@ -37,6 +50,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ShipmentsConfigEntry) ->
     await coordinator.async_config_entry_first_refresh()
     entry.runtime_data = coordinator
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+    module_url = "/shipments-static/calendar-links.js?" + urlencode(
+        {"v": str(integration.version)}
+    )
+    frontend.add_extra_js_url(hass, module_url)
+    entry.async_on_unload(lambda: frontend.remove_extra_js_url(hass, module_url))
     if addon_slug := entry.data.get(CONF_ADDON_SLUG):
         frontend.async_register_built_in_panel(
             hass,

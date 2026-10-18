@@ -86,14 +86,19 @@ paired, check the integration for a connection or authentication error.
 
 Version mismatch is a separate warning: connectivity and authentication can
 pass while the two installed versions differ. Update both the app through the
-App Store and the integration through HACS to **0.5.6**, then restart Home
+App Store and the integration through HACS to **0.5.11**, then restart Home
 Assistant. Without a recent integration check-in, the version match is
 unverified.
 
 **Run checks** makes a read-only EasyPost request when a key is configured;
 requests are rate-limited to once per minute. A successful result stays passed
-until a later check actually fails. Without an EasyPost key, EasyPost carriers
-cannot be verified or saved; DoorDash and configured AfterShip carriers still
+until a later check actually fails. The result and timestamp are saved in
+SQLite and survive app restarts and upgrades. Changing the key or endpoint
+requires a new check; credentials are never stored with the diagnostic.
+Older versions did not save the result. Run checks once after upgrading to
+0.5.11 to record it; later upgrades retain that record. Without an EasyPost
+key, EasyPost carriers cannot be verified or saved; DoorDash and configured
+AfterShip carriers still
 use their own providers.
 
 The backup check shows the recorded backup time. It requires a backup made
@@ -183,6 +188,18 @@ estimates for active inbound shipments. Date-only ETAs create all-day entries;
 ETAs with a time zone create one-hour estimated windows. Missing or invalid
 dates, outbound shipments, archived records, and terminal shipments do not
 appear. Estimates can change and are not guaranteed delivery times.
+
+Click a Shipments event in Home Assistant's native calendar or calendar card
+to open that exact shipment. The integration uses the Shipments sidebar panel
+on supervised installations and the configured app URL for standalone setups.
+Update the integration, restart Home Assistant, and reload the page to load
+the calendar link support.
+
+Dashboard cards such as Calendar Card Pro can use this same standard calendar
+entity. Install and configure them separately through HACS; Shipments does not
+bundle a calendar card. Calendar Card Pro currently supports card-wide actions
+rather than a different destination for each event, so the native calendar
+click behavior does not extend to its event rows.
 
 ## Shipment events
 
