@@ -3,11 +3,11 @@
   "name": "Shipments",
   "codeowners": ["@jessfraz"],
   "config_flow": true,
-  "dependencies": ["frontend", "http"],
+  "dependencies": ["conversation", "frontend", "http"],
   "documentation": "https://github.com/jessfraz/ha-packages",
   "integration_type": "service",
   "iot_class": "local_polling",
   "requirements": [],
   "single_config_entry": true,
-  "version": "0.5.13"
+  "version": "0.6.0"
 }

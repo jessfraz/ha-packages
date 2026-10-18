@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.6.0
+
+- Add native Assist questions and an Assist API tool for arrivals, confirmed
+  deliveries, named shipment status, and tracking problems. Share one typed
+  query handler, default to inbound, and use Home Assistant local-day bounds.
+- Respect Assist exposure and user permissions, keep responses bounded, and
+  report unavailable or partial data clearly. Voice queries read synchronized
+  records without creating trackers or polling carriers.
+
 ## 0.5.13
 
 - Close shipment details and the editor when clicking the backdrop. Keep

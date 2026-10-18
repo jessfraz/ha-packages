@@ -1047,6 +1047,25 @@ wheels = [
 ]
 
 [[package]]
+name = "gazetteer-matcher"
+version = "1.1.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "home-assistant-intents" },
+    { name = "pyyaml" },
+    { name = "unicode-rbnf" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/75/7d/2bc97376715b9d95c769fe07b4143b2e7d51e7d08150714d7cce3e1c0203/gazetteer_matcher-1.1.0.tar.gz", hash = "sha256:844d11cb781302aded70f0a8eae8a2d1601e6e2aaa006745a667b500097635cc", size = 89590, upload-time = "2026-08-27T20:15:54.882Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/0b/60/094b23d28b1447ee68477d35632677f0c64d20161d0fda7347ba26664044/gazetteer_matcher-1.1.0-cp311-abi3-macosx_10_9_x86_64.whl", hash = "sha256:9460da761c68ba57679ee773462bcbf708743c44e92197009def43ac5ac5dd86", size = 74684, upload-time = "2026-08-27T20:15:46.638Z" },
+    { url = "https://files.pythonhosted.org/packages/82/39/151c2477a934fb048b8a72d425d9dbd506ebe84123d7089cc0c885dd49c0/gazetteer_matcher-1.1.0-cp311-abi3-macosx_11_0_arm64.whl", hash = "sha256:0fb123e88528f9862608efd858b386c43332549a6aa4afdcb7611d6d3645b7f0", size = 74158, upload-time = "2026-08-27T20:15:47.984Z" },
+    { url = "https://files.pythonhosted.org/packages/6a/e5/37d1158ce9444d7784071a54b1895e2d759dd0b0dedfd34b0877a5aca2c7/gazetteer_matcher-1.1.0-cp311-abi3-manylinux_2_24_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:edd1c12a3bd8e30ea6f4da8e4554fc1386e21606f08901bf7a24a998602b6105", size = 201807, upload-time = "2026-08-27T20:15:49.144Z" },
+    { url = "https://files.pythonhosted.org/packages/09/68/aab65e4471b594ca83742451247523e020a767cde516c34b94d03070b551/gazetteer_matcher-1.1.0-cp311-abi3-manylinux_2_24_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:c6c28513c3689768ec1a75fb1b2c3153ab424a65f6992579b311c57652523c5a", size = 202853, upload-time = "2026-08-27T20:15:50.622Z" },
+    { url = "https://files.pythonhosted.org/packages/da/c1/8233756448c63d59669479c0a3ca6727338627874dfcb8f60fdae219d168/gazetteer_matcher-1.1.0-cp311-abi3-win_amd64.whl", hash = "sha256:f81042403497db23862e2dfa4915100a896a097a45ef5f834ef2a75afbd912e3", size = 265416, upload-time = "2026-08-27T20:15:52.193Z" },
+    { url = "https://files.pythonhosted.org/packages/1f/f5/cdc362c96e75463a61eed90941755fc7461ea7c2e76400e2ad219690e4ec/gazetteer_matcher-1.1.0-cp311-abi3-win_arm64.whl", hash = "sha256:ab3749cd1a2498302aecd0fa1d159d467ad17067a279f7dda83ff9a596111701", size = 436394, upload-time = "2026-08-27T20:15:53.517Z" },
+]
+
+[[package]]
 name = "greenlet"
 version = "3.5.6"
 source = { registry = "https://pypi.org/simple" }
@@ -1204,6 +1223,19 @@ wheels = [
 ]
 
 [[package]]
+name = "hassil"
+version = "3.12.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "pyyaml" },
+    { name = "unicode-rbnf" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/c8/9f/5908d3ec6b811f63f444d27d54b7dca58e95c8443af8814ddc4fc015b9e8/hassil-3.12.1.tar.gz", hash = "sha256:dad08f2525ad0246cfd6cc072e2c3015f1b15f918ac49a7b8e9dd07bd6ef8f5a", size = 71564, upload-time = "2026-09-14T16:00:09.703Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/a7/37/395bad9bfeed5d9a78e6769941d09eb073fab6c76f65e6257fb0388b9751/hassil-3.12.1-py3-none-any.whl", hash = "sha256:d12553cccf2548a86cfedd28c8f3171690f5e8c064470c2b66170cc5848ecdef", size = 58054, upload-time = "2026-09-14T16:00:08.252Z" },
+]
+
+[[package]]
 name = "home-assistant-bluetooth"
 version = "2.0.0"
 source = { registry = "https://pypi.org/simple" }
@@ -1222,6 +1254,15 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/71/4f/5ec5703f59ad64d55aa5841b009e0a01e3760ef69a20003d92da477ab134/home_assistant_frontend-20260930.3.tar.gz", hash = "sha256:b973eb275bd82f767221ab78190f165390760c71523fd9d3e715c56524d01447", size = 109966678, upload-time = "2026-10-09T09:45:35.594Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/18/52/878321f34f4cff19e771ea4460e4447eba2a270bd7171f4c1ac7b8260c89/home_assistant_frontend-20260930.3-py3-none-any.whl", hash = "sha256:700acb1eda07b03cf104e037310575c4626ed4ba56868a80f56851d661bf1c1e", size = 110733872, upload-time = "2026-10-09T09:45:28.76Z" },
+]
+
+[[package]]
+name = "home-assistant-intents"
+version = "2026.10.6"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/06/5e/49cb56493fe87f0720022b3a0b70d202a1e1f363707c509964e7d05fa660/home_assistant_intents-2026.10.6.tar.gz", hash = "sha256:5db63abd92d767bce51665564fda304e56ac1f208422222296622fc23bc964a2", size = 747426, upload-time = "2026-10-06T21:30:54.096Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/4e/e7/5a55d80c86a9a2cee4f0043cf41c83b94add8d794b0a25ae6b87b97e50d3/home_assistant_intents-2026.10.6-py3-none-any.whl", hash = "sha256:1031b97bffb00b02c9c2ccc870b348cfab412ca865e64dc44b7176bf91648e36", size = 768733, upload-time = "2026-10-06T21:30:52.08Z" },
 ]
 
 [[package]]
@@ -2792,12 +2833,15 @@ wheels = [
 
 [[package]]
 name = "shipments-home-assistant"
-version = "0.5.13"
+version = "0.6.0"
 source = { virtual = "." }
 
 [package.dev-dependencies]
 dev = [
+    { name = "gazetteer-matcher" },
+    { name = "hassil" },
     { name = "home-assistant-frontend" },
+    { name = "home-assistant-intents" },
     { name = "pytest-homeassistant-custom-component" },
     { name = "ruff" },
     { name = "ty" },
@@ -2807,7 +2851,10 @@ dev = [
 
 [package.metadata.requires-dev]
 dev = [
+    { name = "gazetteer-matcher", specifier = "==1.1.0" },
+    { name = "hassil", specifier = "==3.12.1" },
     { name = "home-assistant-frontend", specifier = "==20260930.3" },
+    { name = "home-assistant-intents", specifier = "==2026.10.6" },
     { name = "pytest-homeassistant-custom-component", specifier = "==0.13.372" },
     { name = "ruff", specifier = "==0.17.0" },
     { name = "ty", specifier = "==0.0.88" },
@@ -3078,6 +3125,15 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/a9/7e/4beaa80ac820b3243e376f79fde4a8bca2b477d8b6529ff5afcfd83f5f74/ulid_transform-2.2.9-cp314-cp314t-musllinux_1_2_x86_64.whl", hash = "sha256:35084b9ade29b462472485966789e5edc66dcbc376ffaf89759e7ada0c7d1f6c", size = 1058912, upload-time = "2026-05-25T05:46:10.736Z" },
     { url = "https://files.pythonhosted.org/packages/39/f8/ab3af64aa6ced7c65b09aa4b1c33d2cd4bf48646c9957a17659cea69e1c5/ulid_transform-2.2.9-cp314-cp314t-win32.whl", hash = "sha256:ccf6b173ae1e90a589935fd99176dc9d71d461c9f413b1a754d542ba2d399860", size = 25725, upload-time = "2026-05-25T05:46:12.117Z" },
     { url = "https://files.pythonhosted.org/packages/0b/c8/cbb9374e8a0e26d18e94ffb3e1f861beab5312b3e0be4fbad1bf60cdb47c/ulid_transform-2.2.9-cp314-cp314t-win_amd64.whl", hash = "sha256:fed352965a8682a156000d29e0efff8b85e7c2b8cb74f2e953a1e6d0157648b9", size = 25827, upload-time = "2026-05-25T05:46:13.164Z" },
+]
+
+[[package]]
+name = "unicode-rbnf"
+version = "2.4.1"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/a6/97/ee2a969ddfd3988a11b5e026060dffb60f59e99c9906cff0ffe3384b9345/unicode_rbnf-2.4.1.tar.gz", hash = "sha256:17621d76cb9dd22eac493f667317b8563820b3d674374af130017ab281ca8648", size = 98405, upload-time = "2026-10-06T21:02:08.138Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/e5/f7/a19bcc91afc3155023c906c85321e456f67936feab151ef808cc5b8ebfe2/unicode_rbnf-2.4.1-py3-none-any.whl", hash = "sha256:545a10c40316b49a6f14a1470e51a217c75438569c352abdbc5da11fef273498", size = 150370, upload-time = "2026-10-06T21:02:06.807Z" },
 ]
 
 [[package]]
