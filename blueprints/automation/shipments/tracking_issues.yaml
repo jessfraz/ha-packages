@@ -1,0 +1,66 @@
+blueprint:
+  name: Shipments · Tracking problems
+  description: >-
+    Notify a Home Assistant Companion app when the combined Sync errors count
+    rises from zero and stays above zero for five minutes. Tap to open the
+    affected shipments. Clearing errors, restoring states, and changes to an
+    already-positive count do not send another alert. The five-minute wait
+    resets when Home Assistant restarts or automations reload.
+  domain: automation
+  author: jessfraz
+  source_url: https://github.com/jessfraz/ha-packages/blob/main/blueprints/automation/shipments/tracking_issues.yaml
+  homeassistant:
+    min_version: 2026.10.0
+  input:
+    sync_errors:
+      name: Shipments Sync errors sensor
+      description: Use the combined Sync errors count, including both directions.
+      default: sensor.shipments_sync_errors
+      selector:
+        entity:
+          filter:
+            domain: sensor
+            integration: shipments
+    notify_device:
+      name: Phone or tablet
+      selector:
+        device:
+          filter:
+            integration: mobile_app
+
+mode: single
+max_exceeded: silent
+
+variables:
+  error_sensor: !input sync_errors
+
+triggers:
+  - trigger: numeric_state
+    entity_id: !input sync_errors
+    above: 0
+    for:
+      minutes: 5
+
+conditions:
+  - condition: template
+    value_template: >-
+      {{ trigger.from_state is not none
+         and is_number(trigger.from_state.state)
+         and trigger.from_state.state | int == 0
+         and is_number(states(error_sensor))
+         and states(error_sensor) | int > 0 }}
+
+actions:
+  - domain: mobile_app
+    type: notify
+    device_id: !input notify_device
+    title: Shipment tracking needs attention
+    message: >-
+      {{ states(error_sensor) | int }}
+      {{ 'shipment has' if states(error_sensor) | int == 1 else 'shipments have' }}
+      a tracking problem. Open Shipments for the carrier error and next step.
+    data:
+      url: /shipments/shipments/view%3Dtracking_issues
+      clickAction: /shipments/shipments/view%3Dtracking_issues
+      tag: shipments-tracking-issues
+      group: shipments

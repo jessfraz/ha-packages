@@ -109,6 +109,35 @@ unavailable backup inventory is reported as
 creating a backup in **Settings → System → Backups**. The check confirms backup
 inventory and coverage; restore testing is a separate step.
 
+## Diagnostics
+
+Open **Settings → Devices & services → Shipments**, select the integration's
+menu, then **Download diagnostics**. The native Home Assistant report includes
+connection health, the last observed app version, the integration version,
+refresh settings, and cached shipment counts. Unavailable or stale data is
+identified rather than presented as a fresh zero.
+
+Diagnostics use the integration's existing observations without polling
+carriers. They exclude backend URLs, credentials, package titles, tracking
+numbers, provider tracker IDs, source records, and raw error messages. Review
+any downloaded diagnostic before sharing it.
+
+## Notification blueprints
+
+The [blueprint catalog](../blueprints/README.md) has import links for:
+
+- **Delivery updates:** out for delivery, delivered, and delivery exceptions,
+  with inbound/outbound selection and a direct link to the package.
+- **Tracking problems:** combined tracking errors that persist for five
+  minutes, with a link to the affected shipments.
+- **Daily delivery summary:** inbound packages out for delivery and packages
+  actually delivered today, at a time you choose.
+
+Choose a Home Assistant Companion app device when creating an automation.
+Importing a blueprint does not enable notifications. Blueprints use existing
+entities; they do not register trackers, refresh providers, or require an AI
+conversation agent.
+
 ## Sensors
 
 The integration keeps the existing counts combined across inbound and outbound

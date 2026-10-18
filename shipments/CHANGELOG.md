@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.6.1
+
+- Add optional notification blueprints for delivery updates, persistent
+  tracking errors, and a daily inbound delivery summary. Include package
+  links, phone selection, direction filters, and quiet handling of restored
+  states and empty summaries.
+- Add native Home Assistant diagnostic downloads with versions, connection
+  health, and cached counts. Exclude credentials, backend URLs, package
+  details, source records, and raw errors.
+
 ## 0.6.0
 
 - Add native Assist questions and an Assist API tool for arrivals, confirmed

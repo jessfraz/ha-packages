@@ -1,0 +1,100 @@
+blueprint:
+  name: Shipments · Delivery updates
+  description: >-
+    Notify a Home Assistant Companion app when a shipment goes out for delivery,
+    is delivered, or has a delivery exception. Choose inbound, outbound, or both.
+    Tap the notification to open that shipment. Restored states and consecutive
+    repeated event IDs are ignored. Requires the Shipments integration.
+  domain: automation
+  author: jessfraz
+  source_url: https://github.com/jessfraz/ha-packages/blob/main/blueprints/automation/shipments/shipment_updates.yaml
+  homeassistant:
+    min_version: 2026.10.0
+  input:
+    shipment_events:
+      name: Shipment events
+      default: event.shipments
+      selector:
+        entity:
+          filter:
+            domain: event
+            integration: shipments
+    notify_device:
+      name: Phone or tablet
+      description: A device registered with the Home Assistant Companion app.
+      selector:
+        device:
+          filter:
+            integration: mobile_app
+    direction:
+      name: Shipment direction
+      default: inbound
+      selector:
+        select:
+          options:
+            - label: Inbound
+              value: inbound
+            - label: Outbound
+              value: outbound
+            - label: Both
+              value: all
+    event_types:
+      name: Notify when
+      default: [out_for_delivery, delivered, exception]
+      selector:
+        select:
+          multiple: true
+          options:
+            - label: Out for delivery
+              value: out_for_delivery
+            - label: Delivered
+              value: delivered
+            - label: Delivery exception
+              value: exception
+
+mode: queued
+max: 100
+max_exceeded: warning
+
+variables:
+  selected_direction: !input direction
+  selected_events: !input event_types
+
+triggers:
+  - trigger: state
+    entity_id: !input shipment_events
+    from: null
+
+conditions:
+  - condition: template
+    value_template: >-
+      {{ trigger.from_state is not none and trigger.to_state is not none
+         and trigger.to_state.state not in ['unknown', 'unavailable']
+         and trigger.to_state.attributes.get('event_id') is number
+         and trigger.to_state.attributes.event_id
+             != trigger.from_state.attributes.get('event_id')
+         and trigger.to_state.attributes.get('shipment_id')
+         and trigger.to_state.attributes.get('event_type') in selected_events
+         and trigger.to_state.attributes.get('direction') in ['inbound', 'outbound']
+         and (selected_direction == 'all'
+              or trigger.to_state.attributes.direction == selected_direction) }}
+
+actions:
+  - variables:
+      shipment: "{{ trigger.to_state.attributes }}"
+      shipment_url: >-
+        /shipments/shipments/shipment%3D{{ trigger.to_state.attributes.shipment_id }}
+  - domain: mobile_app
+    type: notify
+    device_id: !input notify_device
+    title: "{{ shipment.title }}"
+    message: >-
+      {{ shipment.direction | capitalize }} ·
+      {{ {'out_for_delivery': 'Out for delivery', 'delivered': 'Delivered',
+          'exception': 'Delivery exception'}[shipment.event_type] }}
+      {{ ' · ' ~ shipment.carrier if shipment.get('carrier') else '' }}
+    data:
+      url: "{{ shipment_url }}"
+      clickAction: "{{ shipment_url }}"
+      tag: "shipments-{{ shipment.shipment_id }}"
+      group: shipments

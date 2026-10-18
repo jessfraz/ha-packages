@@ -75,6 +75,13 @@ The integration provides:
   assistants use the same shipment data.
 - Tracking-error indicators, shipment events for automations, and actions to
   refresh tracking, correct a status, or archive a shipment.
+- Optional [notification blueprints](blueprints/README.md) for delivery updates,
+  persistent tracking problems, and a daily delivery summary.
+
+Download native diagnostics from the Shipments integration's menu in
+**Settings → Devices & services** when troubleshooting a connection. The
+report includes versions and health information, without package details or
+credentials.
 
 See the [entity reference](shipments/DOCS.md#sensors),
 [calendar](shipments/DOCS.md#delivery-calendar), and

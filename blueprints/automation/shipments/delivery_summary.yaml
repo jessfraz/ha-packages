@@ -1,0 +1,97 @@
+blueprint:
+  name: Shipments · Daily delivery summary
+  description: >-
+    Send a daily inbound delivery summary to a Home Assistant Companion app:
+    packages currently out for delivery and packages actually delivered today.
+    Uses Home Assistant's local time. No notification is sent if both counts
+    are zero or either sensor is unavailable. Lists up to five titles in each
+    section and says when there are more. Requires Shipments 0.6.1 or newer.
+  domain: automation
+  author: jessfraz
+  source_url: https://github.com/jessfraz/ha-packages/blob/main/blueprints/automation/shipments/delivery_summary.yaml
+  homeassistant:
+    min_version: 2026.10.0
+  input:
+    out_for_delivery:
+      name: Inbound Out for delivery sensor
+      default: sensor.shipments_inbound_out_for_delivery
+      selector:
+        entity:
+          filter:
+            domain: sensor
+            integration: shipments
+    delivered_today:
+      name: Inbound Delivered today sensor
+      default: sensor.shipments_inbound_delivered_today
+      selector:
+        entity:
+          filter:
+            domain: sensor
+            integration: shipments
+    notification_time:
+      name: Time to send
+      default: "08:00:00"
+      selector:
+        time:
+    notify_device:
+      name: Phone or tablet
+      selector:
+        device:
+          filter:
+            integration: mobile_app
+
+mode: single
+max_exceeded: silent
+
+variables:
+  arriving_sensor: !input out_for_delivery
+  delivered_sensor: !input delivered_today
+
+triggers:
+  - trigger: time
+    at: !input notification_time
+
+conditions:
+  - condition: template
+    value_template: >-
+      {{ is_number(states(arriving_sensor)) and is_number(states(delivered_sensor))
+         and (states(arriving_sensor) | int > 0
+              or states(delivered_sensor) | int > 0) }}
+
+actions:
+  - variables:
+      arriving_count: "{{ states(arriving_sensor) | int }}"
+      delivered_count: "{{ states(delivered_sensor) | int }}"
+      arriving_items: "{{ state_attr(arriving_sensor, 'items') or [] }}"
+      delivered_items: "{{ state_attr(delivered_sensor, 'items') or [] }}"
+  - domain: mobile_app
+    type: notify
+    device_id: !input notify_device
+    title: Today's deliveries
+    message: >-
+      {%- set text = namespace(lines=['Out for delivery: ' ~ arriving_count]) -%}
+      {%- for item in arriving_items[:5] -%}
+        {%- set text.lines = text.lines + ['• ' ~ item.title
+          ~ (' (' ~ item.carrier ~ ')' if item.carrier else '')] -%}
+      {%- endfor -%}
+      {%- if arriving_count > arriving_items[:5] | length -%}
+        {%- set text.lines = text.lines + ['+ '
+          ~ (arriving_count - arriving_items[:5] | length)
+          ~ ' more in Shipments'] -%}
+      {%- endif -%}
+      {%- set text.lines = text.lines + ['', 'Delivered today: ' ~ delivered_count] -%}
+      {%- for item in delivered_items[:5] -%}
+        {%- set text.lines = text.lines + ['• ' ~ item.title
+          ~ (' (' ~ item.carrier ~ ')' if item.carrier else '')] -%}
+      {%- endfor -%}
+      {%- if delivered_count > delivered_items[:5] | length -%}
+        {%- set text.lines = text.lines + ['+ '
+          ~ (delivered_count - delivered_items[:5] | length)
+          ~ ' more in Shipments'] -%}
+      {%- endif -%}
+      {{ text.lines | join('\n') }}
+    data:
+      url: /shipments/shipments/view%3Dall%26direction%3Dinbound
+      clickAction: /shipments/shipments/view%3Dall%26direction%3Dinbound
+      tag: shipments-daily-summary
+      group: shipments
