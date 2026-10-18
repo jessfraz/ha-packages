@@ -260,7 +260,9 @@ pagination. Active shipments show expected dates; delivered shipments show
 actual delivery dates. Installation checks and agent access sit below the
 list, with installation promoted above it only when a check needs attention.
 A passed EasyPost diagnostic retains its result and timestamp until another
-check replaces it; elapsed time does not turn it into a failure.
+check replaces it; elapsed time does not turn it into a failure. From 0.5.11,
+the result survives restarts and upgrades in SQLite, scoped to the configured
+key and endpoint.
 
 The default dashboard shows inbound and outbound shipments together, with
 distinct badges. Direction filters are optional.

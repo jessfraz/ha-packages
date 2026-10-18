@@ -849,8 +849,8 @@ async fn installation_check(
         .map(|provider| provider.for_request(&request.request_id, None));
     context
         .installation
-        .check_provider(provider.as_deref())
-        .await;
+        .check_provider(provider.as_deref(), &context.store)
+        .await?;
     installation_report(&request).await.map(HttpResponseOk)
 }
 
@@ -948,11 +948,19 @@ async fn agent_revoke(
 async fn installation_report(
     request: &RequestContext<Arc<Context>>,
 ) -> Result<InstallationReport, HttpError> {
+    let context = request.context();
     // Test the actual database connection, rather than inferring it from uptime.
     sqlx::query_scalar::<_, i64>("SELECT 1")
         .fetch_one(request.context().store.pool())
         .await
         .map_err(crate::error::Error::from)?;
+    context
+        .installation
+        .restore_provider_check(
+            context.provider(ProviderId::EasyPost).as_deref(),
+            &context.store,
+        )
+        .await?;
     Ok(request
         .context()
         .installation

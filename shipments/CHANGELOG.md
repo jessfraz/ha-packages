@@ -2,6 +2,9 @@
 
 ## 0.5.11
 
+- Save the last EasyPost installation check and timestamp in SQLite so app
+  restarts and upgrades retain the result. Match it to the configured key and
+  endpoint, and replace it when a later check fails.
 - Open the exact shipment when clicking a delivery in Home Assistant's native
   calendar or calendar card. Support supervised ingress and standalone app
   links, preserve other calendars' normal dialogs, and handle integration

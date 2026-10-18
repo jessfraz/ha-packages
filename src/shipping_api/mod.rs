@@ -18,6 +18,12 @@ pub trait ShippingApi: Send + Sync {
     fn for_request(&self, request_id: &str, shipment_id: Option<&str>) -> Arc<dyn ShippingApi>;
     fn check_connection(&self) -> ApiFuture<'_, ()>;
 
+    /// Identify the endpoint and credentials for a saved connection diagnostic.
+    /// Return only a one-way digest, never credentials. None disables persistence.
+    fn connection_fingerprint(&self) -> Option<[u8; 32]> {
+        None
+    }
+
     /// Read-only lookup. Only a complete, authoritative absence permits a new
     /// registration. An uncertain or ambiguous result must return an error.
     fn reconcile_registration<'a>(
