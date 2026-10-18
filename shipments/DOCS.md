@@ -242,8 +242,8 @@ stay in the app configuration; clients and agents do not receive them.
 
 Every shipment needs a tracking number and an explicit **Direction**:
 **Inbound** for packages you receive, **Outbound** for packages you send.
-Existing records migrate to inbound. The default list shows both directions
-together; use the optional direction filters to narrow it.
+Existing records migrate to inbound. The default list shows active inbound
+shipments. Select **All** or **Outbound** to change the direction filter.
 Leave **Carrier** on **Auto-detect**, or
 choose its canonical EasyPost carrier when detection is ambiguous.
 Select **SpeedX**, **Sway / Returnmates**, or **Veho** explicitly to use
@@ -396,7 +396,7 @@ docker run --detach --name shipments --restart unless-stopped \
   --env SHIPMENTS_API_TOKEN \
   --env SHIPMENTS_INTEGRATION_TOKEN \
   --env EASYPOST_API_KEY \
-  ghcr.io/jessfraz/ha-packages:0.5.11
+  ghcr.io/jessfraz/ha-packages:0.5.12
 ```
 
 Open `http://127.0.0.1:8080` and enter the owner API token. Save both tokens in
