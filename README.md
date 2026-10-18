@@ -1,5 +1,10 @@
 # ha-packages
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/jessfraz/ha-packages/main/custom_components/shipments/brand/dark_icon@2x.png">
+  <img src="https://raw.githubusercontent.com/jessfraz/ha-packages/main/custom_components/shipments/brand/icon@2x.png" width="64" height="64" alt="Shipments parcel icon">
+</picture>
+
 A local shipment registry for Home Assistant. Add a delivery yourself or through
 the API, let its tracking provider check its progress, and correct the status
 when you know better. Carrier updates never undo a manual correction.
@@ -23,7 +28,7 @@ steps, provider configuration, and standalone Docker instructions. The app
 dashboard's **Installation → Run checks** verifies the service, Home Assistant
 connection, app/integration version match, authentication, read-only EasyPost
 access, and backup coverage. Update both the app and HACS integration to
-**0.5.9**, then restart Home Assistant.
+**0.5.10**, then restart Home Assistant.
 
 The supervised integration adds a stable **Shipments** sidebar panel at
 `/shipments`, available to ordinary Home Assistant users. Status corrections,
@@ -389,7 +394,7 @@ The DoorDash recipient-tracking migration also removes legacy DoorDash records
 without their required original recipient link. Re-add those shipments with
 the original link if needed.
 
-Tracking numbers are globally unique from 0.5.9. This migration preserves all
+Tracking numbers are globally unique from 0.5.10. This migration preserves all
 records and history. If a legacy database contains duplicate numbers, upgrade
 stops atomically instead of choosing a record to delete. Resolve those records
 before retrying the upgrade.

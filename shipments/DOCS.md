@@ -35,6 +35,13 @@ first.
 5. Open **Settings → Devices & services** and confirm the discovered
    **Shipments** integration.
 
+Shipments includes local brand icons for light and dark themes, including
+high-resolution displays. Restart Home Assistant after updating the integration
+to load them. HACS 2.0.5 still uses the old brand CDN for its store tile and may
+show a placeholder there; the integration icon in Home Assistant and the icon
+in the HACS details page are bundled with Shipments. This is an
+[upstream HACS limitation](https://github.com/hacs/frontend/pull/937).
+
 The app shares a separate integration credential through authenticated
 Supervisor discovery. Pairing does not require pasting a URL or token.
 Internal app networking does not require a host port mapping.
