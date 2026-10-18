@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.5.8
+
+- Clear tracking issues when a shipment is manually marked delivered, returned
+  to sender, or cancelled. Stop retries and remove it from the tracking-error
+  count and list, including when an in-flight request fails afterward.
+- Clear stale issues on existing manually completed shipments during upgrade.
+  Preserve carrier history, tracker ownership and registration intent, and
+  resume tracking if the correction is removed.
+- Show stopped tracking in completed shipment details without registration
+  warning badges.
+
 ## 0.5.7
 
 - Type-check the Home Assistant integration and its tests with pinned ty in CI,

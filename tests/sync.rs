@@ -663,6 +663,91 @@ async fn canonical_carrier_changes_invalidate_stale_tracking_edits_and_preserve_
 }
 
 #[tokio::test]
+async fn manual_completion_dismisses_errors_even_when_a_provider_failure_arrives_late() {
+    for registered in [false, true] {
+        let fixture = Fixture::new().await;
+        let shipment = fixture.shipment("COMPLETED123").await;
+        let mut provider = Provider::start();
+        let worker = provider.worker(&fixture.store);
+        if registered {
+            observe(&mut provider, &worker, "COMPLETED123", Status::InTransit).await;
+            due(&fixture.store, shipment.id).await;
+        }
+        let current = fixture.store.get(shipment.id).await.unwrap();
+        let task = start_tick(&worker);
+        let request = if registered {
+            provider.request().await
+        } else {
+            provider
+                .registration_after_empty_search("COMPLETED123")
+                .await
+        };
+        let corrected = fixture
+            .store
+            .set_override(
+                shipment.id,
+                current.revision,
+                Some(SetOverride {
+                    status: Status::Delivered,
+                    reason: "Physically received".into(),
+                }),
+                "owner",
+            )
+            .await
+            .unwrap();
+        assert!(corrected.sync.last_error.is_none());
+        request.reply(Reply::error(503));
+        assert!(task.await.unwrap().unwrap());
+        let completed = fixture.store.get(shipment.id).await.unwrap();
+        assert_eq!(completed.status, Status::Delivered);
+        assert!(completed.sync.last_error.is_none());
+        assert!(completed.sync.error_code.is_none());
+        assert!(completed.sync.provider_status.is_none());
+        assert!(completed.sync.next_attempt_at.is_none());
+        assert_eq!(completed.sync.attempts, 0);
+        assert_eq!(fixture.store.summary(None).await.unwrap().sync_errors, 0);
+        assert!(!worker.tick().await.unwrap());
+
+        // An explicit probe can still run, but must not make a completed
+        // shipment actionable again or restart automatic polling.
+        fixture
+            .store
+            .refresh(shipment.id, completed.revision, "owner")
+            .await
+            .unwrap();
+        due(&fixture.store, shipment.id).await;
+        let task = start_tick(&worker);
+        let request = if registered {
+            provider.request().await
+        } else {
+            provider
+                .registration_after_empty_search("COMPLETED123")
+                .await
+        };
+        request.reply(Reply::error(503));
+        assert!(task.await.unwrap().unwrap());
+        let persisted = Store::open(&fixture.path).await.unwrap();
+        let completed = persisted.get(shipment.id).await.unwrap();
+        assert!(completed.sync.last_error.is_none());
+        assert!(completed.sync.next_attempt_at.is_none());
+        assert_eq!(completed.sync.tracker_id.is_some(), registered);
+        if !registered {
+            assert!(
+                completed.sync.registration_started_at.is_some(),
+                "retain reconciliation intent for uncertain registrations"
+            );
+        }
+        let resumed = persisted
+            .set_override(shipment.id, completed.revision, None, "owner")
+            .await
+            .unwrap();
+        assert!(resumed.sync.next_attempt_at.is_some());
+        assert!(resumed.sync.last_error.is_none());
+        persisted.close().await.unwrap();
+    }
+}
+
+#[tokio::test]
 async fn preserves_a_manual_terminal_override_set_during_network_io() {
     let fixture = Fixture::new().await;
     let shipment = fixture.shipment("TRACK2").await;
