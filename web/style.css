@@ -214,6 +214,7 @@ select {
   font: inherit;
 }
 button {
+  min-width: 44px;
   min-height: 44px;
   border: 1px solid transparent;
   background: var(--accent);
@@ -248,6 +249,10 @@ select {
   border-radius: 5px;
   background: var(--paper);
   color: inherit;
+}
+input:not([type="checkbox"]):not([type="radio"]),
+select {
+  min-height: 44px;
 }
 input:focus,
 select:focus,
