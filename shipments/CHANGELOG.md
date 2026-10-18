@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.5.12
+
+- Open active inbound shipments by default from the Home Assistant sidebar
+  and app home. Preserve explicit direction filters, shipment links, and
+  combined tracking-issue views.
+- Shorten the README and move detailed API and architecture references into
+  linked documentation.
+
 ## 0.5.11
 
 - Save the last EasyPost installation check and timestamp in SQLite so app

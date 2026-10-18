@@ -151,8 +151,8 @@ check replaces it; elapsed time does not turn it into a failure. From 0.5.11,
 the result survives restarts and upgrades in SQLite, scoped to the configured
 key and endpoint.
 
-The default dashboard shows inbound and outbound shipments together, with
-distinct badges. Direction filters are optional.
+The dashboard home opens on active inbound shipments. Select **All** or
+**Outbound** to change directions. Existing filtered links retain their scope.
 Dashboard fragments preserve direction, status view, search, open shipment,
 and expanded settings. Copy the address to return to the same view; browser
 Back and Forward work too. Shipment details put carrier history before the

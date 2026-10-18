@@ -31,7 +31,7 @@ let loadingEvents = false;
 let savingEditor = false;
 let appliedSearch = "";
 let shownDeliveryWindow = null;
-let activeDirection = "all";
+let activeDirection = "inbound";
 let routeGeneration = 0;
 let applyingRoute = false;
 let connected = false;
@@ -140,6 +140,8 @@ function writeRoute(changes, replace = false) {
     if (value == null || value === "") params.delete(key);
     else params.set(key, value);
   }
+  if (!params.has("direction")) params.set("direction", activeDirection);
+  if (!params.has("view")) params.set("view", byId("view").value);
   const hash = params.toString();
   if (hash === location.hash.slice(1)) return;
   history[replace || homeAssistantPrefix ? "replaceState" : "pushState"](null, "", hash ? `#${hash}` : location.pathname + location.search);
@@ -165,10 +167,13 @@ function saveListRoute() {
 
 async function applyRoute(initial = false) {
   const generation = ++routeGeneration;
+  applyingRoute = false;
   const params = route();
-  const direction = ["inbound", "outbound"].includes(params.get("direction")) ? params.get("direction") : "all";
+  const direction = params.size === 0 ? "inbound"
+    : ["inbound", "outbound"].includes(params.get("direction")) ? params.get("direction") : "all";
   const requestedView = params.get("view") || "active";
   const view = [...byId("view").options].some(option => option.value === requestedView) ? requestedView : "active";
+  if (params.size === 0) writeRoute({ direction, view }, true);
   const search = params.get("q") || "";
   const changed = direction !== activeDirection || view !== byId("view").value || search !== appliedSearch;
   activeDirection = direction;

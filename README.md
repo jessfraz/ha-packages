@@ -54,9 +54,10 @@ own credentials, and registering a tracker can incur provider fees. See
 shipments.
 
 The dashboard shows status, expected and actual delivery dates, tracking
-links, signature information when known, and carrier history. Filter by
-direction or status, open a shipment for its full history, or archive it when
-finished. Tracking numbers are unique, including across archived shipments.
+links, signature information when known, and carrier history. It opens on
+active inbound shipments. Select **All** or **Outbound** to see other
+directions, open a shipment for its full history, or archive it when finished.
+Tracking numbers are unique, including across archived shipments.
 
 ## Home Assistant
 
