@@ -792,9 +792,17 @@ impl Store {
             .map(|value| value.status)
             .or(current.carrier_status)
             .is_some_and(Status::is_terminal);
-        sqlx::query("UPDATE shipments SET override_status=?,override_reason=?,override_actor=?,override_at=CASE WHEN ? THEN strftime('%Y-%m-%dT%H:%M:%fZ','now') END, next_attempt_at=CASE WHEN ? THEN NULL WHEN tracking_number IS NOT NULL AND archived=0 AND registration_state!='rejected' THEN unixepoch() ELSE NULL END WHERE id=?")
+        sqlx::query("UPDATE shipments SET override_status=?,override_reason=?,override_actor=?,override_at=CASE WHEN ? THEN strftime('%Y-%m-%dT%H:%M:%fZ','now') END,
+            last_error=CASE WHEN ? THEN NULL ELSE last_error END,
+            last_error_code=CASE WHEN ? THEN NULL ELSE last_error_code END,
+            last_provider_status=CASE WHEN ? THEN NULL ELSE last_provider_status END,
+            last_provider_error_code=CASE WHEN ? THEN NULL ELSE last_provider_error_code END,
+            attempts=CASE WHEN ? THEN 0 ELSE attempts END,
+            registration_state=CASE WHEN ? THEN CASE WHEN tracker_id IS NULL THEN 'pending' ELSE 'registered' END ELSE registration_state END,
+            next_attempt_at=CASE WHEN ? THEN NULL WHEN tracking_number IS NOT NULL AND archived=0 AND registration_state!='rejected' THEN unixepoch() ELSE NULL END WHERE id=?")
             .bind(value.as_ref().map(|v|serde_json::to_string(&v.status)).transpose()?).bind(value.as_ref().map(|v|&v.reason))
-            .bind(value.as_ref().map(|_|actor)).bind(value.is_some()).bind(terminal)
+            .bind(value.as_ref().map(|_|actor)).bind(value.is_some())
+            .bind(terminal).bind(terminal).bind(terminal).bind(terminal).bind(terminal).bind(terminal).bind(terminal)
             .bind(id.to_string()).execute(&mut *tx).await?;
         Self::bump(&mut tx, id).await?;
         Self::event_in(

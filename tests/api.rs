@@ -153,6 +153,97 @@ fn input(title: &str) -> CreateShipment {
 }
 
 #[tokio::test]
+async fn manual_completion_clears_tracking_issues_but_active_corrections_keep_them() {
+    let app = App::new(None).await;
+    for (index, status) in [
+        Status::InTransit,
+        Status::Delivered,
+        Status::Cancelled,
+        Status::ReturnToSender,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let shipment: Shipment = app
+            .create(
+                &format!("Completion {index}"),
+                &format!("completion-{index}"),
+            )
+            .await
+            .json()
+            .await
+            .unwrap();
+        sqlx::query("UPDATE shipments SET registration_state='rejected',last_error='Carrier credentials required',last_error_code='tracking_carrier_credentials_required',last_provider_status=403,last_provider_error_code='CREDENTIALS_NOT_FOUND',attempts=3,next_attempt_at=unixepoch()+600 WHERE id=?")
+            .bind(shipment.id.to_string()).execute(app.store.pool()).await.unwrap();
+        let response = app
+            .request(
+                Method::PUT,
+                &format!("/v1/shipments/{}/status-override", shipment.id),
+            )
+            .header("If-Match", format!("\"{}\"", shipment.revision))
+            .json(&SetOverride {
+                status,
+                reason: "Confirmed by owner".into(),
+            })
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let corrected: Shipment = response.json().await.unwrap();
+        assert_eq!(corrected.status, status);
+        if status.is_terminal() {
+            assert!(corrected.sync.last_error.is_none());
+            assert!(corrected.sync.error_code.is_none());
+            assert!(corrected.sync.provider_status.is_none());
+            assert!(corrected.sync.provider_error_code.is_none());
+            assert_eq!(corrected.sync.attempts, 0);
+            assert!(corrected.sync.next_attempt_at.is_none());
+            assert_eq!(
+                corrected.sync.registration_state,
+                RegistrationState::Registered
+            );
+            assert_eq!(corrected.sync.tracker_id, shipment.sync.tracker_id);
+        } else {
+            assert!(corrected.sync.last_error.is_some());
+            assert_eq!(
+                corrected.sync.registration_state,
+                RegistrationState::ConfigurationRequired
+            );
+            assert_eq!(corrected.sync.attempts, 3);
+        }
+    }
+    let summary: Summary = app
+        .request(Method::GET, "/v1/summary")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(summary.sync_errors, 1);
+    let system: System = app
+        .request(Method::GET, "/v1/system")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(system.sync_errors, 1);
+    let issues: ResultsPage<Shipment> = app
+        .request(Method::GET, "/v1/shipments?tracking_issues=true")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(issues.items.len(), 1);
+    assert_eq!(issues.items[0].status, Status::InTransit);
+    app.close().await;
+}
+
+#[tokio::test]
 async fn tracking_issues_filter_pages_every_error_across_directions_and_delivery_dates() {
     let app = App::with_provider(None, None).await;
     let mut expected = Vec::new();

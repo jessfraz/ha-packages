@@ -269,6 +269,10 @@ original tracking link. Re-add those parcels with their original link if needed.
 
 Open a shipment for tracking links, delivery dates, signature information and
 carrier scan history. Action buttons and manual corrections follow history.
+Marking a shipment delivered, returned to sender, or cancelled clears its
+tracking issues and stops automatic checks. Removing the correction resumes
+tracking. The upgrade also clears stale issues on existing manually completed
+shipments, while preserving carrier history and tracker ownership.
 Sources are collapsed at the bottom. Direction, status filters, search, shipment
 details and open settings have URL fragments for links and browser navigation.
 

@@ -306,6 +306,14 @@ impl SyncWorker {
                 sqlx::query("UPDATE shipments SET next_attempt_at = CASE WHEN next_attempt_at IS NOT NULL THEN unixepoch() + ? END, lease_token = NULL, lease_until = NULL WHERE id = ?")
                     .bind(retry_after).bind(&claim.id).execute(&mut *transaction).await?;
             }
+            Err(_) if override_terminal => {
+                // Keep an in-flight registration's successful result adoptable,
+                // but never reopen an issue the owner manually completed.
+                sqlx::query("UPDATE shipments SET last_error=NULL,last_error_code=NULL,last_provider_status=NULL,last_provider_error_code=NULL,
+                    attempts=0,registration_state=CASE WHEN tracker_id IS NULL THEN 'pending' ELSE 'registered' END,
+                    last_attempt_at=unixepoch(),next_attempt_at=NULL,lease_token=NULL,lease_until=NULL WHERE id=?")
+                    .bind(&claim.id).execute(&mut *transaction).await?;
+            }
             Err(error) => {
                 let attempts = current.attempts.saturating_add(1);
                 let exponential =

@@ -12,6 +12,214 @@ use sqlx::{
 use uuid::Uuid;
 
 #[tokio::test]
+async fn completed_override_migration_clears_tracking_errors_and_preserves_registration_and_history()
+ {
+    #[derive(Debug, PartialEq, Eq, sqlx::FromRow)]
+    struct TrackingState {
+        override_status: Option<String>,
+        carrier_status: Option<String>,
+        archived: bool,
+        tracker_id: Option<String>,
+        registration_started_at: Option<i64>,
+        registration_state: String,
+        last_error: Option<String>,
+        last_error_code: Option<String>,
+        last_provider_status: Option<i64>,
+        last_provider_error_code: Option<String>,
+        attempts: i64,
+        next_attempt_at: Option<i64>,
+        lease_token: Option<String>,
+        lease_until: Option<i64>,
+        last_attempt_at: Option<i64>,
+        last_success_at: Option<String>,
+        revision: i64,
+        updated_at: String,
+    }
+    impl TrackingState {
+        async fn load(pool: &SqlitePool, id: Uuid) -> Self {
+            sqlx::query_as(
+                "SELECT override_status,carrier_status,archived,tracker_id,
+                 registration_started_at,registration_state,last_error,
+                 last_error_code,last_provider_status,last_provider_error_code,attempts,
+                 next_attempt_at,lease_token,lease_until,last_attempt_at,last_success_at,
+                 revision,updated_at FROM shipments WHERE id=?",
+            )
+            .bind(id.to_string())
+            .fetch_one(pool)
+            .await
+            .unwrap()
+        }
+    }
+    #[derive(Debug, PartialEq, Eq, sqlx::FromRow)]
+    struct HistoryRow {
+        id: i64,
+        shipment_id: String,
+        kind: String,
+        actor_id: String,
+        at: String,
+        detail: String,
+        snapshot: Option<String>,
+    }
+    #[derive(Debug, PartialEq, Eq, sqlx::FromRow)]
+    struct StateEventRow {
+        id: i64,
+        shipment_id: String,
+        event_type: String,
+        status: String,
+        title: String,
+        carrier: Option<String>,
+        direction: String,
+        at: String,
+    }
+
+    let directory = tempfile::tempdir().unwrap();
+    let old_migrations = directory.path().join("before-completed-tracking-errors");
+    std::fs::create_dir(&old_migrations).unwrap();
+    for entry in
+        std::fs::read_dir(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("migrations"))
+            .unwrap()
+    {
+        let entry = entry.unwrap();
+        let name = entry.file_name();
+        if name
+            .to_str()
+            .unwrap()
+            .split_once('_')
+            .unwrap()
+            .0
+            .parse::<i64>()
+            .unwrap()
+            <= 15
+        {
+            std::fs::copy(entry.path(), old_migrations.join(name)).unwrap();
+        }
+    }
+    let database = directory.path().join("completed-tracking-errors.sqlite3");
+    let old = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(
+            SqliteConnectOptions::new()
+                .filename(&database)
+                .create_if_missing(true)
+                .foreign_keys(true),
+        )
+        .await
+        .unwrap();
+    Migrator::new(old_migrations.as_path())
+        .await
+        .unwrap()
+        .run(&old)
+        .await
+        .unwrap();
+    let mut cases = Vec::new();
+    for status in [Status::Delivered, Status::Cancelled, Status::ReturnToSender] {
+        for has_tracker in [false, true] {
+            cases.push((Some(status), Status::InTransit, has_tracker, true));
+        }
+        cases.push((None, status, true, false));
+    }
+    cases.extend([
+        (Some(Status::InTransit), Status::Delivered, true, false),
+        (
+            Some(Status::OutForDelivery),
+            Status::Delivered,
+            false,
+            false,
+        ),
+        (None, Status::InTransit, false, false),
+    ]);
+    let mut expected = Vec::new();
+    for (index, (manual, carrier, has_tracker, clear)) in cases.into_iter().enumerate() {
+        let mut snapshot =
+            legacy_shipment(Some(tracking(&format!("COMPLETE{index}123"))), index == 0);
+        snapshot.status = manual.unwrap_or(carrier);
+        snapshot.carrier_status = Some(carrier);
+        snapshot.sync.tracker_id = has_tracker.then(|| format!("trk_completed_{index}"));
+        snapshot.sync.registration_state = shipments::models::RegistrationState::Rejected;
+        snapshot.sync.last_error = Some("Previous provider failure".into());
+        snapshot.status_override = manual.map(|status| shipments::models::StatusOverride {
+            status,
+            reason: "Manual confirmation".into(),
+            actor_id: "owner".into(),
+            set_at: "2026-01-02T00:00:00Z".into(),
+        });
+        sqlx::query(
+            "INSERT INTO shipments(id,title,tracking_number,tracking_carrier,archived,
+             carrier_status,override_status,override_reason,override_actor,override_at,
+             tracker_id,registration_started_at,registration_state,last_error,last_error_code,
+             last_provider_status,last_provider_error_code,attempts,next_attempt_at,
+             lease_token,lease_until,last_attempt_at,last_success_at)
+             VALUES(?,?,?,'usps',?,?,?,?,?,?,?,1700000000,'rejected',
+             'Previous provider failure','tracking_carrier_credentials_required',404,
+             'CREDENTIALS_NOT_FOUND',3,unixepoch()+600,'in-flight-registration',
+             unixepoch()+60,1700000060,'2026-01-01T00:00:00Z')",
+        )
+        .bind(snapshot.id.to_string())
+        .bind(&snapshot.title)
+        .bind(&snapshot.tracking.as_ref().unwrap().number)
+        .bind(snapshot.archived)
+        .bind(serde_json::to_string(&carrier).unwrap())
+        .bind(manual.map(|status| serde_json::to_string(&status).unwrap()))
+        .bind(manual.map(|_| "Manual confirmation"))
+        .bind(manual.map(|_| "owner"))
+        .bind(manual.map(|_| "2026-01-02T00:00:00Z"))
+        .bind(&snapshot.sync.tracker_id)
+        .execute(&old)
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO events(shipment_id,kind,actor_id,detail,snapshot) VALUES(?,'\"created\"','owner','Original tracking record',?)")
+            .bind(snapshot.id.to_string()).bind(serde_json::to_string(&snapshot).unwrap())
+            .execute(&old).await.unwrap();
+        let mut state = TrackingState::load(&old, snapshot.id).await;
+        if clear {
+            state.last_error = None;
+            state.last_error_code = None;
+            state.last_provider_status = None;
+            state.last_provider_error_code = None;
+            state.attempts = 0;
+            state.next_attempt_at = None;
+            state.registration_state = if has_tracker { "registered" } else { "pending" }.into();
+        }
+        expected.push((snapshot.id, state));
+    }
+    let history: Vec<HistoryRow> = sqlx::query_as("SELECT * FROM events ORDER BY id")
+        .fetch_all(&old)
+        .await
+        .unwrap();
+    let state_events: Vec<StateEventRow> = sqlx::query_as("SELECT * FROM state_events ORDER BY id")
+        .fetch_all(&old)
+        .await
+        .unwrap();
+    assert_eq!(history.len(), expected.len());
+    assert!(!state_events.is_empty());
+    old.close().await;
+
+    // Opening again verifies SQLx does not repeat the data repair on restart.
+    for _ in 0..2 {
+        let store = Store::open(&database).await.unwrap();
+        for (id, state) in &expected {
+            assert_eq!(&TrackingState::load(store.pool(), *id).await, state);
+            assert_eq!(store.events(*id, 0, 100).await.unwrap().len(), 1);
+        }
+        assert_eq!(
+            sqlx::query_as::<_, HistoryRow>("SELECT * FROM events ORDER BY id")
+                .fetch_all(store.pool())
+                .await
+                .unwrap(),
+            history
+        );
+        assert_eq!(
+            sqlx::query_as::<_, StateEventRow>("SELECT * FROM state_events ORDER BY id")
+                .fetch_all(store.pool())
+                .await
+                .unwrap(),
+            state_events
+        );
+        store.close().await.unwrap();
+    }
+}
+
+#[tokio::test]
 async fn configuration_migration_stops_setup_failures_but_keeps_outage_retries() {
     let directory = tempfile::tempdir().unwrap();
     let old_migrations = directory.path().join("configuration-old-migrations");
@@ -746,7 +954,7 @@ async fn carrier_history_upgrade_queues_one_enrichment_without_breaking_retry_or
     let mut expected = Vec::new();
     for (archived, terminal, manual_terminal, registered, failed, previous_due, queued) in [
         (false, true, false, true, false, None, true),
-        (false, false, true, true, false, None, true),
+        (false, false, true, true, false, None, false),
         (true, true, false, true, false, None, false),
         (true, false, false, true, false, Some(before + 1800), false),
         (false, false, false, true, true, Some(before + 900), false),

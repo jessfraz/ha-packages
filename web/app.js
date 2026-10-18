@@ -98,6 +98,10 @@ function configurationIssue(sync) {
   };
 }
 
+function manuallyCompleted(shipment) {
+  return ["delivered", "return_to_sender", "cancelled"].includes(shipment.status_override?.status);
+}
+
 function shipmentBadges(shipment, className) {
   const badges = element("div", undefined, className);
   const direction = shipment.direction === "outbound" ? "outbound" : "inbound";
@@ -109,9 +113,9 @@ function shipmentBadges(shipment, className) {
     const issue = element("span", configuration?.label || (retrying ? "Tracking retry scheduled" : "Tracking needs attention"), `badge tracking-issue${retrying ? " retrying" : ""}`);
     issue.title = shipment.sync.last_error;
     badges.append(issue);
-  } else if (shipment.sync.registration_state === "pending")
+  } else if (!manuallyCompleted(shipment) && shipment.sync.registration_state === "pending")
     badges.append(element("span", "Registration pending", "badge registration-pending"));
-  else if (shipment.sync.registration_state === "rejected")
+  else if (!manuallyCompleted(shipment) && shipment.sync.registration_state === "rejected")
     badges.append(element("span", "Registration needs attention", "badge registration-rejected"));
   if (shipment.signature_required === true || shipment.carrier_tracking?.signed_by)
     badges.append(element("span", signatureLabel(shipment), "badge signature-badge"));
@@ -1166,7 +1170,7 @@ async function show(id, preserveView = false, section = route().get("section")) 
   const configuration = configurationIssue(shipment.sync);
   const configured = enabledProviders.has(shipment.sync.provider);
   const retrying = !configuration && shipment.sync.last_error && shipment.sync.next_attempt_at != null;
-  const providerState = configuration?.label || (shipment.sync.last_error ? retrying ? "Retry scheduled" : "Needs attention"
+  const providerState = manuallyCompleted(shipment) ? "Stopped after manual completion" : configuration?.label || (shipment.sync.last_error ? retrying ? "Retry scheduled" : "Needs attention"
     : !configured ? "Not configured" : shipment.sync.last_success_at ? "Connected" : "Waiting for first check");
   provider.append(element("summary", `Tracking connection · ${providerState}`));
   if (shipment.sync.last_error) {
@@ -1187,7 +1191,7 @@ async function show(id, preserveView = false, section = route().get("section")) 
   const fields = element("dl", undefined, "shipment-details");
   const detail = (label, value) => fields.append(element("dt", label), element("dd", value));
   detail("Provider", providerNames[shipment.sync.provider] || "Tracking provider");
-  detail("Registration", shipment.sync.registration_state === "registered" ? "Registered" : shipment.sync.registration_state === "configuration_required" ? "Configuration required; saved locally" : shipment.sync.registration_state === "rejected" ? "Needs attention; review provider error" : "Pending registration; saved locally");
+  detail("Registration", shipment.sync.registration_state === "registered" ? "Registered" : manuallyCompleted(shipment) ? "Not registered; tracking stopped" : shipment.sync.registration_state === "configuration_required" ? "Configuration required; saved locally" : shipment.sync.registration_state === "rejected" ? "Needs attention; review provider error" : "Pending registration; saved locally");
   if (shipment.sync.error_code) detail("Error code", shipment.sync.error_code);
   if (shipment.sync.provider_error_code) detail("Provider error code", shipment.sync.provider_error_code);
   if (shipment.sync.provider_status) detail("Provider response", `HTTP ${shipment.sync.provider_status}`);
