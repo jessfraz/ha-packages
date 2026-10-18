@@ -214,6 +214,7 @@ select {
   font: inherit;
 }
 button {
+  min-height: 44px;
   border: 1px solid transparent;
   background: var(--accent);
   color: var(--on-accent);
@@ -473,8 +474,8 @@ dialog::backdrop {
   margin: 0;
 }
 .dialog-heading .quiet {
-  width: 40px;
-  height: 40px;
+  width: 44px;
+  height: 44px;
   flex-shrink: 0;
   padding: 0;
   font-size: 24px;
@@ -783,7 +784,7 @@ dialog::backdrop {
 .detail-fact strong {
   font-size: 15px;
   font-weight: 600;
-  overflow-wrap: anywhere;
+  overflow-wrap: break-word;
 }
 .detail-disclosure {
   border-top: 1px solid var(--line);
@@ -863,6 +864,9 @@ dialog::backdrop {
   .detail-overview { grid-template-columns: 1fr 1fr; }
   .detail-fact { padding: 14px; }
   .carrier-timeline { padding-left: 6px; }
+}
+@media (max-width: 560px) {
+  .detail-overview { grid-template-columns: minmax(0, 1fr); }
 }
 @media (prefers-color-scheme: dark) {
   :root {
