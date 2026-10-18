@@ -14,9 +14,10 @@ Add `https://github.com/jessfraz/ha-packages` in **Settings → Apps → App sto
 Repositories**, then install **Shipments**. On older Home Assistant versions,
 these settings are named **Add-ons**.
 
-Set `easypost_api_key`, then start the app. Shipments and tracking edits are
-saved locally, then registered with EasyPost in the background. The app creates and saves
-its own credentials automatically.
+Configure the provider keys you need, then start the app. Shipments and
+tracking edits are verified with the selected provider before they are saved;
+the app updates their tracking in the background. It creates and saves its
+own credentials automatically.
 
 Open the web UI from the app page, or enable **Show in sidebar**. Home
 Assistant authenticates the dashboard through ingress. Server credentials
@@ -323,7 +324,7 @@ run installation checks, or manage credentials. Credential hashes are saved
 in SQLite and survive restarts.
 
 Ingestion clients can use the [API error codes and retry
-guidance](../README.md#agents-and-human-corrections)
+guidance](../docs/api.md#agents-and-human-corrections)
 to distinguish invalid input from a provider or configuration failure.
 
 For clients on another machine, enable the app's optional `8080/tcp` network
@@ -395,7 +396,7 @@ docker run --detach --name shipments --restart unless-stopped \
   --env SHIPMENTS_API_TOKEN \
   --env SHIPMENTS_INTEGRATION_TOKEN \
   --env EASYPOST_API_KEY \
-  ghcr.io/jessfraz/ha-packages:0.5.2
+  ghcr.io/jessfraz/ha-packages:0.5.11
 ```
 
 Open `http://127.0.0.1:8080` and enter the owner API token. Save both tokens in
