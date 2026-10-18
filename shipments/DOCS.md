@@ -202,6 +202,49 @@ bundle a calendar card. Calendar Card Pro currently supports card-wide actions
 rather than a different destination for each event, so the native calendar
 click behavior does not extend to its event rows.
 
+## Ask Assist
+
+Expose `sensor.shipments_inbound_active` under **Settings → Voice assistants →
+Expose** to enable named shipment answers. Renaming the entity is supported.
+This enables access to shipment details, including outbound shipments when
+explicitly requested. Removing its exposure disables shipment queries.
+
+With Home Assistant's built-in conversation agent, ask:
+
+- "What packages are arriving today?"
+- "Which shipments are coming tomorrow?"
+- "What's out for delivery?"
+- "What arrived today?"
+- "When is my Office supplies arriving?"
+- "Where is my shipment Office supplies?"
+- "Are there any tracking problems?"
+
+Questions default to inbound shipments. Say **outbound** or **all** to select
+other directions, for example "Which outbound shipments were delivered
+today?" A title lookup searches unarchived shipment titles. If several match,
+Assist asks for a more specific title.
+Built-in phrases and spoken responses currently use English.
+
+"Arriving today" includes active carrier estimates for today's local date
+and packages currently out for delivery. Estimates are identified as estimates.
+"Delivered today" uses actual carrier delivery timestamps, not estimates or
+manual corrections. All day boundaries use Home Assistant's configured
+timezone, including daylight-saving changes.
+
+AI conversation agents using Home Assistant's **Assist / Device control** API
+also receive the `shipments__query` tool. It uses the same validated intent
+handler as local Assist, with structured results and links to each shipment.
+For sentence triggers to run before an external agent, enable **Prefer
+handling commands locally** in that assistant's settings.
+
+Answers name up to five shipments and say when there are more. Each backend
+list read is bounded to 200 records; incomplete results are marked explicitly.
+Queries read the app's synchronized database and never refresh or register
+carrier trackers. Tracking numbers, source records, credentials, and raw
+provider errors are excluded from voice and tool responses. An unavailable
+backend or mismatched app/integration release produces an unavailable answer,
+not a zero count.
+
 ## Shipment events
 
 Use the native `event.shipments` entity for `out_for_delivery`, `delivered`,

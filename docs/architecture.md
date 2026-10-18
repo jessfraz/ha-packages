@@ -85,6 +85,21 @@ rather than assuming indefinite billing protection. See [EasyPost's tracker
 contract](https://docs.easypost.com/docs/trackers). SQLite leases and tracking
 generation fences still prevent stale responses from overwriting edits.
 
+## Assist
+
+The integration's `voice.py` validates bounded database projections and builds
+typed answers for shipment queries. `intent.py` owns the native intent schema;
+`llm.py` contributes Home Assistant's standard `IntentTool` for that same
+handler. Native sentence triggers are registered through Home Assistant's
+public conversation API and removed with the config entry.
+
+The registered inbound-active sensor acts as the Assist exposure gateway.
+Queries resolve it by unique ID and check exposure and caller read permission
+before reading, then recheck after the response to handle unloads or revoked
+access. Satellite requests without a user still require exposure. Only bounded
+safe fields reach speech or AI tools; provider access remains with the Rust
+worker. A voice query never requests a tracking refresh.
+
 ## Logs and backups
 
 The app writes JSON logs to stderr, visible in the Home Assistant app log or

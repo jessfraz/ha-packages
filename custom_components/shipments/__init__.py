@@ -12,6 +12,7 @@ from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.typing import ConfigType
 from homeassistant.loader import async_get_integration
 
+from .assist_sentences import async_register_sentences
 from .client import ShipmentsClient
 from .const import CONF_ADDON_SLUG, CONF_BACKEND_URL, CONF_TOKEN, DOMAIN
 from .coordinator import EventCheckpoint, ShipmentsCoordinator
@@ -50,6 +51,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ShipmentsConfigEntry) ->
     await coordinator.async_config_entry_first_refresh()
     entry.runtime_data = coordinator
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+    await async_register_sentences(hass, entry)
     module_url = "/shipments-static/calendar-links.js?" + urlencode(
         {"v": str(integration.version)}
     )

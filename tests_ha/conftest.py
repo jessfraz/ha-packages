@@ -11,6 +11,7 @@ from aiohttp import web
 from homeassistant.auth.const import GROUP_ID_USER
 from homeassistant.core import HomeAssistant, State
 from homeassistant.loader import async_get_integration
+from homeassistant.setup import async_setup_component
 from pytest_homeassistant_custom_component.common import MockConfigEntry, MockUser
 
 from custom_components.shipments.const import CONF_BACKEND_URL, CONF_TOKEN, DOMAIN
@@ -270,6 +271,12 @@ class Backend:
 @pytest.fixture(autouse=True)
 def custom_integrations(enable_custom_integrations) -> None:
     """Enable loading the actual integration from custom_components."""
+
+
+@pytest.fixture(autouse=True)
+async def native_exposure(hass: HomeAssistant) -> None:
+    """Initialize Core's real exposure registry omitted by the test harness."""
+    assert await async_setup_component(hass, "homeassistant", {})
 
 
 @pytest.fixture

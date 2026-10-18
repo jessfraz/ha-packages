@@ -70,6 +70,9 @@ The integration provides:
   package details for dashboard lists.
 - A calendar of inbound delivery estimates. Click an event in the native
   calendar to open that shipment in the app.
+- [Assist queries](shipments/DOCS.md#ask-assist) for arrivals, confirmed
+  deliveries, package status, and tracking problems. Local Assist and AI
+  assistants use the same shipment data.
 - Tracking-error indicators, shipment events for automations, and actions to
   refresh tracking, correct a status, or archive a shipment.
 
