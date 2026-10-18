@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.6.3
+
+- Keep every button at least 44 pixels wide, including short direction tabs.
+
 ## 0.6.2
 
 - Stack shipment detail facts on narrow screens so labels and values stay

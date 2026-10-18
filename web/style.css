@@ -214,6 +214,7 @@ select {
   font: inherit;
 }
 button {
+  min-width: 44px;
   min-height: 44px;
   border: 1px solid transparent;
   background: var(--accent);
