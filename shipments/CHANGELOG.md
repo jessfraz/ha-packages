@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.5.13
+
+- Close shipment details and the editor when clicking the backdrop. Keep
+  clicks inside the dialog and drags from inside from dismissing it, and
+  preserve the list or shipment URL when closing.
+
 ## 0.5.12
 
 - Open active inbound shipments by default from the Home Assistant sidebar

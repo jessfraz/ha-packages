@@ -1408,6 +1408,28 @@ document.querySelectorAll("[data-close]").forEach((button) => {
     else closeEditor();
   });
 });
+for (const [id, close] of [["detail", closeDetail], ["editor", closeEditor]]) {
+  const dialog = byId(id);
+  let pressedBackdrop = false;
+  const onBackdrop = (event) => {
+    const bounds = dialog.getBoundingClientRect();
+    return event.target === dialog &&
+      (event.clientX < bounds.left || event.clientX > bounds.right ||
+       event.clientY < bounds.top || event.clientY > bounds.bottom);
+  };
+  dialog.addEventListener("pointerdown", (event) => {
+    pressedBackdrop = onBackdrop(event);
+  });
+  dialog.addEventListener("pointercancel", () => { pressedBackdrop = false; });
+  dialog.addEventListener("click", (event) => {
+    // Releasing a drag outside or clicking the dialog's padding keeps it open.
+    const dismiss = pressedBackdrop && onBackdrop(event);
+    pressedBackdrop = false;
+    if (!dismiss) return;
+    userNavigation();
+    close();
+  });
+}
 // Invalidate on Escape before its queued close event. Close events belonging
 // to a dismissed dialog must not cancel a newer detail request still loading.
 byId("detail").addEventListener("cancel", (event) => {
