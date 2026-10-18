@@ -2,7 +2,8 @@
 
 ## 0.6.3
 
-- Keep every button at least 44 pixels wide, including short direction tabs.
+- Keep buttons at least 44 pixels wide and text inputs and selects at least
+  44 pixels tall, including short direction tabs and shipment editor fields.
 
 ## 0.6.2
 

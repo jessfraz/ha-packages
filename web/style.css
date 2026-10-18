@@ -250,6 +250,10 @@ select {
   background: var(--paper);
   color: inherit;
 }
+input:not([type="checkbox"]):not([type="radio"]),
+select {
+  min-height: 44px;
+}
 input:focus,
 select:focus,
 button:focus-visible,
