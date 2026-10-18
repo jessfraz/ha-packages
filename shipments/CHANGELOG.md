@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.5.10
+
+- Add a parcel icon for the Home Assistant integration and app, with light,
+  dark and high-resolution integration variants.
+- Show the icon and README in HACS details. Document the HACS 2.0.5 store-tile
+  limitation for custom integrations with local brand images.
+
 ## 0.5.9
 
 - Make tracking numbers unique across all shipments, including archived records,
