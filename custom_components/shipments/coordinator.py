@@ -82,6 +82,7 @@ class ShipmentsCoordinator(DataUpdateCoordinator[dict[str, int]]):
         self.client = client
         self._entry = entry
         self._version = version
+        self.last_backend_version: str | None = None
         self.inbound_estimates: tuple[DeliveryEstimate, ...] = ()
         self.shipment_items: dict[str, ShipmentItems] = {}
         self._event_store = Store[EventCheckpoint](
@@ -205,6 +206,7 @@ class ShipmentsCoordinator(DataUpdateCoordinator[dict[str, int]]):
         version = data.get("version") if isinstance(data, dict) else None
         if not isinstance(version, str) or not version or len(version) > 64:
             raise ValueError("Invalid backend version")
+        self.last_backend_version = version
         if version != self._version:
             ir.async_create_issue(
                 self.hass,
