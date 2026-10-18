@@ -95,6 +95,56 @@ pub struct SourceClaim {
     token: String,
 }
 
+pub struct TrackingClaim {
+    number: String,
+    token: String,
+}
+
+impl TrackingClaim {
+    async fn renew(&self, store: &Store) -> Result<bool, sqlx::Error> {
+        Ok(sqlx::query("UPDATE admission_tracking SET lease_until=unixepoch()+? WHERE tracking_number=? AND lease_token=? AND lease_until>unixepoch()")
+            .bind(LEASE_SECONDS).bind(&self.number).bind(&self.token).execute(store.pool()).await?.rows_affected() == 1)
+    }
+}
+
+/// Reserve the canonical number across providers until the shipment write has
+/// committed. Keep provider verification records separate for reconciliation.
+pub async fn claim_tracking(store: &Store, number: &str) -> Result<TrackingClaim, HttpError> {
+    let token = Uuid::now_v7().to_string();
+    let acquired = sqlx::query("INSERT INTO admission_tracking (tracking_number,lease_token,lease_until) VALUES (?,?,unixepoch()+?) ON CONFLICT(tracking_number) DO UPDATE SET lease_token=excluded.lease_token,lease_until=excluded.lease_until WHERE admission_tracking.lease_until<=unixepoch()")
+        .bind(number).bind(&token).bind(LEASE_SECONDS).execute(store.pool()).await.map_err(crate::error::Error::from)?.rows_affected();
+    if acquired == 0 {
+        return Err(busy(LEASE_SECONDS));
+    }
+    Ok(TrackingClaim {
+        number: number.into(),
+        token,
+    })
+}
+
+pub async fn release_tracking(store: &Store, claim: TrackingClaim) -> Result<(), HttpError> {
+    sqlx::query("DELETE FROM admission_tracking WHERE tracking_number=? AND lease_token=?")
+        .bind(claim.number)
+        .bind(claim.token)
+        .execute(store.pool())
+        .await
+        .map_err(crate::error::Error::from)?;
+    Ok(())
+}
+
+/// Fence the final local write as well as paid registration. Expired owners
+/// cannot renew or release a successor's claim.
+pub async fn renew_tracking(store: &Store, claim: &TrackingClaim) -> Result<(), HttpError> {
+    if !claim
+        .renew(store)
+        .await
+        .map_err(crate::error::Error::from)?
+    {
+        return Err(busy(LEASE_SECONDS));
+    }
+    Ok(())
+}
+
 /// Reserve an imported source before a potentially billable request. Other
 /// creates and source attachments respect this lease without holding SQLite
 /// transactions across network calls. Cancellation releases it by expiry.
@@ -180,6 +230,7 @@ pub async fn bind_request(
 
 pub async fn verify(
     store: &Store,
+    claim: &TrackingClaim,
     provider: Option<Arc<dyn ShippingApi>>,
     tracking: &InputTracking,
     log: &slog::Logger,
@@ -270,9 +321,15 @@ pub async fn verify(
             Some(tracker) => Ok(tracker),
             None => {
                 let prepared = provider.prepare_registration(registration).await?;
-                let owned: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM tracking_verifications WHERE provider=? AND tracking_number=? AND lease_token=? AND lease_until>unixepoch())")
-                    .bind(provider_id).bind(&tracking.number).bind(&token).fetch_one(store.pool()).await
+                // Preparation can involve multiple bounded lookups. Renew both
+                // live claims before the bounded registration request begins.
+                let number_owned = claim.renew(store).await
                     .map_err(|_| crate::shipping_api::error::Error::new(provider.id(), crate::shipping_api::error::ErrorKind::Configuration))?;
+                let owned = if number_owned {
+                    sqlx::query("UPDATE tracking_verifications SET lease_until=unixepoch()+? WHERE provider=? AND tracking_number=? AND lease_token=? AND lease_until>unixepoch()")
+                        .bind(LEASE_SECONDS).bind(provider_id).bind(&tracking.number).bind(&token).execute(store.pool()).await
+                        .map_err(|_| crate::shipping_api::error::Error::new(provider.id(), crate::shipping_api::error::ErrorKind::Configuration))?.rows_affected() == 1
+                } else { false };
                 if !owned {
                     return Err(crate::shipping_api::error::Error::new(provider.id(), crate::shipping_api::error::ErrorKind::Throttled { retry_after: 60 }));
                 }
@@ -315,5 +372,64 @@ pub async fn verify(
             slog::warn!(log, "tracking_verification"; "request_id" => request_id, "provider" => provider_id, "outcome" => "not_saved", "error_code" => error.error_code(), "provider_status" => error.provider_status(), "provider_error_code" => error.provider_error_code(), "retry_after_seconds" => delay);
             Err(failure.http(delay))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::{admission, store::Store};
+
+    #[tokio::test]
+    async fn tracking_claims_survive_restart_and_fence_expired_owners() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("claims.sqlite3");
+        let store = Store::open(&path).await.unwrap();
+        let original = admission::claim_tracking(&store, "TRACKING123456")
+            .await
+            .unwrap();
+        store.close().await.unwrap();
+        let store = Store::open(&path).await.unwrap();
+        assert!(
+            admission::claim_tracking(&store, "TRACKING123456")
+                .await
+                .is_err()
+        );
+
+        sqlx::query("UPDATE admission_tracking SET lease_until=unixepoch()+30")
+            .execute(store.pool())
+            .await
+            .unwrap();
+        admission::renew_tracking(&store, &original).await.unwrap();
+        let remaining: i64 =
+            sqlx::query_scalar("SELECT lease_until-unixepoch() FROM admission_tracking")
+                .fetch_one(store.pool())
+                .await
+                .unwrap();
+        assert!((119..=120).contains(&remaining));
+
+        sqlx::query("UPDATE admission_tracking SET lease_until=unixepoch()")
+            .execute(store.pool())
+            .await
+            .unwrap();
+        assert!(admission::renew_tracking(&store, &original).await.is_err());
+        let successor = admission::claim_tracking(&store, "TRACKING123456")
+            .await
+            .unwrap();
+        assert!(admission::renew_tracking(&store, &original).await.is_err());
+        admission::release_tracking(&store, original).await.unwrap();
+        assert!(
+            admission::claim_tracking(&store, "TRACKING123456")
+                .await
+                .is_err()
+        );
+        admission::renew_tracking(&store, &successor).await.unwrap();
+        admission::release_tracking(&store, successor)
+            .await
+            .unwrap();
+        let next = admission::claim_tracking(&store, "TRACKING123456")
+            .await
+            .unwrap();
+        admission::release_tracking(&store, next).await.unwrap();
+        store.close().await.unwrap();
     }
 }

@@ -343,27 +343,47 @@ async fn shipments_create(
         {
             saved
         } else {
-            let claim =
-                crate::admission::claim_source(store, input.source.as_ref(), &principal.actor, key)
-                    .await?;
+            let tracking_claim =
+                crate::admission::claim_tracking(store, &input.tracking.number).await?;
             let result = async {
-                let verified = crate::admission::verify(
+                // A competing admission may have committed after the first check.
+                if let Some(saved) = store
+                    .preflight_create(&input, &principal.actor, key)
+                    .await?
+                {
+                    return Ok(saved);
+                }
+                let source_claim = crate::admission::claim_source(
                     store,
-                    request
-                        .context()
-                        .provider(ProviderId::for_carrier(input.tracking.carrier)),
-                    &input.tracking,
-                    &request.log,
-                    &request.request_id,
+                    input.source.as_ref(),
+                    &principal.actor,
+                    key,
                 )
                 .await?;
-                store
-                    .create(input, &principal.actor, key, Some(&verified))
-                    .await
-                    .map_err(HttpError::from)
+                let result = async {
+                    let verified = crate::admission::verify(
+                        store,
+                        &tracking_claim,
+                        request
+                            .context()
+                            .provider(ProviderId::for_carrier(input.tracking.carrier)),
+                        &input.tracking,
+                        &request.log,
+                        &request.request_id,
+                    )
+                    .await?;
+                    crate::admission::renew_tracking(store, &tracking_claim).await?;
+                    store
+                        .create(input, &principal.actor, key, Some(&verified))
+                        .await
+                        .map_err(HttpError::from)
+                }
+                .await;
+                crate::admission::release_source(store, source_claim).await?;
+                result
             }
             .await;
-            crate::admission::release_source(store, claim).await?;
+            crate::admission::release_tracking(store, tracking_claim).await?;
             result?
         }
     };
@@ -401,56 +421,83 @@ async fn shipment_update(
     let expected_revision = revision(&request)?;
     let mut input = body.into_inner();
     validate_update(&mut input).map_err(|error| log_validation_error(&request, error, "update"))?;
-    let mut verified = None;
-    if let Some(value) = &mut input.tracking.value {
+    let store = &request.context().store;
+    let changed_tracking = if let Some(value) = &input.tracking.value {
         let tracking = value
-            .as_mut()
+            .as_ref()
             .ok_or(crate::error::Error::TrackingRequired)?;
-        let current = request.context().store.get(id).await?;
+        let current = store.get(id).await?;
         if current.revision != expected_revision {
             return Err(crate::error::Error::Precondition.into());
         }
-        if tracking.number != current.tracking.number
+        tracking.number != current.tracking.number
             || tracking.carrier != Some(current.tracking.carrier)
             || tracking.recipient_url != current.tracking.recipient_url
-        {
-            validate_admission(tracking)
-                .map_err(|error| log_validation_error(&request, error, "update"))?;
-            request
-                .context()
-                .store
+    } else {
+        false
+    };
+    let claim = if changed_tracking {
+        let tracking = input
+            .tracking
+            .value
+            .as_ref()
+            .and_then(Option::as_ref)
+            .ok_or(crate::error::Error::TrackingRequired)?;
+        validate_admission(tracking)
+            .map_err(|error| log_validation_error(&request, error, "update"))?;
+        store
+            .preflight_update(id, expected_revision, tracking)
+            .await?;
+        Some(crate::admission::claim_tracking(store, &tracking.number).await?)
+    } else {
+        None
+    };
+    let result = async {
+        let verified = if let Some(claim) = &claim {
+            let tracking = input
+                .tracking
+                .value
+                .as_ref()
+                .and_then(Option::as_ref)
+                .ok_or(crate::error::Error::TrackingRequired)?;
+            store
                 .preflight_update(id, expected_revision, tracking)
                 .await?;
-            verified = Some(
+            Some(
                 crate::admission::verify(
-                    &request.context().store,
+                    store,
+                    claim,
                     request
                         .context()
                         .provider(ProviderId::for_carrier(tracking.carrier)),
-                    input
-                        .tracking
-                        .value
-                        .as_ref()
-                        .and_then(Option::as_ref)
-                        .ok_or(crate::error::Error::TrackingRequired)?,
+                    tracking,
                     &request.log,
                     &request.request_id,
                 )
                 .await?,
-            );
+            )
+        } else {
+            None
+        };
+        if let Some(claim) = &claim {
+            crate::admission::renew_tracking(store, claim).await?;
         }
+        store
+            .update(
+                id,
+                expected_revision,
+                input,
+                &principal.actor,
+                verified.as_ref(),
+            )
+            .await
+            .map_err(HttpError::from)
     }
-    let shipment = request
-        .context()
-        .store
-        .update(
-            id,
-            expected_revision,
-            input,
-            &principal.actor,
-            verified.as_ref(),
-        )
-        .await?;
+    .await;
+    if let Some(claim) = claim {
+        crate::admission::release_tracking(store, claim).await?;
+    }
+    let shipment = result?;
     slog::info!(request.log, "tracking_registration";
         "request_id" => request.request_id.clone(), "shipment_id" => shipment.id.to_string(),
         "operation" => "update", "outcome" => "saved");

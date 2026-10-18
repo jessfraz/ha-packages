@@ -23,7 +23,7 @@ steps, provider configuration, and standalone Docker instructions. The app
 dashboard's **Installation → Run checks** verifies the service, Home Assistant
 connection, app/integration version match, authentication, read-only EasyPost
 access, and backup coverage. Update both the app and HACS integration to
-**0.5.8**, then restart Home Assistant.
+**0.5.9**, then restart Home Assistant.
 
 The supervised integration adds a stable **Shipments** sidebar panel at
 `/shipments`, available to ordinary Home Assistant users. Status corrections,
@@ -163,8 +163,12 @@ There is no separate recovery endpoint.
 
 Shipment creates require `Idempotency-Key`. The committed response survives
 restarts; retrying the same request returns it. A different input with the same key
-returns `409`. An active tracking identity or source cannot belong to a second
-record. Archive an old shipment before reusing its tracking number.
+returns `409`. A normalized tracking number belongs to exactly one record,
+including archived shipments, other carriers and either direction. A duplicate
+create or tracking edit returns `409 tracking_duplicate` with the existing
+shipment's ID before contacting a provider. Open that shipment or restore it
+if archived; archiving never releases its number. Imported sources are also
+unique. Concurrent admissions reserve the number across providers until saved.
 
 Reads and writes return an `ETag` containing the shipment revision. Every write
 to an existing shipment requires that value in `If-Match`. A stale edit returns
@@ -287,6 +291,8 @@ the shipment with the same safe error codes:
 | --- | --- | --- |
 | HTTP 400 | `tracking_required` | Supply a tracking number; tracking cannot be cleared. |
 | HTTP 400 | `tracking_invalid` | Check the number's format; unsupported carrier values are also rejected by the enum. |
+| HTTP 409 | `tracking_duplicate` | Use the existing shipment ID in the message. Restore it if archived; changing carrier or direction does not allow a second record. |
+| HTTP 503 | `tracking_verification_pending` | Another request is verifying this number, or verification is backing off. Wait for `Retry-After` and retry the original request and key. |
 | HTTP 400 / tracking issue | `tracking_unsupported` | The provider could not match the number to an available carrier. Select the carrier from the shipping notice and check its account setup. This does not establish that the number is invalid. |
 | HTTP 400 / tracking issue | `tracking_invalid`, `tracking_carrier_mismatch`, `tracking_carrier_ambiguous` | Correct the number or specify the right carrier. |
 | HTTP 400 | `tracking_recipient_url_required`, `tracking_recipient_url_invalid`, `tracking_recipient_url_mismatch` | Supply the original DoorDash recipient link matching this tracking number. The number alone is insufficient. |
@@ -382,6 +388,11 @@ with their sources, history and create replays. Complete records are retained.
 The DoorDash recipient-tracking migration also removes legacy DoorDash records
 without their required original recipient link. Re-add those shipments with
 the original link if needed.
+
+Tracking numbers are globally unique from 0.5.9. This migration preserves all
+records and history. If a legacy database contains duplicate numbers, upgrade
+stops atomically instead of choosing a record to delete. Resolve those records
+before retrying the upgrade.
 
 The app writes JSON logs to stderr, visible in the Home Assistant app log or
 container logs. Entries include UTC timestamps, request IDs, safe route
