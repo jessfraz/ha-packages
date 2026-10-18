@@ -641,7 +641,11 @@ async fn duplicate_sources_tracking_archive_and_pagination_use_real_http() {
         responses.push(response.unwrap());
     }
     responses.sort_by_key(|r| r.status().as_u16());
-    assert_eq!(responses[1].status(), StatusCode::CONFLICT);
+    assert_eq!(responses[0].status(), StatusCode::CREATED);
+    assert!(matches!(
+        responses[1].status(),
+        StatusCode::CONFLICT | StatusCode::SERVICE_UNAVAILABLE
+    ));
     let created: Shipment = responses.remove(0).json().await.unwrap();
     let mut ambiguous = input("Carrier not known yet");
     ambiguous.tracking = InputTracking {

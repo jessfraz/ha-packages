@@ -24,6 +24,10 @@ pub enum Error {
     NotFound,
     #[error("{0}")]
     Conflict(String),
+    #[error(
+        "This tracking number already belongs to shipment {shipment_id}, including if archived or assigned to another carrier. Use that shipment, or restore it if archived."
+    )]
+    TrackingDuplicate { shipment_id: uuid::Uuid },
     #[error("shipment changed; fetch its current revision before editing")]
     Precondition,
     #[error(transparent)]
@@ -44,7 +48,9 @@ impl From<Error> for dropshot::HttpError {
             | Error::InvalidRecipientLink => dropshot::ClientErrorStatusCode::BAD_REQUEST,
             Error::Invalid(_) => dropshot::ClientErrorStatusCode::BAD_REQUEST,
             Error::NotFound => dropshot::ClientErrorStatusCode::NOT_FOUND,
-            Error::Conflict(_) => dropshot::ClientErrorStatusCode::CONFLICT,
+            Error::Conflict(_) | Error::TrackingDuplicate { .. } => {
+                dropshot::ClientErrorStatusCode::CONFLICT
+            }
             Error::Precondition => dropshot::ClientErrorStatusCode::PRECONDITION_FAILED,
             _ => return Self::for_internal_error(error.to_string()),
         };
@@ -57,6 +63,7 @@ impl From<Error> for dropshot::HttpError {
             Error::Invalid(_) => "invalid_input",
             Error::NotFound => "not_found",
             Error::Conflict(_) => "conflict",
+            Error::TrackingDuplicate { .. } => "tracking_duplicate",
             Error::Precondition => "revision_conflict",
             _ => "internal_error",
         };

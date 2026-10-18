@@ -254,6 +254,12 @@ tracking number. New labels can be accepted before their first scan. Failed
 detection or verification shows a clear error and saves no shipment; a failed
 tracking edit preserves the original tracking identity.
 
+A tracking number can belong to only one shipment, including archived records
+and other carriers or directions. Duplicate creates and tracking edits show the
+existing shipment's ID. Open or restore that shipment instead. Spaces and letter
+case do not create a different number; carrier corrections on the existing
+shipment are allowed.
+
 The app checks for an existing matching tracker before registration, including
 old failed creates that were never saved locally. Durable verification intent
 survives timeouts and restarts. Retry the same request and idempotency key after
@@ -266,6 +272,9 @@ On upgrade, legacy records missing either a carrier or tracking number are
 removed with their sources, history and create replays.
 The recipient-tracking migration also removes DoorDash records missing the
 original tracking link. Re-add those parcels with their original link if needed.
+Upgrades to 0.5.9 preserve complete records and history. If duplicate tracking
+numbers already exist, upgrade stops without deleting them so they can be
+resolved explicitly.
 
 Open a shipment for tracking links, delivery dates, signature information and
 carrier scan history. Action buttons and manual corrections follow history.

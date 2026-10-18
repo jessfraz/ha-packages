@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.5.9
+
+- Make tracking numbers unique across all shipments, including archived records,
+  different carriers and both directions. Reject duplicate creates and tracking
+  edits before provider requests, with a clear error naming the existing record.
+- Reserve each number across providers during verification and saving so
+  simultaneous requests cannot register it twice. Preserve idempotent replays
+  and allow carrier corrections on the original shipment.
+- Preserve existing data on upgrade. Stop atomically if a legacy database has
+  duplicate numbers instead of silently deleting records or history.
+
 ## 0.5.8
 
 - Clear tracking issues when a shipment is manually marked delivered, returned

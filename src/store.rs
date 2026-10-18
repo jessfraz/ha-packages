@@ -493,7 +493,7 @@ impl Store {
             number: input.tracking.number.clone(),
             recipient_url: input.tracking.recipient_url.clone(),
         };
-        Self::check_tracking(&mut tx, id, &tracking).await?;
+        Self::check_tracking_number(&mut tx, id, &tracking.number).await?;
         sqlx::query("INSERT INTO shipments (id,title,direction,merchant,order_reference,signature_required,tracking_carrier,tracking_number,recipient_url,tracking_provider,next_attempt_at) VALUES (?,?,?,?,?,?,?,?,?,?,unixepoch())")
             .bind(id.to_string()).bind(&input.title).bind(input.direction.as_str()).bind(&input.merchant).bind(&input.order_reference)
             .bind(input.signature_required)
@@ -545,14 +545,7 @@ impl Store {
                 ));
             }
         }
-        if let Some(carrier) = input.tracking.carrier {
-            let tracking = Tracking {
-                carrier,
-                number: input.tracking.number.clone(),
-                recipient_url: input.tracking.recipient_url.clone(),
-            };
-            Self::check_tracking(&mut tx, Uuid::now_v7(), &tracking).await?;
-        }
+        Self::check_tracking_number(&mut tx, Uuid::now_v7(), &input.tracking.number).await?;
         tx.commit().await?;
         Ok(None)
     }
@@ -566,16 +559,7 @@ impl Store {
         let mut tx = self.transaction().await?;
         let current = Self::get_in(&mut tx, id).await?;
         Self::check_revision(&current, revision)?;
-        if !current.archived
-            && let Some(carrier) = tracking.carrier
-        {
-            let tracking = Tracking {
-                carrier,
-                number: tracking.number.clone(),
-                recipient_url: tracking.recipient_url.clone(),
-            };
-            Self::check_tracking(&mut tx, id, &tracking).await?;
-        }
+        Self::check_tracking_number(&mut tx, id, &tracking.number).await?;
         tx.commit().await?;
         Ok(())
     }
@@ -627,9 +611,7 @@ impl Store {
         if let Some(value) = input.signature_required.value {
             shipment.signature_required = value;
         }
-        if !shipment.archived {
-            Self::check_tracking(&mut tx, id, &shipment.tracking).await?;
-        }
+        Self::check_tracking_number(&mut tx, id, &shipment.tracking.number).await?;
         sqlx::query("UPDATE shipments SET title=?,direction=?,merchant=?,order_reference=?,signature_required=?,tracking_carrier=?,tracking_number=?,recipient_url=?,tracking_provider=? WHERE id=?")
             .bind(shipment.title).bind(shipment.direction.as_str()).bind(shipment.merchant).bind(shipment.order_reference)
             .bind(shipment.signature_required)
@@ -682,19 +664,23 @@ impl Store {
         }
     }
 
-    async fn check_tracking(
+    async fn check_tracking_number(
         tx: &mut Transaction<'_, Sqlite>,
         id: Uuid,
-        tracking: &Tracking,
+        number: &str,
     ) -> Result<(), Error> {
-        // BEGIN IMMEDIATE keeps the identity check and following write atomic.
-        let carrier = tracking.carrier.as_db_key();
-        let exists:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM shipments WHERE archived=0 AND tracking_number=? AND tracking_carrier=? AND id<>?)")
-            .bind(&tracking.number).bind(&carrier).bind(id.to_string()).fetch_one(&mut **tx).await?;
-        if exists {
-            Err(Error::Conflict(
-                "tracking identity already belongs to an active shipment".into(),
-            ))
+        // BEGIN IMMEDIATE keeps the number check and following write atomic.
+        let existing: Option<String> = sqlx::query_scalar(
+            "SELECT id FROM shipments WHERE tracking_number=? AND id<>? LIMIT 1",
+        )
+        .bind(number)
+        .bind(id.to_string())
+        .fetch_optional(&mut **tx)
+        .await?;
+        if let Some(existing) = existing {
+            Err(Error::TrackingDuplicate {
+                shipment_id: parse_id(&existing)?,
+            })
         } else {
             Ok(())
         }
@@ -836,7 +822,7 @@ impl Store {
         let shipment = Self::get_in(&mut tx, id).await?;
         Self::check_revision(&shipment, revision)?;
         if !archived {
-            Self::check_tracking(&mut tx, id, &shipment.tracking).await?;
+            Self::check_tracking_number(&mut tx, id, &shipment.tracking.number).await?;
         }
         sqlx::query("UPDATE shipments SET archived=?,lease_until=NULL,lease_token=NULL,next_attempt_at=CASE WHEN ?=0 AND tracking_number IS NOT NULL AND ? AND registration_state!='rejected' THEN unixepoch() END WHERE id=?")
             .bind(archived).bind(archived).bind(!shipment.status.is_terminal()).bind(id.to_string()).execute(&mut *tx).await.map_err(unique_error)?;
