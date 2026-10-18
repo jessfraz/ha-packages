@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.6.2
+
+- Stack shipment detail facts on narrow screens so labels and values stay
+  readable. Keep long values within their cards and enlarge buttons and
+  dialog close controls to 44 pixels.
+
 ## 0.6.1
 
 - Add optional notification blueprints for delivery updates, persistent
