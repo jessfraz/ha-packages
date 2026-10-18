@@ -184,6 +184,18 @@ ETAs with a time zone create one-hour estimated windows. Missing or invalid
 dates, outbound shipments, archived records, and terminal shipments do not
 appear. Estimates can change and are not guaranteed delivery times.
 
+Click a Shipments event in Home Assistant's native calendar or calendar card
+to open that exact shipment. The integration uses the Shipments sidebar panel
+on supervised installations and the configured app URL for standalone setups.
+Update the integration, restart Home Assistant, and reload the page to load
+the calendar link support.
+
+Dashboard cards such as Calendar Card Pro can use this same standard calendar
+entity. Install and configure them separately through HACS; Shipments does not
+bundle a calendar card. Calendar Card Pro currently supports card-wide actions
+rather than a different destination for each event, so the native calendar
+click behavior does not extend to its event rows.
+
 ## Shipment events
 
 Use the native `event.shipments` entity for `out_for_delivery`, `delivered`,

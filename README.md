@@ -28,7 +28,7 @@ steps, provider configuration, and standalone Docker instructions. The app
 dashboard's **Installation → Run checks** verifies the service, Home Assistant
 connection, app/integration version match, authentication, read-only EasyPost
 access, and backup coverage. Update both the app and HACS integration to
-**0.5.10**, then restart Home Assistant.
+**0.5.11**, then restart Home Assistant.
 
 The supervised integration adds a stable **Shipments** sidebar panel at
 `/shipments`, available to ordinary Home Assistant users. Status corrections,
@@ -70,6 +70,10 @@ shipments with a carrier ETA. Date-only estimates appear as all-day entries;
 timestamp estimates use a one-hour window. Outbound, archived, and terminal
 shipments, and missing or invalid estimates, do not appear. These are carrier
 estimates, not delivery appointments.
+
+Click an event in Home Assistant's native calendar to open that shipment in the
+app. Other calendar cards can display the same entity independently; their
+support for per-event links varies.
 
 The native shipment event entity emits `out_for_delivery`, `delivered`, and
 `exception` transitions from durable backend events. Attributes include
@@ -394,7 +398,7 @@ The DoorDash recipient-tracking migration also removes legacy DoorDash records
 without their required original recipient link. Re-add those shipments with
 the original link if needed.
 
-Tracking numbers are globally unique from 0.5.10. This migration preserves all
+Tracking numbers are globally unique from 0.5.9. This migration preserves all
 records and history. If a legacy database contains duplicate numbers, upgrade
 stops atomically instead of choosing a record to delete. Resolve those records
 before retrying the upgrade.
