@@ -107,6 +107,16 @@ struct ProviderTracker {
     signed_by: Option<String>,
     #[serde(default, deserialize_with = "provider_optional")]
     est_delivery_date: Option<String>,
+    #[serde(default, deserialize_with = "provider_optional")]
+    carrier_detail: Option<ProviderCarrierDetail>,
+}
+
+#[derive(Deserialize)]
+struct ProviderCarrierDetail {
+    #[serde(default, deserialize_with = "provider_optional")]
+    est_delivery_date_local: Option<String>,
+    #[serde(default, deserialize_with = "provider_optional")]
+    est_delivery_time_local: Option<String>,
 }
 
 impl From<ProviderTracker> for Tracker {
@@ -122,7 +132,10 @@ impl From<ProviderTracker> for Tracker {
                 })
                 .collect(),
             signed_by: clean_text(raw.signed_by, 200),
-            estimated_delivery_at: clean_datetime(raw.est_delivery_date),
+            estimated_delivery_at: clean_delivery_estimate(
+                raw.est_delivery_date,
+                raw.carrier_detail,
+            ),
             delivered_at: None,
             events_truncated: false,
         };
@@ -166,6 +179,37 @@ fn clean_datetime(value: Option<String>) -> Option<String> {
         .to_offset(time::UtcOffset::UTC)
         .format(&time::format_description::well_known::Rfc3339)
         .ok()
+}
+
+/// Prefer a carrier's explicit local date for an otherwise untimed midnight
+/// UTC estimate. Never infer date precision from midnight alone: an explicit
+/// carrier time, an offset, or absent date metadata retains timed precision.
+fn clean_delivery_estimate(
+    value: Option<String>,
+    detail: Option<ProviderCarrierDetail>,
+) -> Option<String> {
+    let value = value?;
+    let date_format = time::format_description::parse_borrowed::<2>("[year]-[month]-[day]").ok()?;
+    if value.len() == 10 {
+        return time::Date::parse(&value, &date_format)
+            .ok()
+            .map(|date| date.to_string());
+    }
+    let at =
+        time::OffsetDateTime::parse(&value, &time::format_description::well_known::Rfc3339).ok()?;
+    let explicit_time = detail
+        .as_ref()
+        .and_then(|d| d.est_delivery_time_local.as_deref())
+        .is_some_and(|value| !value.trim().is_empty());
+    if at.offset() == time::UtcOffset::UTC && at.time() == time::Time::MIDNIGHT && !explicit_time {
+        let local_date = detail
+            .and_then(|d| d.est_delivery_date_local)
+            .and_then(|value| time::Date::parse(&value, &date_format).ok());
+        if let Some(date) = local_date {
+            return Some(date.to_string());
+        }
+    }
+    clean_datetime(Some(value))
 }
 
 fn normalize_event(mut event: CarrierEvent) -> Option<CarrierEvent> {
@@ -768,6 +812,65 @@ impl PreparedRegistration for EasyPostRegistration {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn estimates_keep_civil_dates_and_preserve_explicit_times() {
+        use super::{ProviderTracker, Tracker};
+        for (value, detail, expected) in [
+            (
+                "2026-10-21T00:00:00Z",
+                serde_json::json!({"est_delivery_date_local":"2026-10-21", "est_delivery_time_local":null}),
+                "2026-10-21",
+            ),
+            (
+                "2026-03-08T00:00:00+00:00",
+                serde_json::json!({"est_delivery_date_local":"2026-03-08"}),
+                "2026-03-08",
+            ),
+            ("2026-11-01", serde_json::Value::Null, "2026-11-01"),
+            (
+                "2026-10-21T00:00:00Z",
+                serde_json::Value::Null,
+                "2026-10-21T00:00:00Z",
+            ),
+            (
+                "2026-10-21T00:00:00Z",
+                serde_json::json!({"est_delivery_date_local":"2026-10-22"}),
+                "2026-10-22",
+            ),
+            (
+                "2026-10-21T00:00:00Z",
+                serde_json::json!({"est_delivery_time_local":"00:00:00"}),
+                "2026-10-21T00:00:00Z",
+            ),
+            (
+                "2026-10-21T13:00:00-07:00",
+                serde_json::Value::Null,
+                "2026-10-21T20:00:00Z",
+            ),
+            (
+                "2026-10-21T00:00:00-07:00",
+                serde_json::Value::Null,
+                "2026-10-21T07:00:00Z",
+            ),
+            (
+                "2026-10-21T00:00:00.001Z",
+                serde_json::Value::Null,
+                "2026-10-21T00:00:00.001Z",
+            ),
+        ] {
+            let raw: ProviderTracker = serde_json::from_value(serde_json::json!({
+                "id":"trk_fixture", "tracking_code":"FIXTURE-PARCEL", "carrier":"UPS",
+                "status":"in_transit", "est_delivery_date":value, "carrier_detail":detail,
+            }))
+            .unwrap();
+            let tracker: Tracker = raw.into();
+            assert_eq!(
+                tracker.carrier_tracking.estimated_delivery_at.as_deref(),
+                Some(expected)
+            );
+        }
+    }
+
     #[test]
     fn registration_windows_use_calendar_months_and_clamp_month_end() {
         for (value, months, expected) in [

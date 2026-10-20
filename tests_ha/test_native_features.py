@@ -421,6 +421,55 @@ async def test_calendar_follows_pages_and_returns_only_intersecting_estimates(
     assert "Carrier estimates can change" in events[0]["description"]
 
 
+@pytest.mark.parametrize(
+    ("estimate", "expected"),
+    [
+        ("2026-03-08", {"date": "2026-03-08"}),
+        ("2026-11-01", {"date": "2026-11-01"}),
+        ("2026-10-21", {"date": "2026-10-21"}),
+        ("2026-10-21T00:00:00Z", {"dateTime": "2026-10-20T17:00:00-07:00"}),
+        ("2026-11-02T00:00:00Z", {"dateTime": "2026-11-01T16:00:00-08:00"}),
+    ],
+)
+async def test_calendar_preserves_date_precision_and_genuine_timed_estimates(
+    hass: HomeAssistant,
+    hass_client,
+    entry,
+    backend: Backend,
+    estimate: str,
+    expected: dict[str, str],
+) -> None:
+    backend.responses[("GET", "/v1/delivery-estimates?limit=200")] = (
+        200,
+        json.dumps(
+            {
+                "items": [
+                    {
+                        "id": SHIPMENT_ID,
+                        "title": "Fixture parcel",
+                        "carrier": "UPS",
+                        "direction": "inbound",
+                        "status": "in_transit",
+                        "estimated_delivery_at": estimate,
+                    }
+                ],
+                "next_page": None,
+            }
+        ).encode(),
+        {},
+    )
+    await entry.runtime_data.async_refresh()
+    client = await hass_client()
+    response = await client.get(
+        "/api/calendars/calendar.shipments_inbound_deliveries",
+        params={"start": "2026-01-01T00:00:00Z", "end": "2027-01-01T00:00:00Z"},
+    )
+    assert response.status == 200
+    events = await response.json()
+    assert len(events) == 1
+    assert events[0]["start"] == expected
+
+
 async def test_version_mismatch_repairs_clear_when_versions_match(
     hass: HomeAssistant, entry, backend: Backend
 ) -> None:

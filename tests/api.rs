@@ -936,6 +936,23 @@ async fn browser_authentication_mode_comes_only_from_the_listener() {
         "text/javascript; charset=utf-8"
     );
     assert_eq!(module.headers()["cache-control"], "no-store");
+    let dates = standalone
+        .request(Method::GET, "/dates.js")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(dates.status(), StatusCode::OK);
+    assert_eq!(
+        dates.headers()["content-type"],
+        "text/javascript; charset=utf-8"
+    );
+    assert!(
+        dates
+            .text()
+            .await
+            .unwrap()
+            .contains("export function calendarDate")
+    );
     standalone.close().await;
 
     let ingress = App::new(Some("127.0.0.1".parse().unwrap())).await;
