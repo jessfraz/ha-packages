@@ -1020,6 +1020,14 @@ async fn script(request: RequestContext<Arc<Context>>) -> Result<Response<Body>,
         "text/javascript; charset=utf-8",
     )
 }
+#[endpoint {method=GET,path="/dates.js",tags=["web"]}]
+async fn date_script(request: RequestContext<Arc<Context>>) -> Result<Response<Body>, HttpError> {
+    ingress_access(&request)?;
+    static_response(
+        include_str!("../web/dates.js"),
+        "text/javascript; charset=utf-8",
+    )
+}
 #[endpoint {method=GET,path="/style.css",tags=["web"]}]
 async fn style(request: RequestContext<Arc<Context>>) -> Result<Response<Body>, HttpError> {
     ingress_access(&request)?;
@@ -1028,7 +1036,7 @@ async fn style(request: RequestContext<Arc<Context>>) -> Result<Response<Body>, 
 
 pub fn description() -> Result<ApiDescription<Arc<Context>>> {
     let mut api = ApiDescription::new();
-    let endpoints: [dropshot::ApiEndpoint<Arc<Context>>; 27] = [
+    let endpoints: [dropshot::ApiEndpoint<Arc<Context>>; 28] = [
         shipments_list.into(),
         carriers_list.into(),
         shipments_create.into(),
@@ -1055,6 +1063,7 @@ pub fn description() -> Result<ApiDescription<Arc<Context>>> {
         index.into(),
         script.into(),
         connection_script.into(),
+        date_script.into(),
         style.into(),
     ];
     for endpoint in endpoints {

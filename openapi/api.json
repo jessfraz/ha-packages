@@ -1284,7 +1284,7 @@
   "info": {
     "description": "Persistent local shipment records, manual corrections, and carrier synchronization. Use a Bearer owner or ingestion token. Creates require Idempotency-Key; writes to an existing shipment require its quoted revision in If-Match.",
     "title": "Shipments API",
-    "version": "0.6.3"
+    "version": "0.6.4"
   },
   "openapi": "3.0.3",
   "paths": {
@@ -1327,6 +1327,24 @@
     "/connection.js": {
       "get": {
         "operationId": "connection_script",
+        "responses": {
+          "default": {
+            "content": {
+              "*/*": {
+                "schema": {}
+              }
+            },
+            "description": ""
+          }
+        },
+        "tags": [
+          "web"
+        ]
+      }
+    },
+    "/dates.js": {
+      "get": {
+        "operationId": "date_script",
         "responses": {
           "default": {
             "content": {
