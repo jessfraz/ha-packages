@@ -5,6 +5,7 @@
 - Keep date-only carrier estimates on their stated calendar day in Home
   Assistant and the shipment list. Preserve actual timed estimates, including
   explicit carrier times and timezone offsets.
+- Update TLS trust dependencies to reject distrusted emSign intermediates.
 
 ## 0.6.3
 
