@@ -29,8 +29,9 @@ https://github.com/jessfraz/ha-packages
    **Integration**. Download **Shipments** and restart Home Assistant.
 3. Confirm the discovered connection under **Settings → Devices & services**.
 
-Open **Shipments** in the sidebar. Pairing and dashboard authentication use
-Home Assistant; there is no token to create or copy during setup.
+Enable **Show in sidebar** on the Shipments app page, then open **Shipments**
+in the sidebar. Pairing and dashboard authentication use Home Assistant;
+there is no token to create or copy during setup.
 
 See the [installation guide](shipments/DOCS.md) for configuration, pairing,
 updates, and backups. Keep the app and integration on the same release.

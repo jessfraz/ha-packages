@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.6.5
+
+- Let the app's **Show in sidebar** setting own the Shipments sidebar entry.
+  Keep the integration's stable route hidden so existing shipment, calendar,
+  and notification links continue to work without a second sidebar entry.
+
 ## 0.6.4
 
 - Keep date-only carrier estimates on their stated calendar day in Home

@@ -58,14 +58,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ShipmentsConfigEntry) ->
     frontend.add_extra_js_url(hass, module_url)
     entry.async_on_unload(lambda: frontend.remove_extra_js_url(hass, module_url))
     if addon_slug := entry.data.get(CONF_ADDON_SLUG):
+        # Retain existing deep links; only Supervisor owns the sidebar entry.
         frontend.async_register_built_in_panel(
             hass,
             "app",
-            sidebar_title="Shipments",
-            sidebar_icon="mdi:package-variant",
             frontend_url_path="shipments",
             config={"addon": addon_slug},
             require_admin=False,
+            show_in_sidebar=False,
         )
         entry.async_on_unload(lambda: frontend.async_remove_panel(hass, "shipments"))
 

@@ -507,8 +507,13 @@ async def test_old_backend_missing_new_endpoint_still_reports_version_mismatch(
     }
 
 
-async def test_supervised_panel_uses_stable_path_actual_slug_and_normal_user_access(
-    hass: HomeAssistant, backend: Backend, hass_admin_user, hass_user
+@pytest.mark.parametrize("app_sidebar_visible", [False, True])
+async def test_supervised_route_leaves_sidebar_to_app_and_preserves_user_access(
+    hass: HomeAssistant,
+    backend: Backend,
+    hass_admin_user,
+    hass_user,
+    app_sidebar_visible: bool,
 ) -> None:
     MockUser(is_active=False, groups=hass_admin_user.groups).add_to_hass(hass)
     backend.responses[("POST", "/v1/integration/presence")] = (204, b"", {})
@@ -527,6 +532,26 @@ async def test_supervised_panel_uses_stable_path_actual_slug_and_normal_user_acc
     assert panel.component_name == "app"
     assert panel.config == {"addon": "actualprefix_shipments"}
     assert panel.require_admin is False
+    assert panel.sidebar_title is None
+    assert panel.sidebar_icon is None
+    assert panel.show_in_sidebar is False
+    assert panel.to_response()["show_in_sidebar"] is False
+    if app_sidebar_visible:
+        frontend.async_register_built_in_panel(
+            hass,
+            "app",
+            sidebar_title="Shipments",
+            frontend_url_path="actualprefix_shipments",
+            config={"addon": "actualprefix_shipments"},
+            require_admin=False,
+        )
+    assert [
+        path
+        for path, registered in hass.data[frontend.DATA_PANELS].items()
+        if registered.config == {"addon": "actualprefix_shipments"}
+        and registered.sidebar_title
+        and registered.show_in_sidebar
+    ] == (["actualprefix_shipments"] if app_sidebar_visible else [])
     presence = next(
         request
         for request in backend.requests
@@ -535,6 +560,16 @@ async def test_supervised_panel_uses_stable_path_actual_slug_and_normal_user_acc
     assert json.loads(presence.body)["administrator_ids"] == [hass_admin_user.id]
     assert await hass.config_entries.async_unload(entry.entry_id)
     assert "shipments" not in hass.data[frontend.DATA_PANELS]
+    assert ("actualprefix_shipments" in hass.data[frontend.DATA_PANELS]) is (
+        app_sidebar_visible
+    )
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done(wait_background_tasks=True)
+    reloaded = hass.data[frontend.DATA_PANELS]["shipments"]
+    assert reloaded.sidebar_title is None
+    assert reloaded.show_in_sidebar is False
+    assert reloaded.config == {"addon": "actualprefix_shipments"}
+    assert reloaded.require_admin is False
 
 
 async def test_removing_entry_deletes_only_its_checkpoint_and_repairs(

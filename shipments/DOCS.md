@@ -47,11 +47,13 @@ The app shares a separate integration credential through authenticated
 Supervisor discovery. Pairing does not require pasting a URL or token.
 Internal app networking does not require a host port mapping.
 
-The integration also adds a **Shipments** sidebar panel at the stable
-`/shipments` path. Ordinary Home Assistant users can open the dashboard;
-administrator-only actions still enforce administrator access. The device's
-**Visit** link opens this panel for supervised apps. A standalone installation
-uses its configured backend URL instead.
+The app's **Show in sidebar** setting controls the Shipments sidebar entry.
+The integration retains a hidden `/shipments` route for existing shipment,
+calendar, and notification links, without adding another sidebar entry.
+Ordinary Home Assistant users can open the dashboard; administrator-only
+actions still enforce administrator access. The device's **Visit** link uses
+this route for supervised apps. A standalone installation uses its configured
+backend URL instead.
 
 If there is no discovered card, choose **Add integration → Shipments → Connect
 the Home Assistant app**. Start the app if prompted, then select **Submit** to
