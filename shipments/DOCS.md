@@ -47,11 +47,13 @@ The app shares a separate integration credential through authenticated
 Supervisor discovery. Pairing does not require pasting a URL or token.
 Internal app networking does not require a host port mapping.
 
-The integration also adds a **Shipments** sidebar panel at the stable
-`/shipments` path. Ordinary Home Assistant users can open the dashboard;
-administrator-only actions still enforce administrator access. The device's
-**Visit** link opens this panel for supervised apps. A standalone installation
-uses its configured backend URL instead.
+The app's **Show in sidebar** setting controls the Shipments sidebar entry.
+The integration retains a hidden `/shipments` route for existing shipment,
+calendar, and notification links, without adding another sidebar entry.
+Ordinary Home Assistant users can open the dashboard; administrator-only
+actions still enforce administrator access. The device's **Visit** link uses
+this route for supervised apps. A standalone installation uses its configured
+backend URL instead.
 
 If there is no discovered card, choose **Add integration → Shipments → Connect
 the Home Assistant app**. Start the app if prompted, then select **Submit** to
@@ -187,7 +189,7 @@ configuration.
 Each item has `id`, `title`, `carrier`, `status`, `delivered_at`,
 `estimated_delivery`, and `url`. Dates are ISO strings or `null` when unknown.
 Titles retain their stored text. The relative URL opens that shipment through
-the Shipments panel, for example
+the hidden Shipments compatibility route, for example
 `/shipments/shipments/shipment%3D0193c69f-e5c4-7e93-b6cb-8172dacb617e`.
 
 Today's list uses the count's exact Home Assistant local-day bounds and sorts
@@ -220,8 +222,9 @@ dates, outbound shipments, archived records, and terminal shipments do not
 appear. Estimates can change and are not guaranteed delivery times.
 
 Click a Shipments event in Home Assistant's native calendar or calendar card
-to open that exact shipment. The integration uses the Shipments sidebar panel
-on supervised installations and the configured app URL for standalone setups.
+to open that exact shipment. The integration uses the hidden Shipments route
+on supervised installations, even when **Show in sidebar** is off, and the
+configured app URL for standalone setups.
 Update the integration, restart Home Assistant, and reload the page to load
 the calendar link support.
 
