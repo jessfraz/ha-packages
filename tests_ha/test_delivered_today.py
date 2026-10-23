@@ -60,6 +60,8 @@ async def test_inbound_delivered_today_uses_ha_timezone_and_dst(
 ) -> None:
     await hass.config.async_set_time_zone(zone)
     freezer.move_to(datetime.fromisoformat(now))
+    # Finish refreshes queued by the timezone change before recording this day.
+    await hass.async_block_till_done(wait_background_tasks=True)
     backend.delivery_summary["delivered"] = 7
     backend.summaries["inbound"]["delivered"] = 24
     backend.requests.clear()
