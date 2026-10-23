@@ -189,7 +189,7 @@ configuration.
 Each item has `id`, `title`, `carrier`, `status`, `delivered_at`,
 `estimated_delivery`, and `url`. Dates are ISO strings or `null` when unknown.
 Titles retain their stored text. The relative URL opens that shipment through
-the Shipments panel, for example
+the hidden Shipments compatibility route, for example
 `/shipments/shipments/shipment%3D0193c69f-e5c4-7e93-b6cb-8172dacb617e`.
 
 Today's list uses the count's exact Home Assistant local-day bounds and sorts
@@ -222,8 +222,9 @@ dates, outbound shipments, archived records, and terminal shipments do not
 appear. Estimates can change and are not guaranteed delivery times.
 
 Click a Shipments event in Home Assistant's native calendar or calendar card
-to open that exact shipment. The integration uses the Shipments sidebar panel
-on supervised installations and the configured app URL for standalone setups.
+to open that exact shipment. The integration uses the hidden Shipments route
+on supervised installations, even when **Show in sidebar** is off, and the
+configured app URL for standalone setups.
 Update the integration, restart Home Assistant, and reload the page to load
 the calendar link support.
 
