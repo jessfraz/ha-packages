@@ -46,7 +46,7 @@ tracked before its first scan.
 | Provider | Used for |
 | --- | --- |
 | EasyPost | Most carriers, including automatic carrier detection. |
-| AfterShip | SpeedX, Sway / Returnmates, and Veho. |
+| AfterShip | Amazon MCF / Logistics, SpeedX, Sway / Returnmates, and Veho. |
 | DoorDash | Parcels with an original DoorDash Drive recipient tracking link. No API key required. |
 
 Carrier access depends on your provider account. Some carriers require their

@@ -33,6 +33,7 @@ macro_rules! carriers {
 
 carriers! {
     Accurate => "Accurate",
+    AmazonMcf => "AmazonMcf",
     AmazonMws => "AmazonMws",
     AmazonShipping => "AmazonShipping",
     Apc => "APC",

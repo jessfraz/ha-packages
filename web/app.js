@@ -290,6 +290,7 @@ async function connect(signal) {
     FedExDefault: "FedEx Default (EasyPost account)",
     DHLExpress: "DHL Express (your carrier account)",
     DHLExpressDefault: "DHL Express Default (EasyPost account)",
+    AmazonMcf: "Amazon MCF / Logistics (AfterShip)",
     SpeedX: "SpeedX (AfterShip)",
     Sway: "Sway / Returnmates (AfterShip)",
     Veho: "Veho (AfterShip)",

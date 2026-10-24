@@ -307,7 +307,7 @@ rename an entity in Home Assistant.
 | Option | Purpose |
 | --- | --- |
 | `easypost_api_key` | Enables tracking verification before saving and background tracking updates. |
-| `aftership_api_key` | Enables SpeedX, Sway / Returnmates, and Veho tracking through AfterShip. |
+| `aftership_api_key` | Enables Amazon MCF / Logistics, SpeedX, Sway / Returnmates, and Veho tracking through AfterShip. |
 
 DoorDash requires its original recipient tracking link rather than an API key.
 Other carriers and automatic carrier detection use EasyPost. Provider keys
@@ -321,8 +321,14 @@ Existing records migrate to inbound. The default list shows active inbound
 shipments. Select **All** or **Outbound** to change the direction filter.
 Leave **Carrier** on **Auto-detect**, or
 choose its canonical EasyPost carrier when detection is ambiguous.
-Select **SpeedX**, **Sway / Returnmates**, or **Veho** explicitly to use
+Select **Amazon MCF / Logistics**, **SpeedX**, **Sway / Returnmates**, or **Veho** explicitly to use
 AfterShip.
+Use **Amazon MCF / Logistics** only when the original merchant evidence identifies
+Multi-Channel Fulfillment or supplies a matching Swiship parcel link. It uses
+AfterShip `amazon-mcf`, not `amazon-order` or the UK Swiship product. Existing
+**AmazonShipping** and **AmazonMws** choices retain their EasyPost routes. A
+TBA prefix alone does not establish the carrier product. AfterShip account
+entitlements and tracking quotas still apply; this does not enable all carriers.
 Configure the AfterShip key in the app; these carriers do not fall back to
 EasyPost if verification fails. Existing Veho shipments migrate automatically:
 the next update reconciles AfterShip imports before registering a tracker.
