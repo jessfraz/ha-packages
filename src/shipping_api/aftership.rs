@@ -35,6 +35,8 @@ fn provider_error(kind: ErrorKind) -> SyncError {
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 enum Courier {
+    #[serde(rename = "amazon-mcf")]
+    AmazonMcf,
     #[serde(rename = "speedx")]
     SpeedX,
     #[serde(rename = "sway-webhook")]
@@ -46,6 +48,7 @@ enum Courier {
 impl Courier {
     fn for_carrier(carrier: Option<Carrier>) -> Result<Self, SyncError> {
         match carrier {
+            Some(Carrier::AmazonMcf) => Ok(Self::AmazonMcf),
             Some(Carrier::SpeedX) => Ok(Self::SpeedX),
             Some(Carrier::Sway) => Ok(Self::Sway),
             Some(Carrier::Veho) => Ok(Self::Veho),
@@ -57,6 +60,7 @@ impl Courier {
 
     fn slug(self) -> &'static str {
         match self {
+            Self::AmazonMcf => "amazon-mcf",
             Self::SpeedX => "speedx",
             Self::Sway => "sway-webhook",
             Self::Veho => "veho",
@@ -65,6 +69,7 @@ impl Courier {
 
     fn carrier(self) -> Carrier {
         match self {
+            Self::AmazonMcf => Carrier::AmazonMcf,
             Self::SpeedX => Carrier::SpeedX,
             Self::Sway => Carrier::Sway,
             Self::Veho => Carrier::Veho,
@@ -1239,6 +1244,58 @@ mod tests {
         let mut body = vec![0; length];
         stream.read_exact(&mut body).ok()?;
         Some((method, target, body))
+    }
+
+    #[tokio::test]
+    async fn amazon_mcf_registration_uses_its_exact_slug_without_a_merchant_connection() {
+        let mut server = Server::new();
+        let client = server.client();
+        let task = tokio::spawn(async move {
+            client
+                .prepare_registration(registration(Carrier::AmazonMcf))
+                .await
+        });
+        let lookup = server.request("GET", "trackings").await;
+        let url = Url::parse(&format!("http://localhost{}", lookup.target)).unwrap();
+        assert!(
+            url.query_pairs()
+                .any(|(key, value)| key == "slug" && value == "amazon-mcf")
+        );
+        lookup.json(200, page(Vec::new()));
+        server.detect("amazon-mcf").await;
+        let prepared = task.await.unwrap().unwrap();
+        server.no_request();
+        let task = tokio::spawn(prepared.register());
+        let request = server.request("POST", "trackings").await;
+        let body: RequestedTracking = serde_json::from_slice(&request.body).unwrap();
+        assert_eq!(body.slug, "amazon-mcf");
+        assert_eq!(body.tracking_number, NUMBER);
+        assert_eq!(body.courier_connection_id, None);
+        let mut response = pending();
+        response.slug = "amazon-mcf";
+        request.json(201, response);
+        let tracker = task.await.unwrap().unwrap();
+        assert_eq!(tracker.carrier, Carrier::AmazonMcf);
+        assert_eq!(tracker.provider, ProviderId::AfterShip);
+        assert!(tracker.carrier_tracking.events.is_empty());
+        server.no_request();
+    }
+
+    #[test]
+    fn amazon_products_keep_distinct_provider_routes() {
+        assert_eq!(
+            ProviderId::for_carrier(Some(Carrier::AmazonMcf)),
+            ProviderId::AfterShip
+        );
+        assert_eq!(
+            ProviderId::for_carrier(Some(Carrier::AmazonMws)),
+            ProviderId::EasyPost
+        );
+        assert_eq!(
+            ProviderId::for_carrier(Some(Carrier::AmazonShipping)),
+            ProviderId::EasyPost
+        );
+        assert_eq!(ProviderId::for_carrier(None), ProviderId::EasyPost);
     }
 
     #[tokio::test]

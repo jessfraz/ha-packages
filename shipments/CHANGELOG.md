@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.6.6
+
+- Track source-identified Amazon Multi-Channel Fulfillment parcels with the
+  existing AfterShip provider and its distinct `amazon-mcf` courier. Preserve
+  EasyPost AmazonShipping/AmazonMws routes and existing shipment history.
+  Provider quotas and courier verification still apply.
+
 ## 0.6.5
 
 - Let the app's **Show in sidebar** setting own the Shipments sidebar entry.
