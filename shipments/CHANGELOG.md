@@ -1,3 +1,10 @@
+## 0.6.7
+
+- Correct recipient Amazon MCF / Swiship tracking to AfterShip's `amazon`
+  courier (Amazon Shipping + Amazon MCF). Keep exact carrier detection,
+  lookup before registration and tracking-number validation. No credential
+  or subscription changes are required.
+
 # Changelog
 
 ## 0.6.6

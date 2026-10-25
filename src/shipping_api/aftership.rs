@@ -35,7 +35,10 @@ fn provider_error(kind: ErrorKind) -> SyncError {
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 enum Courier {
-    #[serde(rename = "amazon-mcf")]
+    // AfterShip identifies US recipient MCF / Swiship parcels as `amazon`
+    // (Amazon Shipping + Amazon MCF), distinct from its `amazon-mcf` courier.
+    // Detection must still confirm this exact slug before registration.
+    #[serde(rename = "amazon")]
     AmazonMcf,
     #[serde(rename = "speedx")]
     SpeedX,
@@ -60,7 +63,7 @@ impl Courier {
 
     fn slug(self) -> &'static str {
         match self {
-            Self::AmazonMcf => "amazon-mcf",
+            Self::AmazonMcf => "amazon",
             Self::SpeedX => "speedx",
             Self::Sway => "sway-webhook",
             Self::Veho => "veho",
@@ -1247,7 +1250,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn amazon_mcf_registration_uses_its_exact_slug_without_a_merchant_connection() {
+    async fn amazon_mcf_uses_captured_amazon_identity_without_a_merchant_connection() {
         let mut server = Server::new();
         let client = server.client();
         let task = tokio::spawn(async move {
@@ -1259,25 +1262,56 @@ mod tests {
         let url = Url::parse(&format!("http://localhost{}", lookup.target)).unwrap();
         assert!(
             url.query_pairs()
-                .any(|(key, value)| key == "slug" && value == "amazon-mcf")
+                .any(|(key, value)| key == "slug" && value == "amazon")
         );
         lookup.json(200, page(Vec::new()));
-        server.detect("amazon-mcf").await;
+        let detection = server.request("POST", "couriers/detect").await;
+        let input: RequestedDetection = serde_json::from_slice(&detection.body).unwrap();
+        assert_eq!(input.tracking_number, NUMBER);
+        assert_eq!(input.slug, ["amazon"]);
+        // Sanitized live response shape, with no private tracking identifier.
+        detection.respond(200, r#"{"meta":{"code":200},"data":{"total":1,"couriers":[{"slug":"amazon","required_fields":[]}]}}"#);
         let prepared = task.await.unwrap().unwrap();
         server.no_request();
         let task = tokio::spawn(prepared.register());
         let request = server.request("POST", "trackings").await;
         let body: RequestedTracking = serde_json::from_slice(&request.body).unwrap();
-        assert_eq!(body.slug, "amazon-mcf");
+        assert_eq!(body.slug, "amazon");
         assert_eq!(body.tracking_number, NUMBER);
         assert_eq!(body.courier_connection_id, None);
         let mut response = pending();
-        response.slug = "amazon-mcf";
+        response.slug = "amazon";
         request.json(201, response);
         let tracker = task.await.unwrap().unwrap();
         assert_eq!(tracker.carrier, Carrier::AmazonMcf);
         assert_eq!(tracker.provider, ProviderId::AfterShip);
         assert!(tracker.carrier_tracking.events.is_empty());
+        server.no_request();
+    }
+
+    #[tokio::test]
+    async fn amazon_mcf_empty_detection_never_falls_back_or_registers() {
+        let mut server = Server::new();
+        let client = server.client();
+        let task = tokio::spawn(async move {
+            client
+                .prepare_registration(registration(Carrier::AmazonMcf))
+                .await
+        });
+        let lookup = server.request("GET", "trackings").await;
+        assert!(lookup.target.contains("slug=amazon"));
+        lookup.json(200, page(Vec::new()));
+        let detection = server.request("POST", "couriers/detect").await;
+        let body: RequestedDetection = serde_json::from_slice(&detection.body).unwrap();
+        assert_eq!(body.slug, ["amazon"]);
+        detection.respond(
+            200,
+            r#"{"meta":{"code":200},"data":{"total":0,"couriers":[]}}"#,
+        );
+        assert_eq!(
+            task.await.unwrap().err().unwrap().error_code(),
+            "tracking_carrier_mismatch"
+        );
         server.no_request();
     }
 
