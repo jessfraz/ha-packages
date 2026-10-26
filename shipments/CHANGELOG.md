@@ -1,3 +1,10 @@
+## 0.6.8
+
+- Resolve ordinary FedEx input to the supported FedEx Default Wallet route before
+  registration. Preserve explicit custom accounts through FedExAccount, and keep
+  UPS and other product-specific routes unchanged. Retain exact stored carrier
+  history, registration recovery, global deduplication and user decisions.
+
 ## 0.6.7
 
 - Correct recipient Amazon MCF / Swiship tracking to AfterShip's `amazon`

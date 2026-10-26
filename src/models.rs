@@ -41,7 +41,83 @@ pub struct Tracking<C = crate::carrier::Carrier> {
 
 /// Carrier detection is allowed at admission. Persisted shipments always use
 /// the concrete carrier returned by the tracking provider.
-pub type InputTracking = Tracking<Option<crate::carrier::Carrier>>;
+#[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct InputTracking {
+    #[serde(
+        default,
+        deserialize_with = "input_carrier",
+        serialize_with = "output_input_carrier"
+    )]
+    #[schemars(schema_with = "input_carrier_schema")]
+    pub carrier: Option<crate::carrier::Carrier>,
+    #[serde(default)]
+    #[schemars(required)]
+    pub number: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recipient_url: Option<String>,
+}
+
+// Resolve ordinary carrier names at admission, before deduplication and any
+// provider operation. Persisted/provider Carrier values retain exact identity.
+fn input_carrier<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> Result<Option<crate::carrier::Carrier>, D::Error> {
+    use crate::carrier::Carrier;
+    Option::<String>::deserialize(d)?
+        .map(|value| {
+            if value.trim().eq_ignore_ascii_case("FedExAccount") {
+                Ok(Carrier::FedEx)
+            } else {
+                value
+                    .parse::<Carrier>()
+                    .map(|carrier| match carrier {
+                        Carrier::FedEx => Carrier::FedExDefault,
+                        other => other,
+                    })
+                    .map_err(serde::de::Error::custom)
+            }
+        })
+        .transpose()
+}
+
+fn output_input_carrier<S: serde::Serializer>(
+    carrier: &Option<crate::carrier::Carrier>,
+    s: S,
+) -> Result<S::Ok, S::Error> {
+    use crate::carrier::Carrier;
+    carrier
+        .map(|carrier| {
+            if carrier == Carrier::FedEx {
+                "FedExAccount"
+            } else {
+                carrier.as_str()
+            }
+        })
+        .serialize(s)
+}
+
+fn input_carrier_schema(
+    generator: &mut schemars::r#gen::SchemaGenerator,
+) -> schemars::schema::Schema {
+    use schemars::schema::{Schema, SchemaObject, SubschemaValidation};
+    let exact = SchemaObject {
+        instance_type: Some(schemars::schema::InstanceType::String.into()),
+        enum_values: Some(vec![serde_json::json!("FedExAccount")]),
+        ..Default::default()
+    };
+    SchemaObject {
+        subschemas: Some(Box::new(SubschemaValidation {
+            any_of: Some(vec![
+                generator.subschema_for::<Option<crate::carrier::Carrier>>(),
+                Schema::Object(exact),
+            ]),
+            ..Default::default()
+        })),
+        ..Default::default()
+    }
+    .into()
+}
 
 impl From<Tracking> for InputTracking {
     fn from(tracking: Tracking) -> Self {

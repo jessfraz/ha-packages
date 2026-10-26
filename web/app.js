@@ -286,7 +286,8 @@ async function connect(signal) {
   carrierField.replaceChildren(element("option", "Auto-detect"));
   carrierField.firstElementChild.value = "";
   const carrierLabels = {
-    FedEx: "FedEx (your carrier account)",
+    FedEx: "FedEx (EasyPost account)",
+    FedExAccount: "FedEx (your carrier account)",
     FedExDefault: "FedEx Default (EasyPost account)",
     DHLExpress: "DHL Express (your carrier account)",
     DHLExpressDefault: "DHL Express Default (EasyPost account)",
@@ -296,7 +297,7 @@ async function connect(signal) {
     Veho: "Veho (AfterShip)",
     DoorDash: "DoorDash (original tracking link)",
   };
-  for (const carrier of carriers) {
+  for (const carrier of [...carriers, "FedExAccount"]) {
     const option = element("option", carrierLabels[carrier] || carrier);
     option.value = carrier;
     carrierField.append(option);
@@ -954,7 +955,7 @@ function openEditor(shipment = null) {
       direction: shipment.direction,
       merchant: shipment.merchant,
       order_reference: shipment.order_reference,
-      carrier: shipment.tracking?.carrier,
+      carrier: shipment.tracking?.carrier === "FedEx" ? "FedExAccount" : shipment.tracking?.carrier,
       number: shipment.tracking?.number,
       recipient_url: shipment.tracking?.recipient_url,
       signature_required: shipment.signature_required == null ? "" : String(shipment.signature_required),

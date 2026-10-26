@@ -1111,3 +1111,60 @@ async fn unrecognized_error_codes_and_oversized_bodies_preserve_http_status_with
         fixture.store.close().await.unwrap();
     }
 }
+
+#[tokio::test]
+async fn ordinary_fedex_resolves_before_registration_and_replay_never_registers_twice() {
+    for rejected in [false, true] {
+        let fixture = Fixture::new().await;
+        let mut provider = Provider::new();
+        let client = EasyPostClient::for_loopback("registration-test-key", &provider.base).unwrap();
+        let owner = "carrier-default-owner-credential-at-least-32-bytes";
+        let server = shipments::api::start(
+            "127.0.0.1:0".parse().unwrap(),
+            Arc::new(shipments::api::Context::new(
+                fixture.store.clone(),
+                owner,
+                None,
+                Some(Arc::new(client)),
+            )),
+        )
+        .unwrap();
+        let endpoint = format!("http://{}/v1/shipments", server.local_addr());
+        let body = serde_json::json!({"direction":"inbound","title":"Synthetic default route parcel", "tracking":{"number":NUMBER,"carrier":"fedex"}});
+        let send = |body: serde_json::Value| {
+            let request = reqwest::Client::new()
+                .post(&endpoint)
+                .bearer_auth(owner)
+                .header("Idempotency-Key", "default-route-test")
+                .json(&body);
+            tokio::spawn(async move { request.send().await.unwrap() })
+        };
+        let task = send(body.clone());
+        provider.empty_lookup().await;
+        let request = provider.request().await;
+        let submitted: RegistrationRequest = serde_json::from_slice(&request.body).unwrap();
+        assert_eq!(submitted.tracker.carrier, "FedExDefault");
+        if rejected {
+            request.respond(404, r#"{"error":{"code":"CREDENTIALS_NOT_FOUND"}}"#.into());
+        } else {
+            let mut accepted = tracker(NUMBER);
+            accepted.carrier = "FedExDefault".into();
+            request.respond(201, serde_json::to_string(&accepted).unwrap());
+        }
+        let response = task.await.unwrap();
+        assert_eq!(response.status().as_u16(), if rejected { 400 } else { 201 });
+        // Alias resolution happens before the idempotency fingerprint as well.
+        let mut alias = body;
+        alias["tracking"]["carrier"] = serde_json::json!("FedExDefault");
+        let replay = send(alias).await.unwrap();
+        assert_eq!(replay.status().as_u16(), if rejected { 400 } else { 201 });
+        provider.no_request();
+        let count: i64 = sqlx::query_scalar("SELECT count(*) FROM shipments")
+            .fetch_one(fixture.store.pool())
+            .await
+            .unwrap();
+        assert_eq!(count, if rejected { 0 } else { 1 });
+        server.close().await.unwrap();
+        fixture.store.close().await.unwrap();
+    }
+}

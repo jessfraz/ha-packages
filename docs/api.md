@@ -114,14 +114,22 @@ page. Detailed scan history is unavailable. Missing, changed or unrecognized
 page data fails verification; an estimate never becomes an actual delivery.
 Treat recipient tracking links as private shipment data.
 
-EasyPost treats `FedEx` and `FedExDefault` as separate carrier choices.
-`FedEx` requires your own configured carrier credentials; the EasyPost Wallet
-choice is `FedExDefault`. A valid number can fail with HTTP 404 and native
-`CREDENTIALS_NOT_FOUND` when the requested choice has no credentials. This is
-an account/carrier setup error, not evidence that the tracking number is bad.
-Choose the appropriate canonical carrier or configure its account. The app
-keeps the requested carrier; it never switches to a different billable carrier
-after an uncertain result.
+Admission resolves ordinary `FedEx` (case-insensitively) to `FedExDefault`,
+the EasyPost Wallet route, before verification and registration. Explicit
+`FedExDefault` remains unchanged. Use the input alias `FedExAccount` to select
+EasyPost's separate `FedEx` route with your configured carrier account. Responses
+and saved history retain the concrete provider carrier (`FedEx` for that account
+route). The editor preserves that explicit choice when editing existing records.
+`GET /v1/carriers` lists concrete provider identities; the input schema additionally
+accepts `FedExAccount`.
+
+UPS already supports standalone tracking under `UPS`; `UPSDAP`, DHL Express,
+DHL Express Default, FedEx SmartPost and cross-border products remain distinct.
+No product is guessed, and unknown carriers fail validation. Missing provider
+configuration, unavailable verification and uncertain registration never trigger
+a second carrier registration. Existing tracker lookup, idempotency and global
+tracking-number ownership apply after input resolution. Existing shipments and
+user decisions are not migrated or re-registered by this change.
 
 Use `sort=expected` for earliest estimated delivery first, or `sort=delivered`
 for newest actual delivery first. Unknown dates come last. The date and ID

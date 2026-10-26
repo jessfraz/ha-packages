@@ -846,7 +846,17 @@ async fn required_tracking_migration_preserves_valid_records_and_historical_snap
         let valid_history = store.events(valid.id, 0, 100).await.unwrap();
         assert_eq!(valid_history.len(), 1);
         assert_eq!(
-            valid_history[0].snapshot.as_ref().unwrap().tracking,
+            valid_history[0]
+                .snapshot
+                .as_ref()
+                .unwrap()
+                .tracking
+                .clone()
+                .map(|t| InputTracking {
+                    carrier: t.carrier,
+                    number: t.number,
+                    recipient_url: t.recipient_url
+                }),
             valid.tracking
         );
         let keys = sqlx::query_scalar::<_, String>("SELECT key FROM idempotency ORDER BY key")
