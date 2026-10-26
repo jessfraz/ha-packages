@@ -1,3 +1,15 @@
+## 0.6.9
+
+- Remove artificial EasyPost request spacing and queue concurrent work within a
+  bounded deadline. Keep real provider cooldowns and avoid persisting local
+  contention as an upstream rate limit.
+- Keep delivery calendar entries visible for their full local day, including DST
+  transitions. Retain delivered shipments as clearly labeled delivery history
+  using verified actual dates; keep raw estimates and actual timestamps distinct.
+- Reconcile OnTrac OFDL scans with stale in-transit provider status using explicit
+  scan codes and chronology. Preserve raw scan evidence, user overrides and later
+  terminal outcomes.
+
 ## 0.6.8
 
 - Resolve ordinary FedEx input to the supported FedEx Default Wallet route before

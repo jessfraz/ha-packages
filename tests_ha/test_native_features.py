@@ -416,8 +416,8 @@ async def test_calendar_follows_pages_and_returns_only_intersecting_estimates(
     ]
     assert events[0]["start"] == {"date": "2026-10-20"}
     assert events[0]["end"] == {"date": "2026-10-21"}
-    assert events[1]["start"] == {"dateTime": "2026-10-21T03:00:00-07:00"}
-    assert events[1]["end"] == {"dateTime": "2026-10-21T04:00:00-07:00"}
+    assert events[1]["start"] == {"date": "2026-10-21"}
+    assert events[1]["end"] == {"date": "2026-10-22"}
     assert "Carrier estimates can change" in events[0]["description"]
 
 
@@ -427,11 +427,11 @@ async def test_calendar_follows_pages_and_returns_only_intersecting_estimates(
         ("2026-03-08", {"date": "2026-03-08"}),
         ("2026-11-01", {"date": "2026-11-01"}),
         ("2026-10-21", {"date": "2026-10-21"}),
-        ("2026-10-21T00:00:00Z", {"dateTime": "2026-10-20T17:00:00-07:00"}),
-        ("2026-11-02T00:00:00Z", {"dateTime": "2026-11-01T16:00:00-08:00"}),
+        ("2026-10-21T00:00:00Z", {"date": "2026-10-20"}),
+        ("2026-11-02T00:00:00Z", {"date": "2026-11-01"}),
     ],
 )
-async def test_calendar_preserves_date_precision_and_genuine_timed_estimates(
+async def test_calendar_uses_full_local_delivery_day_and_preserves_raw_estimate(
     hass: HomeAssistant,
     hass_client,
     entry,

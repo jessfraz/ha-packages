@@ -14,6 +14,8 @@ pub struct Error {
 pub enum ErrorKind {
     Configuration,
     Timeout,
+    LocalQueueTimeout,
+    LocalQueueFull,
     Connection,
     Http {
         status: u16,
@@ -76,6 +78,8 @@ impl Error {
             ErrorKind::RegistrationExpired => "registration_expired",
             ErrorKind::Configuration => "provider_configuration",
             ErrorKind::Timeout => "provider_timeout",
+            ErrorKind::LocalQueueTimeout => "local_provider_queue_timeout",
+            ErrorKind::LocalQueueFull => "local_provider_queue_full",
             ErrorKind::Connection => "provider_connection",
             ErrorKind::Http {
                 status: 401 | 403, ..
@@ -205,6 +209,8 @@ impl fmt::Display for Error {
         match &self.kind {
             ErrorKind::Configuration => write!(f, "invalid {provider} client configuration"),
             ErrorKind::Timeout => write!(f, "{provider} request timed out"),
+            ErrorKind::LocalQueueTimeout => write!(f, "Local {provider} request queue deadline expired before sending"),
+            ErrorKind::LocalQueueFull => write!(f, "Local {provider} request queue is full; no request was sent"),
             ErrorKind::Connection => write!(f, "{provider} connection failed"),
             ErrorKind::Http { status, .. } => write!(f, "{provider} returned HTTP {status}"),
             ErrorKind::Throttled { retry_after } => write!(

@@ -44,7 +44,7 @@ is unavailable or backing off; a retry never bypasses provider verification.
 | GET / PATCH | `/v1/shipments/{id}` | Read or edit |
 | GET | `/v1/shipments/{id}/events` | Read history |
 | GET | `/v1/events` | Read durable shipment status transitions |
-| GET | `/v1/delivery-estimates` | Page active inbound delivery estimates |
+| GET | `/v1/delivery-estimates` | Page inbound estimates and verified delivered history |
 | POST | `/v1/shipments/{id}/sources` | Attach evidence |
 | PUT / DELETE | `/v1/shipments/{id}/status-override` | Set or clear a correction |
 | PUT / DELETE | `/v1/shipments/{id}/archive` | Archive or restore |
@@ -131,6 +131,21 @@ a second carrier registration. Existing tracker lookup, idempotency and global
 tracking-number ownership apply after input resolution. Existing shipments and
 user decisions are not migrated or re-registered by this change.
 
+`GET /v1/delivery-estimates` includes nonarchived inbound delivery estimates
+and delivered history. `estimated_delivery_at` is nullable; `delivered_at`
+contains the verified actual delivery timestamp when available. Delivered
+shipments without a verified actual date are omitted rather than dated from
+an ETA or an override's creation time. Effective user status remains authoritative;
+archived, cancelled and returned shipments stay excluded. Keyset pagination
+orders delivered rows by actual date and other rows by estimate.
+
+The native calendar shows full local delivery days. Delivered entries are
+labeled `Delivered` and use actual delivery dates. Raw carrier timestamps stay
+in event descriptions; an estimated time is not an actual arrival or a one-hour
+appointment. OnTrac's latest unambiguous dated `OFDL` scan refines a stale
+`in_transit` status; terminal provider statuses, newer conflicting scans and
+user overrides remain authoritative. Raw scan fields are preserved.
+
 Use `sort=expected` for earliest estimated delivery first, or `sort=delivered`
 for newest actual delivery first. Unknown dates come last. The date and ID
 cursor preserves ordering across pages; omitting `sort` keeps ID ordering.
@@ -206,6 +221,13 @@ the shipment with the same safe error codes:
 | HTTP 503 / tracking issue | `provider_http`, `provider_timeout`, `provider_connection`, `provider_invalid_response` | Retry the same admission request after `Retry-After`; saved shipments retry with backoff. These errors do not establish that a number is invalid. |
 | HTTP 503 / tracking issue | `recipient_page_unavailable` | The DoorDash page could not verify a recognized current status. Retry after backoff; an access refusal is not a request for carrier credentials. |
 | Shipment sync | `registration_ambiguous`, `registration_expired` | Registration needs review; the app will not risk another paid registration automatically. |
+
+EasyPost requests share a fair, bounded local queue, without artificial
+one-second spacing. A local queue deadline is not an upstream HTTP 429 and
+must not acquire provider-rate-limit backoff. Genuine provider rate limits
+retain their Retry-After cooldown across client clones. A cancelled or timed-out
+wait cannot register a tracker, and the existing admission ownership/lease and
+idempotency fences still apply before registration.
 
 Inspect `sync.provider_status`, `sync.provider_error_code`, `sync.attempts`,
 and `sync.next_attempt_at` for provider failures and retry timing. Known native
