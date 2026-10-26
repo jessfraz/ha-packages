@@ -222,6 +222,13 @@ the shipment with the same safe error codes:
 | HTTP 503 / tracking issue | `recipient_page_unavailable` | The DoorDash page could not verify a recognized current status. Retry after backoff; an access refusal is not a request for carrier credentials. |
 | Shipment sync | `registration_ambiguous`, `registration_expired` | Registration needs review; the app will not risk another paid registration automatically. |
 
+EasyPost requests share a fair, bounded local queue, without artificial
+one-second spacing. A local queue deadline is not an upstream HTTP 429 and
+must not acquire provider-rate-limit backoff. Genuine provider rate limits
+retain their Retry-After cooldown across client clones. A cancelled or timed-out
+wait cannot register a tracker, and the existing admission ownership/lease and
+idempotency fences still apply before registration.
+
 Inspect `sync.provider_status`, `sync.provider_error_code`, `sync.attempts`,
 and `sync.next_attempt_at` for provider failures and retry timing. Known native
 provider codes are retained without storing arbitrary provider error text. Use

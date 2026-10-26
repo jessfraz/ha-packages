@@ -1647,7 +1647,7 @@
             "$ref": "#/components/responses/Error"
           }
         },
-        "summary": "Active inbound carrier estimates for native Home Assistant calendars.",
+        "summary": "Inbound carrier estimates and verified delivery history for native calendars.",
         "tags": [
           "system"
         ],

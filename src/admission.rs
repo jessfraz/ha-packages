@@ -360,6 +360,20 @@ pub async fn verify(
             Ok(tracker)
         }
         Err(error) => {
+            if matches!(
+                error.kind,
+                crate::shipping_api::error::ErrorKind::LocalQueueTimeout
+                    | crate::shipping_api::error::ErrorKind::LocalQueueFull
+            ) {
+                // This operation did not send a provider request at the failed
+                // stage. Release only our lease, retaining intent/identity and
+                // prior uncertain evidence; do not manufacture provider backoff.
+                sqlx::query("UPDATE tracking_verifications SET lease_token=NULL,lease_until=NULL WHERE provider=? AND tracking_number=? AND lease_token=?")
+                    .bind(provider_id).bind(&tracking.number).bind(&token).execute(store.pool()).await.map_err(crate::error::Error::from)?;
+                let failure = Failure::from_provider(&error);
+                slog::warn!(log, "tracking_verification"; "request_id" => request_id, "provider" => provider_id, "outcome" => "not_saved", "error_code" => error.error_code());
+                return Err(failure.http(1));
+            }
             let delay = (60_i64.saturating_mul(
                 2_i64.saturating_pow(u32::try_from(attempt.attempts.min(9)).unwrap_or(9)),
             ))
@@ -378,6 +392,223 @@ pub async fn verify(
 #[cfg(test)]
 mod tests {
     use crate::{admission, store::Store};
+
+    #[derive(Clone)]
+    struct QueueFixture {
+        first: std::sync::Arc<std::sync::Mutex<Option<crate::shipping_api::error::ErrorKind>>>,
+        calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl crate::shipping_api::ShippingApi for QueueFixture {
+        fn id(&self) -> crate::shipping_api::types::ProviderId {
+            crate::shipping_api::types::ProviderId::EasyPost
+        }
+        fn blocked(&self) -> bool {
+            false
+        }
+        fn for_request(
+            &self,
+            _: &str,
+            _: Option<&str>,
+        ) -> std::sync::Arc<dyn crate::shipping_api::ShippingApi> {
+            std::sync::Arc::new(self.clone())
+        }
+        fn check_connection(&self) -> crate::shipping_api::types::ApiFuture<'_, ()> {
+            Box::pin(async { Ok(()) })
+        }
+        fn reconcile_registration<'a>(
+            &'a self,
+            registration: &'a crate::shipping_api::types::Registration,
+        ) -> crate::shipping_api::types::ApiFuture<'a, Option<crate::shipping_api::types::Tracker>>
+        {
+            Box::pin(async move {
+                self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                if let Some(kind) = self.first.lock().unwrap().take() {
+                    return Err(crate::shipping_api::error::Error::new(self.id(), kind));
+                }
+                Ok(Some(crate::shipping_api::types::Tracker {
+                    id: "trk_existing_fixture".into(),
+                    provider: self.id(),
+                    tracking_code: registration.tracking_number.clone(),
+                    carrier: crate::carrier::Carrier::Ups,
+                    status: crate::models::Status::InTransit,
+                    public_url: None,
+                    carrier_tracking: Default::default(),
+                }))
+            })
+        }
+        fn prepare_registration(
+            &self,
+            _: crate::shipping_api::types::Registration,
+        ) -> crate::shipping_api::types::ApiFuture<
+            '_,
+            Box<dyn crate::shipping_api::PreparedRegistration>,
+        > {
+            panic!("must reconcile existing tracker, never register twice")
+        }
+        fn retrieve<'a>(
+            &'a self,
+            _: &'a str,
+            _: &'a str,
+        ) -> crate::shipping_api::types::ApiFuture<'a, crate::shipping_api::types::Tracker>
+        {
+            panic!("not needed by verification")
+        }
+    }
+
+    #[tokio::test]
+    async fn local_queue_failure_releases_lease_without_pin_or_retry_backoff() {
+        use crate::shipping_api::error::ErrorKind;
+        for kind in [
+            ErrorKind::LocalQueueTimeout,
+            ErrorKind::LocalQueueFull,
+            ErrorKind::Http {
+                status: 429,
+                retry_after: Some(120),
+            },
+        ] {
+            let upstream = matches!(kind, ErrorKind::Http { .. });
+            let dir = tempfile::tempdir().unwrap();
+            let store = Store::open(&dir.path().join("queue.sqlite3"))
+                .await
+                .unwrap();
+            let provider = QueueFixture {
+                first: std::sync::Arc::new(std::sync::Mutex::new(Some(kind))),
+                calls: Default::default(),
+            };
+            let tracking = crate::models::InputTracking {
+                number: "SYNTHETIC-QUEUE-IDENTITY".into(),
+                carrier: Some(crate::carrier::Carrier::Ups),
+                recipient_url: None,
+            };
+            let claim = admission::claim_tracking(&store, &tracking.number)
+                .await
+                .unwrap();
+            let log = crate::logging::logger();
+            let error = admission::verify(
+                &store,
+                &claim,
+                Some(std::sync::Arc::new(provider.clone())),
+                &tracking,
+                &log,
+                "queue-first",
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(error.status_code.as_u16(), 503);
+            let state:(i64,i64,Option<String>) = sqlx::query_as("SELECT attempts,next_attempt_at,lease_token FROM tracking_verifications WHERE tracking_number=?")
+                .bind(&tracking.number).fetch_one(store.pool()).await.unwrap();
+            assert!(state.2.is_none());
+            if upstream {
+                assert_eq!(state.0, 1);
+                let now: i64 = sqlx::query_scalar("SELECT unixepoch()")
+                    .fetch_one(store.pool())
+                    .await
+                    .unwrap();
+                assert!(state.1 >= now + 119);
+                assert!(
+                    admission::verify(
+                        &store,
+                        &claim,
+                        Some(std::sync::Arc::new(provider.clone())),
+                        &tracking,
+                        &log,
+                        "queue-second"
+                    )
+                    .await
+                    .is_err()
+                );
+                assert_eq!(provider.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+            } else {
+                assert_eq!((state.0, state.1), (0, 0));
+                let tracker = admission::verify(
+                    &store,
+                    &claim,
+                    Some(std::sync::Arc::new(provider.clone())),
+                    &tracking,
+                    &log,
+                    "queue-second",
+                )
+                .await
+                .unwrap();
+                assert_eq!(tracker.id, "trk_existing_fixture");
+                let replay = admission::verify(
+                    &store,
+                    &claim,
+                    Some(std::sync::Arc::new(provider.clone())),
+                    &tracking,
+                    &log,
+                    "queue-replay",
+                )
+                .await
+                .unwrap();
+                assert_eq!(replay.id, tracker.id);
+                assert_eq!(provider.calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+            }
+            admission::release_tracking(&store, claim).await.unwrap();
+            store.close().await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn same_idempotency_key_succeeds_after_local_queue_failure_without_duplicate_registration()
+     {
+        let directory = tempfile::tempdir().unwrap();
+        let store = Store::open(&directory.path().join("queue-http.sqlite3"))
+            .await
+            .unwrap();
+        let provider = QueueFixture {
+            first: std::sync::Arc::new(std::sync::Mutex::new(Some(
+                crate::shipping_api::error::ErrorKind::LocalQueueTimeout,
+            ))),
+            calls: Default::default(),
+        };
+        let token = "synthetic-queue-http-owner-credential-at-least32";
+        let context = crate::api::Context::new(store.clone(), token, None, None)
+            .with_provider(std::sync::Arc::new(provider.clone()));
+        let server =
+            crate::api::start("127.0.0.1:0".parse().unwrap(), std::sync::Arc::new(context))
+                .unwrap();
+        let endpoint = format!("http://{}/v1/shipments", server.local_addr());
+        let client = reqwest::Client::new();
+        let body = serde_json::json!({"direction":"inbound","title":"Synthetic bounded queue parcel","tracking":{"carrier":"UPS","number":"SYNTHETIC-QUEUE-HTTP1"}});
+        let response = client
+            .post(&endpoint)
+            .bearer_auth(token)
+            .header("Idempotency-Key", "same-queue-request")
+            .json(&body)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status().as_u16(), 503);
+        let error: serde_json::Value = response.json().await.unwrap();
+        assert_eq!(error["error_code"], "local_provider_queue_timeout");
+        let mut saved_id = None;
+        for _ in 0..2 {
+            let response = client
+                .post(&endpoint)
+                .bearer_auth(token)
+                .header("Idempotency-Key", "same-queue-request")
+                .json(&body)
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status().as_u16(), 201);
+            let saved: crate::models::Shipment = response.json().await.unwrap();
+            if let Some(id) = saved_id {
+                assert_eq!(saved.id, id);
+            }
+            saved_id = Some(saved.id);
+        }
+        assert_eq!(provider.calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+        let count: i64 = sqlx::query_scalar("SELECT count(*) FROM shipments")
+            .fetch_one(store.pool())
+            .await
+            .unwrap();
+        assert_eq!(count, 1);
+        server.close().await.unwrap();
+        store.close().await.unwrap();
+    }
 
     #[tokio::test]
     async fn tracking_claims_survive_restart_and_fence_expired_owners() {

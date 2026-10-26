@@ -256,6 +256,8 @@ impl slog::Serializer for Fields {
                         "tracking_verification_unavailable",
                         "provider_http",
                         "provider_timeout",
+                        "local_provider_queue_timeout",
+                        "local_provider_queue_full",
                         "provider_connection",
                         "provider_invalid_response",
                         "provider_response_too_large",

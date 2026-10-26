@@ -1583,32 +1583,58 @@ async fn rate_limit_pauses_all_provider_operations_and_leaves_other_shipments_du
 }
 
 #[tokio::test]
-async fn shared_provider_slot_bounds_concurrency_spaces_starts_and_releases_after_cancellation() {
+async fn shared_provider_queue_serializes_background_import_health_and_cancels_without_sending() {
     let mut provider = Provider::start();
     let client = provider.client();
-    let task_client = client.clone();
-    let first = tokio::spawn(async move { task_client.register("FIRST-TRACK", None).await });
-    let request = provider.request().await;
-    assert!(client.register("SECOND-TRACK", None).await.is_err());
-    assert!(client.check_connection().await.is_err());
+    let clone = client.clone();
+    let background =
+        tokio::spawn(async move { clone.retrieve("trk_test", "BACKGROUND-TRACK").await });
+    let held = provider.request().await;
+    assert_eq!(held.method, "GET");
+    let clone = client.clone();
+    let import = tokio::spawn(async move { clone.register("IMPORTED-TRACK", None).await });
+    tokio::task::yield_now().await;
+    let clone = client.clone();
+    let health = tokio::spawn(async move { clone.check_connection().await });
+    tokio::task::yield_now().await;
+    let clone = client.clone();
+    let cancelled = tokio::spawn(async move { clone.register("CANCELLED-TRACK", None).await });
+    tokio::task::yield_now().await;
+    assert!(!import.is_finished());
+    assert!(!health.is_finished());
     assert!(provider.incoming.try_recv().is_err());
-    first.abort();
-    assert!(first.await.unwrap_err().is_cancelled());
-    drop(request);
-
-    let task_client = client.clone();
-    let second = tokio::spawn(async move { task_client.register("SECOND-TRACK", None).await });
+    cancelled.abort();
+    assert!(cancelled.await.unwrap_err().is_cancelled());
+    held.tracker("BACKGROUND-TRACK", Status::InTransit);
+    background.await.unwrap().unwrap();
     let request = provider.request().await;
-    let at = std::time::Instant::now();
-    request.tracker("SECOND-TRACK", Status::Unknown);
-    second.await.unwrap().unwrap();
-    let third = tokio::spawn(async move { client.retrieve("trk_test", "SECOND-TRACK").await });
+    assert_eq!(request.method, "POST");
+    assert!(String::from_utf8_lossy(&request.body).contains("IMPORTED-TRACK"));
+    request.tracker("IMPORTED-TRACK", Status::Unknown);
+    import.await.unwrap().unwrap();
+    let request = provider.request().await;
+    assert_eq!(request.method, "GET");
+    request.reply(Reply {
+        status: 200,
+        headers: Vec::new(),
+        body: r#"{"trackers":[],"has_more":false}"#.into(),
+    });
+    health.await.unwrap().unwrap();
+    assert!(provider.incoming.try_recv().is_err());
+    // Dropping an active request also releases the shared slot.
+    let clone = client.clone();
+    let active = tokio::spawn(async move { clone.retrieve("trk_test", "IMPORTED-TRACK").await });
+    let held = provider.request().await;
+    active.abort();
+    assert!(active.await.unwrap_err().is_cancelled());
+    drop(held);
+    let final_task =
+        tokio::spawn(async move { client.retrieve("trk_test", "IMPORTED-TRACK").await });
     provider
         .request()
         .await
-        .tracker("SECOND-TRACK", Status::Unknown);
-    third.await.unwrap().unwrap();
-    assert!(at.elapsed() >= Duration::from_millis(900));
+        .tracker("IMPORTED-TRACK", Status::Unknown);
+    final_task.await.unwrap().unwrap();
 }
 
 #[tokio::test]

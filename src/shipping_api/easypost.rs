@@ -4,7 +4,7 @@ use reqwest::{Client, RequestBuilder, Response, Url};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{net::IpAddr, sync::Arc, time::Duration};
-use tokio::sync::{Mutex, OwnedMutexGuard};
+use tokio::sync::{Mutex, OwnedMutexGuard, OwnedSemaphorePermit, Semaphore};
 use tokio::time::Instant;
 use uuid::Uuid;
 
@@ -19,6 +19,10 @@ use crate::{
 };
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
+const QUEUE_TIMEOUT: Duration = Duration::from_secs(10);
+const MAX_QUEUED_REQUESTS: usize = 64;
+tokio::task_local! { static OPERATION_DEADLINE: Instant; }
+
 const MAX_BODY_BYTES: usize = 256 * 1024;
 const MAX_RETRY_SECONDS: i64 = 6 * 60 * 60;
 
@@ -83,12 +87,17 @@ pub struct EasyPostClient {
     api_key: String,
     base: Url,
     requests: Arc<Mutex<RequestSchedule>>,
+    queue: Arc<Semaphore>,
     log: slog::Logger,
     request_id: Option<String>,
 }
 
+struct RequestSlot {
+    schedule: OwnedMutexGuard<RequestSchedule>,
+    _permit: OwnedSemaphorePermit,
+}
+
 struct RequestSchedule {
-    next_start: Instant,
     cooldown: Option<Instant>,
     rate_limits: u32,
 }
@@ -347,10 +356,10 @@ impl EasyPostClient {
             api_key,
             base,
             requests: Arc::new(Mutex::new(RequestSchedule {
-                next_start: Instant::now(),
                 cooldown: None,
                 rate_limits: 0,
             })),
+            queue: Arc::new(Semaphore::new(MAX_QUEUED_REQUESTS)),
             log: crate::logging::logger(),
             request_id: None,
         })
@@ -377,7 +386,10 @@ impl EasyPostClient {
             .clone()
             .unwrap_or_else(|| Uuid::now_v7().to_string());
         let started = Instant::now();
-        let result = future.await;
+        let deadline = OPERATION_DEADLINE
+            .try_with(|deadline| *deadline)
+            .unwrap_or_else(|_| Instant::now() + REQUEST_TIMEOUT);
+        let result = OPERATION_DEADLINE.scope(deadline, future).await;
         let error = result.as_ref().err();
         let outcome = match error.map(|error| &error.kind) {
             None => "success",
@@ -408,37 +420,55 @@ impl EasyPostClient {
         result
     }
 
-    // All clones share one outbound slot, including API verification and health
-    // checks. Reject contention instead of holding an unbounded request queue or
-    // waiting out a provider cooldown inside a shipment's lease.
+    // Clones share one fair, bounded queue. Contention is local, not an
+    // upstream rate limit. Only actual provider responses establish cooldown.
     async fn send(&self, request: RequestBuilder) -> Result<Vec<u8>, SyncError> {
-        let schedule = self.request_slot().await?;
-        self.send_in_slot(request, schedule).await
+        let slot = self.request_slot().await?;
+        self.send_in_slot(request, slot).await
     }
 
-    async fn request_slot(&self) -> Result<OwnedMutexGuard<RequestSchedule>, SyncError> {
-        let schedule = self
-            .requests
+    async fn request_slot(&self) -> Result<RequestSlot, SyncError> {
+        let permit = self
+            .queue
             .clone()
-            .try_lock_owned()
-            .map_err(|_| provider_error(ErrorKind::Throttled { retry_after: 1 }))?;
+            .try_acquire_owned()
+            .map_err(|_| provider_error(ErrorKind::LocalQueueFull))?;
+        let queue_deadline = Instant::now() + QUEUE_TIMEOUT;
+        let deadline = OPERATION_DEADLINE
+            .try_with(|at| (*at).min(queue_deadline))
+            .unwrap_or(queue_deadline);
+        if Instant::now() >= deadline {
+            return Err(provider_error(ErrorKind::LocalQueueTimeout));
+        }
+        let schedule = tokio::time::timeout_at(deadline, self.requests.clone().lock_owned())
+            .await
+            .map_err(|_| provider_error(ErrorKind::LocalQueueTimeout))?;
         if let Some(until) = schedule.cooldown.filter(|until| *until > Instant::now()) {
             let remaining = until.saturating_duration_since(Instant::now());
             return Err(provider_error(ErrorKind::Throttled {
                 retry_after: i64::try_from(remaining.as_secs()).unwrap_or(MAX_RETRY_SECONDS) + 1,
             }));
         }
-        tokio::time::sleep_until(schedule.next_start).await;
-        Ok(schedule)
+        Ok(RequestSlot {
+            schedule,
+            _permit: permit,
+        })
     }
 
     async fn send_in_slot(
         &self,
         request: RequestBuilder,
-        mut schedule: OwnedMutexGuard<RequestSchedule>,
+        mut slot: RequestSlot,
     ) -> Result<Vec<u8>, SyncError> {
-        schedule.next_start = Instant::now() + Duration::from_secs(1);
-        let result = match request.send().await {
+        let schedule = &mut slot.schedule;
+        let remaining = OPERATION_DEADLINE
+            .try_with(|at| at.saturating_duration_since(Instant::now()))
+            .unwrap_or(REQUEST_TIMEOUT)
+            .min(REQUEST_TIMEOUT);
+        if remaining.is_zero() {
+            return Err(provider_error(ErrorKind::LocalQueueTimeout));
+        }
+        let result = match request.timeout(remaining).send().await {
             Ok(response) => {
                 let request_id = response
                     .headers()
@@ -481,7 +511,7 @@ impl EasyPostClient {
     }
 
     fn blocked(&self) -> bool {
-        self.requests.try_lock().map_or(true, |schedule| {
+        self.requests.try_lock().is_ok_and(|schedule| {
             schedule
                 .cooldown
                 .is_some_and(|until| until > Instant::now())
@@ -527,7 +557,7 @@ impl EasyPostClient {
         &self,
         tracking_code: &str,
         carrier: Option<Carrier>,
-        slot: OwnedMutexGuard<RequestSchedule>,
+        slot: RequestSlot,
     ) -> Result<Tracker, SyncError> {
         let url = self
             .base
@@ -836,7 +866,7 @@ impl ShippingApi for EasyPostClient {
 /// value releases pacing capacity without performing a provider write.
 struct EasyPostRegistration {
     client: EasyPostClient,
-    slot: OwnedMutexGuard<RequestSchedule>,
+    slot: RequestSlot,
     registration: Registration,
 }
 
@@ -863,6 +893,87 @@ impl PreparedRegistration for EasyPostRegistration {
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test(start_paused = true)]
+    async fn local_queue_is_fair_bounded_cancellable_and_has_no_spacing() {
+        use super::*;
+        let client = EasyPostClient::for_loopback("fixture-key", "http://127.0.0.1:1/v2/").unwrap();
+        let first = client.request_slot().await.unwrap();
+        assert!(
+            !client.blocked(),
+            "local contention is not provider cooldown"
+        );
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let mut waiting = Vec::new();
+        for id in 0..3 {
+            let clone = client.clone();
+            let sender = sender.clone();
+            waiting.push(tokio::spawn(async move {
+                let slot = clone.request_slot().await.unwrap();
+                sender.send(id).unwrap();
+                slot
+            }));
+            tokio::task::yield_now().await;
+        }
+        waiting[1].abort();
+        let started = Instant::now();
+        drop(first);
+        let first_waiter = waiting.remove(0).await.unwrap();
+        assert_eq!(receiver.recv().await, Some(0));
+        drop(first_waiter);
+        assert!(matches!(waiting.remove(0).await, Err(error) if error.is_cancelled()));
+        let last = waiting.remove(0).await.unwrap();
+        assert_eq!(receiver.recv().await, Some(2));
+        drop(last);
+        assert_eq!(Instant::now(), started, "no artificial inter-request delay");
+        assert_eq!(client.queue.available_permits(), MAX_QUEUED_REQUESTS);
+        let permits = client
+            .queue
+            .clone()
+            .acquire_many_owned(MAX_QUEUED_REQUESTS as u32)
+            .await
+            .unwrap();
+        let error = match client.request_slot().await {
+            Err(error) => error,
+            Ok(_) => panic!("queue cap exceeded"),
+        };
+        assert!(matches!(error.kind, ErrorKind::LocalQueueFull));
+        assert_eq!(error.provider_status(), None);
+        assert_eq!(error.retry_after(), None);
+        drop(permits);
+        assert!(client.request_slot().await.is_ok());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn local_queue_deadline_is_not_an_upstream_rate_limit() {
+        use super::*;
+        let client = EasyPostClient::for_loopback("fixture-key", "http://127.0.0.1:1/v2/").unwrap();
+        let slot = client.request_slot().await.unwrap();
+        let clone = client.clone();
+        let waiting = tokio::spawn(async move { clone.request_slot().await });
+        tokio::task::yield_now().await;
+        tokio::time::advance(QUEUE_TIMEOUT).await;
+        let error = match waiting.await.unwrap() {
+            Err(error) => error,
+            Ok(_) => panic!("deadline ignored"),
+        };
+        assert!(matches!(error.kind, ErrorKind::LocalQueueTimeout));
+        assert_eq!(error.provider_status(), None);
+        assert_eq!(error.retry_after(), None);
+        assert_eq!(error.error_code(), "local_provider_queue_timeout");
+        drop(slot);
+        assert!(client.request_slot().await.is_ok());
+        let error = OPERATION_DEADLINE
+            .scope(Instant::now(), client.request_slot())
+            .await;
+        assert!(matches!(
+            error,
+            Err(SyncError {
+                kind: ErrorKind::LocalQueueTimeout,
+                ..
+            })
+        ));
+    }
+
     fn ontrac_tracker(status: &str, carrier: &str, events: serde_json::Value) -> super::Tracker {
         let raw: super::ProviderTracker = serde_json::from_value(serde_json::json!({
             "id":"trk_ontrac_fixture", "tracking_code":"SYNTHETIC-ONTRAC",

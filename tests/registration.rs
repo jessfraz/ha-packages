@@ -840,12 +840,18 @@ async fn terminal_correction_during_outbound_pacing_cancels_registration() {
         .await
         .unwrap();
     let mut provider = Provider::new();
-    let worker = provider.worker(&fixture.store);
+    let client = EasyPostClient::for_loopback("registration-test-key", &provider.base).unwrap();
+    let worker = SyncWorker::new(fixture.store.pool().clone(), Arc::new(client.clone()));
     let mut task = spawn(worker.clone());
-    provider.empty_lookup().await;
-    // The complete lookup starts a one-second gap before the provider can
-    // receive a POST. Correct after the lookup finishes, during that gap.
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    let lookup = provider.request().await;
+    // Queue a read-only health request before the lookup response releases
+    // its slot. Its gated response holds the FIFO slot while the worker waits
+    // to prepare registration, without relying on artificial one-second gaps.
+    let health = tokio::spawn(async move { client.check_connection().await });
+    tokio::task::yield_now().await;
+    lookup.page(Vec::new(), false);
+    let held_health = provider.request().await;
+    assert_eq!(held_health.method, "GET");
     let corrected = fixture
         .store
         .set_override(
@@ -860,6 +866,8 @@ async fn terminal_correction_during_outbound_pacing_cancels_registration() {
         .await
         .unwrap();
     assert!(corrected.sync.next_attempt_at.is_none());
+    held_health.page(Vec::new(), false);
+    health.await.unwrap().unwrap();
     tokio::time::timeout(Duration::from_secs(2), async {
         tokio::select! {
             result = &mut task => assert!(result.unwrap().unwrap()),

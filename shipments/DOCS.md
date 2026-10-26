@@ -215,11 +215,14 @@ unknown problem state into a healthy one.
 
 ## Delivery calendar
 
-`calendar.shipments_inbound_deliveries` is a read-only calendar of carrier
-estimates for active inbound shipments. Date-only ETAs create all-day entries;
-ETAs with a time zone create one-hour estimated windows. Missing or invalid
-dates, outbound shipments, archived records, and terminal shipments do not
-appear. Estimates can change and are not guaranteed delivery times.
+`calendar.shipments_inbound_deliveries` is a read-only calendar of inbound
+estimated delivery days and verified delivered history. Entries span their full
+local day, including DST changes, so a parcel does not vanish after an estimated
+hour passes. Raw carrier timestamps remain in event details. Delivered entries
+are labeled **Delivered** and use the verified actual delivery date, never an
+ETA or the time a manual override was saved. A delivered shipment without a
+verified actual date cannot be dated truthfully and is omitted until that gap is
+resolved. Archived, cancelled and returned shipments remain excluded.
 
 Click a Shipments event in Home Assistant's native calendar or calendar card
 to open that exact shipment. The integration uses the hidden Shipments route

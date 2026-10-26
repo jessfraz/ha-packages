@@ -702,7 +702,7 @@ struct EstimateCursor {
     after: Uuid,
     sort_key: i64,
 }
-/// Active inbound carrier estimates for native Home Assistant calendars.
+/// Inbound carrier estimates and verified delivery history for native calendars.
 #[endpoint {method=GET,path="/v1/delivery-estimates",tags=["system"]}]
 async fn delivery_estimates(
     request: RequestContext<Arc<Context>>,
