@@ -178,12 +178,15 @@ fn valid_text(value: &str, field: &str, max: usize) -> Result<(), Error> {
 }
 
 pub fn normalize_tracking<C>(tracking: &mut Tracking<C>) -> Result<(), Error> {
-    if tracking.number.trim().is_empty() {
+    normalize_number(&mut tracking.number)
+}
+
+fn normalize_number(number: &mut String) -> Result<(), Error> {
+    if number.trim().is_empty() {
         return Err(Error::TrackingRequired);
     }
-    valid_text(&tracking.number, "tracking number", 200)?;
-    tracking.number = tracking
-        .number
+    valid_text(number, "tracking number", 200)?;
+    *number = number
         .chars()
         .filter(|c| !c.is_whitespace())
         .flat_map(char::to_uppercase)
@@ -192,7 +195,7 @@ pub fn normalize_tracking<C>(tracking: &mut Tracking<C>) -> Result<(), Error> {
 }
 
 fn normalize_input_tracking(tracking: &mut InputTracking) -> Result<(), Error> {
-    normalize_tracking(tracking)?;
+    normalize_number(&mut tracking.number)?;
     if let Some(url) = &tracking.recipient_url {
         let canonical = crate::shipping_api::doordash::normalize_recipient_url(url)
             .map_err(|_| Error::InvalidRecipientLink)?;
@@ -1022,7 +1025,7 @@ impl Store {
                 carrier: None,
                 recipient_url: None,
             };
-            normalize_tracking(&mut tracking)?;
+            normalize_number(&mut tracking.number)?;
             query
                 .push(" AND tracking_number=")
                 .push_bind(tracking.number);

@@ -333,21 +333,32 @@
               "carrier": null,
               "number": ""
             },
+            "description": "Carrier detection is allowed at admission. Persisted shipments always use the concrete carrier returned by the tracking provider.",
             "properties": {
               "carrier": {
-                "allOf": [
+                "anyOf": [
                   {
-                    "$ref": "#/components/schemas/Carrier"
+                    "allOf": [
+                      {
+                        "$ref": "#/components/schemas/Carrier"
+                      }
+                    ],
+                    "nullable": true
+                  },
+                  {
+                    "enum": [
+                      "FedExAccount"
+                    ],
+                    "type": "string"
                   }
                 ],
-                "nullable": true
+                "default": null
               },
               "number": {
                 "default": "",
                 "type": "string"
               },
               "recipient_url": {
-                "description": "Original recipient link. Required for DoorDash; omitted for other carriers.",
                 "nullable": true,
                 "type": "string"
               }
@@ -561,6 +572,40 @@
         "required": [
           "items"
         ],
+        "type": "object"
+      },
+      "InputTracking": {
+        "additionalProperties": false,
+        "description": "Carrier detection is allowed at admission. Persisted shipments always use the concrete carrier returned by the tracking provider.",
+        "properties": {
+          "carrier": {
+            "anyOf": [
+              {
+                "allOf": [
+                  {
+                    "$ref": "#/components/schemas/Carrier"
+                  }
+                ],
+                "nullable": true
+              },
+              {
+                "enum": [
+                  "FedExAccount"
+                ],
+                "type": "string"
+              }
+            ],
+            "default": null
+          },
+          "number": {
+            "default": "",
+            "type": "string"
+          },
+          "recipient_url": {
+            "nullable": true,
+            "type": "string"
+          }
+        },
         "type": "object"
       },
       "InstallationReport": {
@@ -1275,7 +1320,7 @@
             "type": "string"
           },
           "tracking": {
-            "$ref": "#/components/schemas/Tracking_for_Nullable_Carrier"
+            "$ref": "#/components/schemas/InputTracking"
           }
         },
         "type": "object"
@@ -1285,7 +1330,7 @@
   "info": {
     "description": "Persistent local shipment records, manual corrections, and carrier synchronization. Use a Bearer owner or ingestion token. Creates require Idempotency-Key; writes to an existing shipment require its quoted revision in If-Match.",
     "title": "Shipments API",
-    "version": "0.6.7"
+    "version": "0.6.8"
   },
   "openapi": "3.0.3",
   "paths": {
