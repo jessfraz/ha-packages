@@ -259,16 +259,26 @@ class DeliveryEstimate:
     title: str
     carrier: str | None
     estimated: date | datetime
+    delivered: bool = False
 
     def calendar_event(self) -> CalendarEvent:
-        timed = isinstance(self.estimated, datetime)
+        # A parcel's delivery day is not a one-hour appointment. Local dates
+        # keep it visible until local midnight, including DST transition days.
+        day = (
+            dt_util.as_local(self.estimated).date()
+            if isinstance(self.estimated, datetime)
+            else self.estimated
+        )
+        label = "Delivered" if self.delivered else "Estimated delivery"
         return CalendarEvent(
-            start=self.estimated,
-            end=self.estimated + (timedelta(hours=1) if timed else timedelta(days=1)),
-            summary=self.title,
+            start=day,
+            end=day + timedelta(days=1),
+            summary=f"Delivered: {self.title}" if self.delivered else self.title,
             description=(
-                f"Estimated delivery{f' via {self.carrier}' if self.carrier else ''}. "
-                "Carrier estimates can change."
+                f"{label}{f' via {self.carrier}' if self.carrier else ''}. "
+                f"{'Actual delivery' if self.delivered else 'Carrier estimate'}: "
+                f"{self.estimated.isoformat()}. "
+                + ("" if self.delivered else "Carrier estimates can change.")
             ),
             uid=str(self.shipment_id),
         )
@@ -283,7 +293,17 @@ def delivery_estimate(record: object) -> tuple[UUID, DeliveryEstimate | None]:
     if not isinstance(shipment_id, str) or not isinstance(title, str):
         raise ValueError("Invalid shipment record")
     identity = UUID(shipment_id)
-    value = record.get("estimated_delivery_at")
+    status = record.get("status")
+    if (
+        status in {"cancelled", "return_to_sender"}
+        or record.get("archived") is True
+        or record.get("direction") == "outbound"
+    ):
+        return identity, None
+    delivered = status == "delivered"
+    value = (
+        record.get("delivered_at") if delivered else record.get("estimated_delivery_at")
+    )
     if value is None:
         return identity, None
     carrier = record.get("carrier")
@@ -291,7 +311,7 @@ def delivery_estimate(record: object) -> tuple[UUID, DeliveryEstimate | None]:
         raise ValueError("Invalid shipment carrier")
     estimated = parse_delivery_estimate(value)
     return identity, (
-        DeliveryEstimate(identity, title, carrier, estimated)
+        DeliveryEstimate(identity, title, carrier, estimated, delivered)
         if estimated is not None
         else None
     )

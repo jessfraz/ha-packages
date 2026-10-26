@@ -5,7 +5,7 @@ import json
 import os
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
-from datetime import UTC, datetime, timedelta
+from datetime import timedelta
 from pathlib import Path
 
 import pytest
@@ -93,9 +93,9 @@ async def produce_database(database: Path, scenario: str) -> None:
 async def rust_backend(
     hass: HomeAssistant,
     tmp_path: Path,
+    socket_enabled,
     unused_tcp_port: int,
     request: pytest.FixtureRequest,
-    socket_enabled,
 ) -> AsyncIterator[RustBackend]:
     """Launch the actual binary with disposable SQLite and no provider access."""
     binary = Path(os.environ.get("SHIPMENTS_TEST_BINARY", "target/debug/shipments"))
@@ -501,13 +501,11 @@ async def test_real_store_projection_reaches_native_inbound_calendar(
     events = await response.json()
     assert len(events) == 4
     assert all(event["summary"] == "Example calendar parcel" for event in events)
-    assert [
-        datetime.fromisoformat(event["start"]["dateTime"]).astimezone(UTC).isoformat()
-        for event in events
-    ] == [
-        "2031-02-17T18:00:00+00:00",
-        "2031-02-17T18:00:00+00:00",
-        "2031-02-18T13:00:00+00:00",
-        "2031-02-19T13:00:00+00:00",
+    assert [event["start"]["date"] for event in events] == [
+        "2031-02-17",
+        "2031-02-17",
+        "2031-02-18",
+        "2031-02-19",
     ]
+    assert all("Carrier estimate:" in event["description"] for event in events)
     assert len({event["uid"] for event in events}) == 4

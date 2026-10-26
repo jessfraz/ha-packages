@@ -631,7 +631,9 @@ pub struct DeliveryEstimate {
     pub carrier: Option<crate::carrier::Carrier>,
     pub direction: Direction,
     pub status: Status,
-    pub estimated_delivery_at: String,
+    pub estimated_delivery_at: Option<String>,
+    /// Verified actual carrier delivery date/time, never an ETA or override time.
+    pub delivered_at: Option<String>,
 }
 pub struct DeliveryEstimatePosition {
     pub id: Uuid,

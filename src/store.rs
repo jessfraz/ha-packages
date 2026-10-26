@@ -1154,7 +1154,7 @@ impl Store {
                 Ok(Event {id,shipment_id:parse_id(&shipment_id)?,kind:serde_json::from_str(&kind)?,actor_id,at,detail,snapshot:snapshot.as_deref().map(serde_json::from_str).transpose()?})).collect()
     }
 
-    /// Page active inbound estimates without loading carrier scan history.
+    /// Page inbound delivery estimates and verified delivery history without scan history.
     pub async fn delivery_estimates(
         &self,
         after: Option<DeliveryEstimatePosition>,
@@ -1166,8 +1166,9 @@ impl Store {
             title: String,
             tracking_carrier: Option<String>,
             status: String,
-            estimated_delivery_at: String,
-            expected_sort_key: i64,
+            estimated_delivery_at: Option<String>,
+            delivered_at: Option<String>,
+            calendar_sort_key: i64,
         }
         let mut query = delivery_estimates_query(after, limit);
         query
@@ -1192,10 +1193,11 @@ impl Store {
                             .transpose()?,
                         status: serde_json::from_str(&row.status)?,
                         estimated_delivery_at: row.estimated_delivery_at,
+                        delivered_at: row.delivered_at,
                     },
                     position: DeliveryEstimatePosition {
                         id,
-                        sort_key: row.expected_sort_key,
+                        sort_key: row.calendar_sort_key,
                     },
                 })
             })
@@ -1388,23 +1390,24 @@ fn delivery_estimates_query(
         r#"SELECT id, title, tracking_carrier,
                   coalesce(override_status, carrier_status, '"expected"') AS status,
                   json_extract(carrier_tracking, '$.estimated_delivery_at') AS estimated_delivery_at,
-                  expected_sort_key
+                  json_extract(carrier_tracking, '$.delivered_at') AS delivered_at,
+                  calendar_sort_key
            FROM shipments
            WHERE archived = 0 AND direction = 'inbound'
-             AND expected_sort_key < 9223372036854775807
+             AND calendar_sort_key < 9223372036854775807
              AND coalesce(override_status, carrier_status, '"expected"')
-                 NOT IN ('"delivered"', '"return_to_sender"', '"cancelled"')"#,
+                 NOT IN ('"return_to_sender"', '"cancelled"')"#,
     );
     if let Some(after) = after {
         query
-            .push(" AND (expected_sort_key,id)>(")
+            .push(" AND (calendar_sort_key,id)>(")
             .push_bind(after.sort_key)
             .push(",")
             .push_bind(after.id.to_string())
             .push(")");
     }
     query
-        .push(" ORDER BY expected_sort_key,id LIMIT ")
+        .push(" ORDER BY calendar_sort_key,id LIMIT ")
         .push_bind(limit.min(201));
     query
 }

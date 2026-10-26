@@ -44,7 +44,7 @@ is unavailable or backing off; a retry never bypasses provider verification.
 | GET / PATCH | `/v1/shipments/{id}` | Read or edit |
 | GET | `/v1/shipments/{id}/events` | Read history |
 | GET | `/v1/events` | Read durable shipment status transitions |
-| GET | `/v1/delivery-estimates` | Page active inbound delivery estimates |
+| GET | `/v1/delivery-estimates` | Page inbound estimates and verified delivered history |
 | POST | `/v1/shipments/{id}/sources` | Attach evidence |
 | PUT / DELETE | `/v1/shipments/{id}/status-override` | Set or clear a correction |
 | PUT / DELETE | `/v1/shipments/{id}/archive` | Archive or restore |
@@ -130,6 +130,21 @@ configuration, unavailable verification and uncertain registration never trigger
 a second carrier registration. Existing tracker lookup, idempotency and global
 tracking-number ownership apply after input resolution. Existing shipments and
 user decisions are not migrated or re-registered by this change.
+
+`GET /v1/delivery-estimates` includes nonarchived inbound delivery estimates
+and delivered history. `estimated_delivery_at` is nullable; `delivered_at`
+contains the verified actual delivery timestamp when available. Delivered
+shipments without a verified actual date are omitted rather than dated from
+an ETA or an override's creation time. Effective user status remains authoritative;
+archived, cancelled and returned shipments stay excluded. Keyset pagination
+orders delivered rows by actual date and other rows by estimate.
+
+The native calendar shows full local delivery days. Delivered entries are
+labeled `Delivered` and use actual delivery dates. Raw carrier timestamps stay
+in event descriptions; an estimated time is not an actual arrival or a one-hour
+appointment. OnTrac's latest unambiguous dated `OFDL` scan refines a stale
+`in_transit` status; terminal provider statuses, newer conflicting scans and
+user overrides remain authoritative. Raw scan fields are preserved.
 
 Use `sort=expected` for earliest estimated delivery first, or `sort=delivered`
 for newest actual delivery first. Unknown dates come last. The date and ID

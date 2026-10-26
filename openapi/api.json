@@ -425,10 +425,16 @@
             ],
             "nullable": true
           },
+          "delivered_at": {
+            "description": "Verified actual carrier delivery date/time, never an ETA or override time.",
+            "nullable": true,
+            "type": "string"
+          },
           "direction": {
             "$ref": "#/components/schemas/Direction"
           },
           "estimated_delivery_at": {
+            "nullable": true,
             "type": "string"
           },
           "id": {
@@ -444,7 +450,6 @@
         },
         "required": [
           "direction",
-          "estimated_delivery_at",
           "id",
           "status",
           "title"
@@ -1330,7 +1335,7 @@
   "info": {
     "description": "Persistent local shipment records, manual corrections, and carrier synchronization. Use a Bearer owner or ingestion token. Creates require Idempotency-Key; writes to an existing shipment require its quoted revision in If-Match.",
     "title": "Shipments API",
-    "version": "0.6.8"
+    "version": "0.6.9"
   },
   "openapi": "3.0.3",
   "paths": {

@@ -141,15 +141,66 @@ impl From<ProviderTracker> for Tracker {
         };
         let incoming = std::mem::take(&mut carrier_tracking);
         carrier_tracking.merge(&incoming);
+        let status = ontrac_status(raw.carrier, raw.status, &carrier_tracking.events);
         Self {
             id: raw.id,
             provider: ProviderId::EasyPost,
             tracking_code: raw.tracking_code,
             carrier: raw.carrier,
-            status: raw.status,
+            status,
             public_url: raw.public_url,
             carrier_tracking,
         }
+    }
+}
+
+/// OnTrac's OFDL scan can be more specific than EasyPost's in_transit enum.
+/// Preserve the provider evidence and only refine that enum when the latest
+/// timestamp group is unambiguously OFDL. Never infer order from array position
+/// or let a scan rewrite a terminal/failure status supplied by the provider.
+fn ontrac_status(carrier: Carrier, status: Status, events: &[CarrierEvent]) -> Status {
+    if carrier != Carrier::OnTrac || status != Status::InTransit || events.is_empty() {
+        return status;
+    }
+    let dated: Option<Vec<_>> = events
+        .iter()
+        .map(|event| {
+            let at = time::OffsetDateTime::parse(
+                event.datetime.as_deref()?,
+                &time::format_description::well_known::Rfc3339,
+            )
+            .ok()?;
+            Some((at.unix_timestamp_nanos(), event))
+        })
+        .collect();
+    let Some(dated) = dated else {
+        // Incomplete ordering cannot establish that OFDL is still current.
+        return status;
+    };
+    let Some(latest) = dated.iter().map(|(at, _)| *at).max() else {
+        return status;
+    };
+    if dated
+        .iter()
+        .filter(|(at, _)| *at == latest)
+        .all(|(_, event)| {
+            event
+                .source
+                .as_deref()
+                .is_some_and(|source| source.eq_ignore_ascii_case("OnTrac"))
+                && event
+                    .carrier_code
+                    .as_deref()
+                    .is_some_and(|code| code.eq_ignore_ascii_case("OFDL"))
+                && matches!(
+                    event.status,
+                    Some(Status::InTransit | Status::OutForDelivery)
+                )
+        })
+    {
+        Status::OutForDelivery
+    } else {
+        status
     }
 }
 
@@ -812,6 +863,166 @@ impl PreparedRegistration for EasyPostRegistration {
 
 #[cfg(test)]
 mod tests {
+    fn ontrac_tracker(status: &str, carrier: &str, events: serde_json::Value) -> super::Tracker {
+        let raw: super::ProviderTracker = serde_json::from_value(serde_json::json!({
+            "id":"trk_ontrac_fixture", "tracking_code":"SYNTHETIC-ONTRAC",
+            "carrier":carrier, "status":status, "tracking_details":events,
+        }))
+        .unwrap();
+        raw.into()
+    }
+
+    fn ontrac_event(code: &str, status: &str, at: serde_json::Value) -> serde_json::Value {
+        serde_json::json!({
+            "source":"OnTrac", "carrier_code":code, "status":status,
+            "datetime":at, "message":"Original carrier evidence",
+            "description":"Original carrier description",
+        })
+    }
+
+    #[test]
+    fn ontrac_ofdl_refines_stale_enum_without_rewriting_scan_evidence() {
+        use crate::models::Status;
+        let ofdl = ontrac_event(
+            "OFDL",
+            "in_transit",
+            serde_json::json!("2026-10-26T10:33:58Z"),
+        );
+        let earlier = ontrac_event(
+            "LOAD",
+            "in_transit",
+            serde_json::json!("2026-10-26T03:04:58-07:00"),
+        );
+        for events in [
+            serde_json::json!([earlier, ofdl]),
+            serde_json::json!([ofdl, earlier]),
+        ] {
+            let tracker = ontrac_tracker("in_transit", "OnTrac", events);
+            assert_eq!(tracker.status, Status::OutForDelivery);
+            let scan = tracker.carrier_tracking.events.last().unwrap();
+            assert_eq!(scan.status, Some(Status::InTransit));
+            assert_eq!(scan.carrier_code.as_deref(), Some("OFDL"));
+            assert_eq!(scan.message.as_deref(), Some("Original carrier evidence"));
+            assert_eq!(
+                scan.description.as_deref(),
+                Some("Original carrier description")
+            );
+        }
+        // Equal instants with compatible OFDL evidence are not an array-order tie.
+        let tracker = ontrac_tracker(
+            "in_transit",
+            "OnTrac",
+            serde_json::json!([
+                ofdl,
+                ontrac_event(
+                    "OFDL",
+                    "out_for_delivery",
+                    serde_json::json!("2026-10-26T03:33:58-07:00")
+                )
+            ]),
+        );
+        assert_eq!(tracker.status, Status::OutForDelivery);
+    }
+
+    #[test]
+    fn ontrac_ofdl_never_overrides_later_or_ambiguous_events() {
+        use crate::models::Status;
+        let ofdl = ontrac_event(
+            "OFDL",
+            "in_transit",
+            serde_json::json!("2026-10-26T10:33:58Z"),
+        );
+        for status in [
+            "delivered",
+            "cancelled",
+            "return_to_sender",
+            "failure",
+            "error",
+            "in_transit",
+        ] {
+            for later in ["2026-10-26T10:33:59Z", "2026-10-26T03:33:58-07:00"] {
+                let event = ontrac_event("OTHER", status, serde_json::json!(later));
+                for events in [
+                    serde_json::json!([ofdl, event]),
+                    serde_json::json!([event, ofdl]),
+                ] {
+                    let tracker = ontrac_tracker("in_transit", "OnTrac", events);
+                    assert_eq!(tracker.status, Status::InTransit, "{status} {later}");
+                }
+            }
+        }
+        // A newer transit scan supersedes an earlier OFDL scan, including
+        // timestamps whose lexical order differs from their chronological order.
+        let tracker = ontrac_tracker(
+            "in_transit",
+            "OnTrac",
+            serde_json::json!([
+                ofdl,
+                ontrac_event(
+                    "ORIG",
+                    "in_transit",
+                    serde_json::json!("2026-10-26T04:00:00-07:00")
+                )
+            ]),
+        );
+        assert_eq!(tracker.status, Status::InTransit);
+        for at in [
+            serde_json::Value::Null,
+            serde_json::json!("not-a-timestamp"),
+        ] {
+            let tracker = ontrac_tracker(
+                "in_transit",
+                "OnTrac",
+                serde_json::json!([ofdl, ontrac_event("OTHER", "delivered", at)]),
+            );
+            assert_eq!(tracker.status, Status::InTransit);
+        }
+    }
+
+    #[test]
+    fn ontrac_ofdl_is_narrow_and_requires_a_valid_dated_scan() {
+        use crate::models::Status;
+        let ofdl = ontrac_event(
+            "OFDL",
+            "in_transit",
+            serde_json::json!("2026-10-26T10:33:58Z"),
+        );
+        for status in [
+            "delivered",
+            "cancelled",
+            "return_to_sender",
+            "failure",
+            "error",
+            "available_for_pickup",
+        ] {
+            let tracker = ontrac_tracker(status, "OnTrac", serde_json::json!([ofdl]));
+            let expected: Status = serde_json::from_value(serde_json::json!(status)).unwrap();
+            assert_eq!(tracker.status, expected);
+        }
+        assert_eq!(
+            ontrac_tracker("in_transit", "UPS", serde_json::json!([ofdl])).status,
+            Status::InTransit
+        );
+        assert_eq!(
+            ontrac_tracker("in_transit", "OnTrac", serde_json::json!([])).status,
+            Status::InTransit
+        );
+        for at in [serde_json::Value::Null, serde_json::json!("bad")] {
+            let tracker = ontrac_tracker(
+                "in_transit",
+                "OnTrac",
+                serde_json::json!([ontrac_event("OFDL", "in_transit", at)]),
+            );
+            assert_eq!(tracker.status, Status::InTransit);
+        }
+        let mut other_source = ofdl;
+        other_source["source"] = serde_json::json!("OtherCarrier");
+        assert_eq!(
+            ontrac_tracker("in_transit", "OnTrac", serde_json::json!([other_source])).status,
+            Status::InTransit
+        );
+    }
+
     #[test]
     fn estimates_keep_civil_dates_and_preserve_explicit_times() {
         use super::{ProviderTracker, Tracker};
