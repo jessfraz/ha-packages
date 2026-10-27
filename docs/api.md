@@ -154,8 +154,8 @@ in event descriptions; an estimated time is not an actual arrival or a one-hour
 appointment. Calendar range queries retain ended windows when they overlap the
 requested range; agendas can retain today's history without changing the
 window's actual times. OnTrac's latest unambiguous dated `OFDL` scan refines a
-stale `in_transit` status; terminal provider statuses, newer conflicting scans and
-user overrides remain authoritative. Raw scan fields are preserved.
+stale `in_transit` status; terminal provider statuses and newer conflicting
+scans remain authoritative, as do user overrides. Raw scan fields are preserved.
 
 Use `sort=expected` for earliest estimated delivery first, or `sort=delivered`
 for newest actual delivery first. Unknown dates come last. The date and ID

@@ -221,8 +221,9 @@ history.
 A genuine timezone-aware carrier start/end window stays timed, such as 12–2.
 A date-only estimate or a lone ETA stays all-day: one timestamp never invents a
 delivery slot. Date-only ranges include the latest carrier date; default
-midnight bounds do not assert a real time slot. Original boundaries and raw carrier
-timestamps remain in event details, including timezone offsets and DST changes.
+midnight bounds do not assert a real time slot. Original boundaries and raw
+carrier timestamps remain in event details, including timezone offsets and DST
+changes.
 Only the provider's explicit carrier bounds qualify; the app cannot recover a
 window that its tracking provider does not expose. Delivered entries
 are labeled **Delivered** and use the verified actual delivery date, never an
