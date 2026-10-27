@@ -334,6 +334,9 @@ pub struct CarrierTracking {
     pub events: Vec<CarrierEvent>,
     pub signed_by: Option<String>,
     pub estimated_delivery_at: Option<String>,
+    /// Explicit provider bounds; a lone ETA never implies a delivery window.
+    #[serde(deserialize_with = "provider_optional")]
+    pub estimated_delivery_window: Option<EstimatedDeliveryWindow>,
     /// Actual delivery scan time, independent of an estimated delivery date.
     pub delivered_at: Option<String>,
     pub events_truncated: bool,
@@ -376,7 +379,55 @@ impl CarrierTracking {
         if let Some(estimated_delivery_at) = &incoming.estimated_delivery_at {
             self.estimated_delivery_at = Some(estimated_delivery_at.clone());
         }
+        // A successful provider snapshot is authoritative for its current
+        // window, including withdrawal. Historical scans and overrides survive.
+        self.estimated_delivery_window = incoming.estimated_delivery_window.clone();
         *self != previous
+    }
+}
+
+/// An inclusive date range or an explicit aware-time interval, as supplied by
+/// the carrier. Preserve offsets rather than inventing a timezone or endpoint.
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[serde(try_from = "DeliveryWindowBounds")]
+pub struct EstimatedDeliveryWindow {
+    pub start: String,
+    pub end: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DeliveryWindowBounds {
+    start: String,
+    end: String,
+}
+
+impl TryFrom<DeliveryWindowBounds> for EstimatedDeliveryWindow {
+    type Error = &'static str;
+
+    fn try_from(value: DeliveryWindowBounds) -> Result<Self, Self::Error> {
+        Self::new(value.start, value.end).ok_or("invalid estimated delivery window")
+    }
+}
+
+impl EstimatedDeliveryWindow {
+    pub(crate) fn new(start: String, end: String) -> Option<Self> {
+        if start.len() > 64 || end.len() > 64 {
+            return None;
+        }
+        let valid = if start.len() == 10 && end.len() == 10 {
+            let format =
+                time::format_description::parse_borrowed::<2>("[year]-[month]-[day]").ok()?;
+            let start = time::Date::parse(&start, &format).ok()?;
+            let end = time::Date::parse(&end, &format).ok()?;
+            end >= start
+        } else {
+            let format = time::format_description::well_known::Rfc3339;
+            let start = time::OffsetDateTime::parse(&start, &format).ok()?;
+            let end = time::OffsetDateTime::parse(&end, &format).ok()?;
+            end > start
+        };
+        valid.then_some(Self { start, end })
     }
 }
 
@@ -632,6 +683,8 @@ pub struct DeliveryEstimate {
     pub direction: Direction,
     pub status: Status,
     pub estimated_delivery_at: Option<String>,
+    #[serde(default)]
+    pub estimated_delivery_window: Option<EstimatedDeliveryWindow>,
     /// Verified actual carrier delivery date/time, never an ETA or override time.
     pub delivered_at: Option<String>,
 }
@@ -642,4 +695,108 @@ pub struct DeliveryEstimatePosition {
 pub struct DeliveryEstimateEntry {
     pub estimate: DeliveryEstimate,
     pub position: DeliveryEstimatePosition,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn estimated_delivery_windows_require_valid_explicit_paired_bounds() {
+        for (start, end) in [
+            ("2031-02-17", "2031-02-17"),
+            ("2031-02-17", "2031-02-19"),
+            ("2031-02-17T12:00:00-05:00", "2031-02-17T14:00:00-05:00"),
+            ("2031-02-17T12:00:00-05:00", "2031-02-17T18:00:00Z"),
+            ("2031-02-17T00:00:00-05:00", "2031-02-18T00:00:00-05:00"),
+        ] {
+            let raw = serde_json::json!({ "start": start, "end": end });
+            let window: EstimatedDeliveryWindow = serde_json::from_value(raw.clone()).unwrap();
+            assert_eq!(window.start, start);
+            assert_eq!(window.end, end);
+            assert_eq!(serde_json::to_value(window).unwrap(), raw);
+        }
+        for (start, end) in [
+            ("2031-02-17", "2031-02-16"),
+            ("2031-02-30", "2031-03-01"),
+            ("2031-2-17", "2031-02-18"),
+            ("2031-02-17", "2031-02-17T14:00:00Z"),
+            ("2031-02-17T12:00:00", "2031-02-17T14:00:00"),
+            ("2031-02-17T12:00:00Z", "2031-02-17T12:00:00Z"),
+            ("2031-02-17T12:00:00-05:00", "2031-02-17T16:00:00Z"),
+            ("2031-02-17T12:00:00Z", "malformed"),
+            ("", "2031-02-17T12:00:00Z"),
+        ] {
+            assert!(
+                serde_json::from_value::<EstimatedDeliveryWindow>(
+                    serde_json::json!({ "start": start, "end": end })
+                )
+                .is_err(),
+                "accepted invalid window {start} / {end}"
+            );
+        }
+        for raw in [
+            serde_json::json!({ "start": "2031-02-17" }),
+            serde_json::json!({ "end": "2031-02-17" }),
+            serde_json::json!({ "start": null, "end": "2031-02-17" }),
+        ] {
+            assert!(serde_json::from_value::<EstimatedDeliveryWindow>(raw.clone()).is_err());
+            // Optional malformed carrier metadata must not hide other scans.
+            let tracking: CarrierTracking = serde_json::from_value(serde_json::json!({
+                "estimated_delivery_window": raw,
+                "estimated_delivery_at": "2031-02-17T12:00:00Z"
+            }))
+            .unwrap();
+            assert_eq!(tracking.estimated_delivery_window, None);
+            assert!(tracking.estimated_delivery_at.is_some());
+        }
+    }
+
+    #[test]
+    fn successful_snapshots_replace_and_withdraw_windows_without_erasing_scan_history() {
+        let event = CarrierEvent {
+            status: Some(Status::Delivered),
+            datetime: Some("2031-02-17T14:30:00-05:00".into()),
+            ..Default::default()
+        };
+        let mut stored = CarrierTracking {
+            events: vec![event.clone()],
+            signed_by: Some("Recipient".into()),
+            estimated_delivery_at: Some("2031-02-17T18:00:00Z".into()),
+            estimated_delivery_window: EstimatedDeliveryWindow::new(
+                "2031-02-17T12:00:00-05:00".into(),
+                "2031-02-17T14:00:00-05:00".into(),
+            ),
+            ..Default::default()
+        };
+        let replacement = CarrierTracking {
+            estimated_delivery_window: EstimatedDeliveryWindow::new(
+                "2031-02-18".into(),
+                "2031-02-19".into(),
+            ),
+            ..Default::default()
+        };
+        assert!(stored.merge(&replacement));
+        assert_eq!(
+            stored.estimated_delivery_window,
+            replacement.estimated_delivery_window
+        );
+        let point_only = CarrierTracking {
+            estimated_delivery_at: Some("2031-02-19T12:00:00Z".into()),
+            ..Default::default()
+        };
+        assert!(stored.merge(&point_only));
+        assert_eq!(stored.estimated_delivery_window, None);
+        assert_eq!(
+            stored.estimated_delivery_at,
+            point_only.estimated_delivery_at
+        );
+        assert_eq!(stored.events, [event]);
+        assert_eq!(stored.signed_by.as_deref(), Some("Recipient"));
+        assert_eq!(
+            stored.delivered_at.as_deref(),
+            Some("2031-02-17T14:30:00-05:00")
+        );
+        assert!(!stored.merge(&point_only));
+    }
 }

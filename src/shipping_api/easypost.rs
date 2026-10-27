@@ -145,6 +145,7 @@ impl From<ProviderTracker> for Tracker {
                 raw.est_delivery_date,
                 raw.carrier_detail,
             ),
+            estimated_delivery_window: None,
             delivered_at: None,
             events_truncated: false,
         };

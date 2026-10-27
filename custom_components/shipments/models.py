@@ -1,5 +1,6 @@
 """Validate the small backend projections consumed by native entities."""
 
+import re
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 from enum import StrEnum
@@ -252,35 +253,79 @@ class ShipmentItems:
 
 
 @dataclass(frozen=True, slots=True)
+class DeliveryWindow:
+    """An independently validated, paired carrier estimate with raw evidence."""
+
+    start: date | datetime
+    end: date | datetime
+    raw_start: str
+    raw_end: str
+
+
+@dataclass(frozen=True, slots=True)
 class DeliveryEstimate:
     """A carrier estimate for an active inbound shipment, never a promise."""
 
     shipment_id: UUID
     title: str
     carrier: str | None
-    estimated: date | datetime
+    estimated: date | datetime | None
     delivered: bool = False
+    window: DeliveryWindow | None = None
+    raw_estimated: str | None = None
 
     def calendar_event(self) -> CalendarEvent:
-        # A parcel's delivery day is not a one-hour appointment. Local dates
-        # keep it visible until local midnight, including DST transition days.
-        day = (
-            dt_util.as_local(self.estimated).date()
-            if isinstance(self.estimated, datetime)
-            else self.estimated
-        )
+        start: date | datetime
+        end: date | datetime
+        window = None if self.delivered else self.window
+        if window is not None:
+            start, end = window.start, window.end
+            if isinstance(start, datetime) and isinstance(end, datetime):
+                # Native midnight pairs commonly encode date precision. Preserve
+                # a point ETA's local day when inside those native dates;
+                # otherwise retain their inclusive civil-date range. Never turn
+                # these defaults into a midnight delivery appointment.
+                if start.timetz().replace(tzinfo=None) == time.min and (
+                    end.timetz().replace(tzinfo=None) == time.min
+                ):
+                    first, last = sorted((start.date(), end.date()))
+                    point_day = self._estimated_day()
+                    if point_day is not None and first <= point_day <= last:
+                        first = last = point_day
+                    start, end = first, last + timedelta(days=1)
+            else:
+                end += timedelta(days=1)
+        else:
+            day = self._estimated_day()
+            if day is None:
+                raise ValueError("A calendar event requires a delivery date or window")
+            start, end = day, day + timedelta(days=1)
         label = "Delivered" if self.delivered else "Estimated delivery"
+        evidence = (
+            f"{'Actual delivery' if self.delivered else 'Carrier estimate'}: "
+            f"{self.raw_estimated or self.estimated.isoformat()}. "
+            if self.estimated is not None
+            else ""
+        )
+        if window is not None:
+            evidence += f"Carrier window: {window.raw_start} to {window.raw_end}. "
         return CalendarEvent(
-            start=day,
-            end=day + timedelta(days=1),
+            start=start,
+            end=end,
             summary=f"Delivered: {self.title}" if self.delivered else self.title,
             description=(
                 f"{label}{f' via {self.carrier}' if self.carrier else ''}. "
-                f"{'Actual delivery' if self.delivered else 'Carrier estimate'}: "
-                f"{self.estimated.isoformat()}. "
+                + evidence
                 + ("" if self.delivered else "Carrier estimates can change.")
             ),
             uid=str(self.shipment_id),
+        )
+
+    def _estimated_day(self) -> date | None:
+        return (
+            dt_util.as_local(self.estimated).date()
+            if isinstance(self.estimated, datetime)
+            else self.estimated
         )
 
 
@@ -304,17 +349,64 @@ def delivery_estimate(record: object) -> tuple[UUID, DeliveryEstimate | None]:
     value = (
         record.get("delivered_at") if delivered else record.get("estimated_delivery_at")
     )
-    if value is None:
-        return identity, None
     carrier = record.get("carrier")
     if carrier is not None and not isinstance(carrier, str):
         raise ValueError("Invalid shipment carrier")
     estimated = parse_delivery_estimate(value)
+    window = (
+        None
+        if delivered
+        else parse_delivery_window(record.get("estimated_delivery_window"))
+    )
     return identity, (
-        DeliveryEstimate(identity, title, carrier, estimated, delivered)
-        if estimated is not None
+        DeliveryEstimate(
+            identity,
+            title,
+            carrier,
+            estimated,
+            delivered,
+            window,
+            value if isinstance(value, str) else None,
+        )
+        if estimated is not None or window is not None
         else None
     )
+
+
+def parse_delivery_window(value: object) -> DeliveryWindow | None:
+    """Accept only complete ISO-date or aware RFC3339 carrier bounds."""
+    if not isinstance(value, dict):
+        return None
+    start_raw, end_raw = value.get("start"), value.get("end")
+    if not isinstance(start_raw, str) or not isinstance(end_raw, str):
+        return None
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", start_raw) and re.fullmatch(
+        r"\d{4}-\d{2}-\d{2}", end_raw
+    ):
+        start, end = dt_util.parse_date(start_raw), dt_util.parse_date(end_raw)
+        if start is not None and end is not None and end >= start:
+            return DeliveryWindow(start, end, start_raw, end_raw)
+        return None
+    rfc3339 = (
+        r"\d{4}-\d{2}-\d{2}[Tt](?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d"
+        r"(?:\.\d+)?(?:[Zz]|[+-](?:[01]\d|2[0-3]):[0-5]\d)"
+    )
+    if not re.fullmatch(rfc3339, start_raw) or not re.fullmatch(rfc3339, end_raw):
+        return None
+    try:
+        start_at = dt_util.parse_datetime(start_raw)
+        end_at = dt_util.parse_datetime(end_raw)
+    except ValueError:
+        return None
+    if (
+        start_at is None
+        or end_at is None
+        or start_at.tzinfo is None
+        or end_at.tzinfo is None
+        or end_at.timestamp() <= start_at.timestamp()
+    ):
+        return None
+    return DeliveryWindow(start_at, end_at, start_raw, end_raw)
 
 
 def parse_delivery_estimate(value: object) -> date | datetime | None:

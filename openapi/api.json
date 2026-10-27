@@ -236,6 +236,16 @@
             "nullable": true,
             "type": "string"
           },
+          "estimated_delivery_window": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/EstimatedDeliveryWindow"
+              }
+            ],
+            "default": null,
+            "description": "Explicit provider bounds; a lone ETA never implies a delivery window.",
+            "nullable": true
+          },
           "events": {
             "default": [],
             "items": {
@@ -437,6 +447,15 @@
             "nullable": true,
             "type": "string"
           },
+          "estimated_delivery_window": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/EstimatedDeliveryWindow"
+              }
+            ],
+            "default": null,
+            "nullable": true
+          },
           "id": {
             "format": "uuid",
             "type": "string"
@@ -500,6 +519,22 @@
         "required": [
           "message",
           "request_id"
+        ],
+        "type": "object"
+      },
+      "EstimatedDeliveryWindow": {
+        "description": "An inclusive date range or an explicit aware-time interval, as supplied by the carrier. Preserve offsets rather than inventing a timezone or endpoint.",
+        "properties": {
+          "end": {
+            "type": "string"
+          },
+          "start": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "end",
+          "start"
         ],
         "type": "object"
       },
@@ -745,6 +780,7 @@
             "default": {
               "delivered_at": null,
               "estimated_delivery_at": null,
+              "estimated_delivery_window": null,
               "events": [],
               "events_truncated": false,
               "signed_by": null
@@ -852,6 +888,7 @@
             "default": {
               "delivered_at": null,
               "estimated_delivery_at": null,
+              "estimated_delivery_window": null,
               "events": [],
               "events_truncated": false,
               "signed_by": null
@@ -1335,7 +1372,7 @@
   "info": {
     "description": "Persistent local shipment records, manual corrections, and carrier synchronization. Use a Bearer owner or ingestion token. Creates require Idempotency-Key; writes to an existing shipment require its quoted revision in If-Match.",
     "title": "Shipments API",
-    "version": "0.6.9"
+    "version": "0.6.10"
   },
   "openapi": "3.0.3",
   "paths": {

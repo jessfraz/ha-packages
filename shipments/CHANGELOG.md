@@ -1,3 +1,11 @@
+## 0.6.10
+
+- Preserve explicit carrier delivery-window bounds separately from a point ETA.
+  Show genuine aware start/end windows as timed calendar entries; keep date-only
+  estimates and lone ETAs all-day without inventing a delivery slot.
+- Preserve delivered calendar history and raw boundary offsets. Keep windows
+  queryable after their end time so an agenda can retain today’s history.
+
 ## 0.6.9
 
 - Remove artificial EasyPost request spacing and queue concurrent work within a

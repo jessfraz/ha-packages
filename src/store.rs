@@ -1167,6 +1167,7 @@ impl Store {
             tracking_carrier: Option<String>,
             status: String,
             estimated_delivery_at: Option<String>,
+            estimated_delivery_window: Option<String>,
             delivered_at: Option<String>,
             calendar_sort_key: i64,
         }
@@ -1193,6 +1194,11 @@ impl Store {
                             .transpose()?,
                         status: serde_json::from_str(&row.status)?,
                         estimated_delivery_at: row.estimated_delivery_at,
+                        estimated_delivery_window: row
+                            .estimated_delivery_window
+                            .as_deref()
+                            .map(serde_json::from_str)
+                            .transpose()?,
                         delivered_at: row.delivered_at,
                     },
                     position: DeliveryEstimatePosition {
@@ -1390,6 +1396,7 @@ fn delivery_estimates_query(
         r#"SELECT id, title, tracking_carrier,
                   coalesce(override_status, carrier_status, '"expected"') AS status,
                   json_extract(carrier_tracking, '$.estimated_delivery_at') AS estimated_delivery_at,
+                  json_extract(carrier_tracking, '$.estimated_delivery_window') AS estimated_delivery_window,
                   json_extract(carrier_tracking, '$.delivered_at') AS delivered_at,
                   calendar_sort_key
            FROM shipments

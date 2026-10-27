@@ -132,18 +132,29 @@ tracking-number ownership apply after input resolution. Existing shipments and
 user decisions are not migrated or re-registered by this change.
 
 `GET /v1/delivery-estimates` includes nonarchived inbound delivery estimates
-and delivered history. `estimated_delivery_at` is nullable; `delivered_at`
+and delivered history. `estimated_delivery_at` is nullable;
+`estimated_delivery_window` carries explicit carrier-provided `start`/`end`
+bounds separately from a point ETA. A window can exist without a point ETA.
+Only paired dates or timezone-aware timestamps are accepted; raw offsets are
+preserved. AfterShip supplies carrier bounds through
+`courier_estimated_delivery_date.estimated_delivery_date_min/max`; predictive
+AI bounds and a lone EasyPost ETA are not carrier time windows. `delivered_at`
 contains the verified actual delivery timestamp when available. Delivered
 shipments without a verified actual date are omitted rather than dated from
 an ETA or an override's creation time. Effective user status remains authoritative;
 archived, cancelled and returned shipments stay excluded. Keyset pagination
-orders delivered rows by actual date and other rows by estimate.
+orders delivered rows by actual date and other rows by window start or estimate.
 
-The native calendar shows full local delivery days. Delivered entries are
+The native calendar shows genuine aware start/end delivery windows as timed
+events. Date-only bounds, default midnight bounds and lone ETAs remain all-day;
+no endpoint is invented from a point estimate. Date ranges include the latest
+carrier date. Delivered entries are
 labeled `Delivered` and use actual delivery dates. Raw carrier timestamps stay
 in event descriptions; an estimated time is not an actual arrival or a one-hour
-appointment. OnTrac's latest unambiguous dated `OFDL` scan refines a stale
-`in_transit` status; terminal provider statuses, newer conflicting scans and
+appointment. Calendar range queries retain ended windows when they overlap the
+requested range; agendas can retain today's history without changing the
+window's actual times. OnTrac's latest unambiguous dated `OFDL` scan refines a
+stale `in_transit` status; terminal provider statuses, newer conflicting scans and
 user overrides remain authoritative. Raw scan fields are preserved.
 
 Use `sort=expected` for earliest estimated delivery first, or `sort=delivered`

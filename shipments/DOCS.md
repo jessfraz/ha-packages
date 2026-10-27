@@ -216,9 +216,15 @@ unknown problem state into a healthy one.
 ## Delivery calendar
 
 `calendar.shipments_inbound_deliveries` is a read-only calendar of inbound
-estimated delivery days and verified delivered history. Entries span their full
-local day, including DST changes, so a parcel does not vanish after an estimated
-hour passes. Raw carrier timestamps remain in event details. Delivered entries
+estimated delivery days, explicit carrier windows and verified delivered
+history.
+A genuine timezone-aware carrier start/end window stays timed, such as 12–2.
+A date-only estimate or a lone ETA stays all-day: one timestamp never invents a
+delivery slot. Date-only ranges include the latest carrier date; default
+midnight bounds do not assert a real time slot. Original boundaries and raw carrier
+timestamps remain in event details, including timezone offsets and DST changes.
+Only the provider's explicit carrier bounds qualify; the app cannot recover a
+window that its tracking provider does not expose. Delivered entries
 are labeled **Delivered** and use the verified actual delivery date, never an
 ETA or the time a manual override was saved. A delivered shipment without a
 verified actual date cannot be dated truthfully and is omitted until that gap is
@@ -235,7 +241,9 @@ Dashboard cards such as Calendar Card Pro can use this same standard calendar
 entity. Install and configure them separately through HACS; Shipments does not
 bundle a calendar card. Calendar Card Pro currently supports card-wide actions
 rather than a different destination for each event, so the native calendar
-click behavior does not extend to its event rows.
+click behavior does not extend to its event rows. To retain genuine windows
+after they end today, keep the agenda's start date at today and enable
+`show_past_events`; do not flatten timed windows or extend their end times.
 
 ## Ask Assist
 
