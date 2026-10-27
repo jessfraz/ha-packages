@@ -12,7 +12,8 @@ use uuid::Uuid;
 use crate::{
     carrier::Carrier,
     models::{
-        CarrierEvent, CarrierTracking, ProviderValue, Status, TrackingLocation, provider_optional,
+        CarrierEvent, CarrierTracking, EstimatedDeliveryWindow, ProviderValue, Status,
+        TrackingLocation, provider_optional,
     },
     shipping_api::{
         PreparedRegistration, ShippingApi,
@@ -225,6 +226,10 @@ struct ProviderTracker {
 struct Estimate {
     #[serde(default, deserialize_with = "provider_optional")]
     estimated_delivery_date: Option<String>,
+    #[serde(default, deserialize_with = "provider_optional")]
+    estimated_delivery_date_min: Option<String>,
+    #[serde(default, deserialize_with = "provider_optional")]
+    estimated_delivery_date_max: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -287,8 +292,18 @@ impl ProviderTracker {
             _ => {}
         }
         let status = self.tag.status(&self.subtag);
+        let estimated_delivery_window =
+            self.courier_estimated_delivery_date
+                .as_ref()
+                .and_then(|estimate| {
+                    EstimatedDeliveryWindow::new(
+                        estimate.estimated_delivery_date_min.clone()?,
+                        estimate.estimated_delivery_date_max.clone()?,
+                    )
+                });
         let mut tracking = CarrierTracking {
             signed_by: clean_text(self.signed_by, 200),
+            estimated_delivery_window,
             estimated_delivery_at: self
                 .courier_estimated_delivery_date
                 .and_then(|estimate| clean_datetime(estimate.estimated_delivery_date))
@@ -996,6 +1011,81 @@ mod tests {
 
     const NUMBER: &str = "SPXTEST00000001";
     const ID: &str = "synthetic-tracker-id";
+
+    #[test]
+    fn only_explicit_courier_delivery_bounds_produce_a_window() {
+        let normalize = |courier: serde_json::Value, ai: serde_json::Value| {
+            serde_json::from_value::<ProviderTracker>(serde_json::json!({
+                "id": ID, "tracking_number": NUMBER, "slug": "speedx",
+                "tag": "InTransit", "subtag": "InTransit_001",
+                "courier_estimated_delivery_date": courier,
+                "aftership_estimated_delivery_date": ai
+            }))
+            .unwrap()
+            .normalize(NUMBER, Some(Courier::SpeedX))
+            .unwrap()
+            .carrier_tracking
+        };
+        let ai = serde_json::json!({
+            "estimated_delivery_date": "2031-02-18T12:00:00Z",
+            "estimated_delivery_date_min": "2031-02-18T12:00:00Z",
+            "estimated_delivery_date_max": "2031-02-18T14:00:00Z"
+        });
+        for (start, end) in [
+            ("2031-02-17T12:00:00-05:00", "2031-02-17T14:00:00-05:00"),
+            ("2031-02-17", "2031-02-19"),
+        ] {
+            let tracking = normalize(
+                serde_json::json!({
+                    "estimated_delivery_date_min": start,
+                    "estimated_delivery_date_max": end
+                }),
+                serde_json::Value::Null,
+            );
+            let window = tracking.estimated_delivery_window.unwrap();
+            assert_eq!(window.start, start);
+            assert_eq!(window.end, end);
+            assert_eq!(tracking.estimated_delivery_at, None);
+        }
+        let point = "2031-02-17T18:00:00Z";
+        for courier in [
+            serde_json::Value::Null,
+            serde_json::json!({"estimated_delivery_date": point}),
+            serde_json::json!({"estimated_delivery_date": point,
+                "estimated_delivery_date_min": "2031-02-17T12:00:00-05:00"}),
+            serde_json::json!({"estimated_delivery_date": point,
+                "estimated_delivery_date_max": "2031-02-17T14:00:00-05:00"}),
+            serde_json::json!({"estimated_delivery_date": point,
+                "estimated_delivery_date_min": "2031-02-17T12:00:00",
+                "estimated_delivery_date_max": "2031-02-17T14:00:00"}),
+            serde_json::json!({"estimated_delivery_date": point,
+                "estimated_delivery_date_min": "2031-02-19",
+                "estimated_delivery_date_max": "2031-02-17"}),
+            serde_json::json!({"estimated_delivery_date": point,
+                "estimated_delivery_date_min": ["2031-02-17"],
+                "estimated_delivery_date_max": "2031-02-19"}),
+        ] {
+            let has_courier = !courier.is_null();
+            let tracking = normalize(courier, ai.clone());
+            assert_eq!(tracking.estimated_delivery_window, None);
+            assert_eq!(
+                tracking.estimated_delivery_at.as_deref(),
+                Some(if has_courier {
+                    point
+                } else {
+                    "2031-02-18T12:00:00Z"
+                })
+            );
+        }
+        let tracking = normalize(
+            serde_json::json!({"estimated_delivery_date": point,
+                "estimated_delivery_date_min": "2031-02-17T12:00:00-05:00",
+                "estimated_delivery_date_max": "2031-02-17T14:00:00-05:00"}),
+            ai,
+        );
+        assert!(tracking.estimated_delivery_window.is_some());
+        assert_eq!(tracking.estimated_delivery_at.as_deref(), Some(point));
+    }
 
     #[derive(Serialize)]
     struct FixtureEnvelope<T> {

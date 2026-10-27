@@ -65,6 +65,9 @@ class InboundDeliveryCalendar(CoordinatorEntity[ShipmentsCoordinator], CalendarE
     async def async_get_events(
         self, hass: HomeAssistant, start_date: datetime, end_date: datetime
     ) -> list[CalendarEvent]:
+        # Use the requested interval, not now: a full-day query includes an
+        # authentic carrier window that ended earlier that day, with its exact
+        # bounds. The entity's current/future event property stays independent.
         return [
             event
             for event in self._events()

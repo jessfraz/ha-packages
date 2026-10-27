@@ -18,8 +18,9 @@ use serde::Serialize;
 use shipments::{
     api,
     models::{
-        CarrierTracking, CreateShipment, DeliveryEstimate, Direction, InputTracking, Patch,
-        SetOverride, Shipment, StateEventPage, StateEventType, Status, UpdateShipment,
+        CarrierTracking, CreateShipment, DeliveryEstimate, Direction, EstimatedDeliveryWindow,
+        InputTracking, Patch, SetOverride, Shipment, StateEventPage, StateEventType, Status,
+        UpdateShipment,
     },
     store::Store,
     sync::SyncWorker,
@@ -28,6 +29,386 @@ use sqlx::{QueryBuilder, Row, Sqlite};
 
 const OWNER: &str = "state-feed-owner-fixture-at-least-32-bytes";
 const INTEGRATION: &str = "state-feed-integration-fixture-at-least-32-bytes";
+
+fn delivery_window(start: &str, end: &str) -> EstimatedDeliveryWindow {
+    serde_json::from_value(serde_json::json!({"start": start, "end": end})).unwrap()
+}
+
+async fn set_delivery_window(store: &Store, shipment: &Shipment, window: &EstimatedDeliveryWindow) {
+    sqlx::query("UPDATE shipments SET carrier_tracking=json_set(carrier_tracking,'$.estimated_delivery_window',json(?)) WHERE id=?")
+        .bind(serde_json::to_string(window).unwrap())
+        .bind(shipment.id.to_string())
+        .execute(store.pool())
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn calendar_projects_explicit_windows_without_point_eta_and_preserves_cursor_and_history() {
+    let fixture = Fixture::new().await;
+    let first = create_estimate(
+        &fixture.store,
+        "WINDOW001",
+        Direction::Inbound,
+        Status::InTransit,
+        None,
+    )
+    .await;
+    let first_window = delivery_window("2031-02-17T12:00:00-05:00", "2031-02-17T14:00:00-05:00");
+    set_delivery_window(&fixture.store, &first, &first_window).await;
+    let second = create_estimate(
+        &fixture.store,
+        "WINDOW002",
+        Direction::Inbound,
+        Status::InTransit,
+        Some("2031-02-16T12:00:00Z"),
+    )
+    .await;
+    let second_window = delivery_window("2031-02-17T18:00:00Z", "2031-02-17T20:00:00Z");
+    set_delivery_window(&fixture.store, &second, &second_window).await;
+    let date_only = create_estimate(
+        &fixture.store,
+        "WINDOW003",
+        Direction::Inbound,
+        Status::InTransit,
+        None,
+    )
+    .await;
+    set_delivery_window(
+        &fixture.store,
+        &date_only,
+        &delivery_window("2031-02-18", "2031-02-19"),
+    )
+    .await;
+    let delivered = create_estimate(
+        &fixture.store,
+        "WINDOW004",
+        Direction::Inbound,
+        Status::Delivered,
+        Some("2031-02-19"),
+    )
+    .await;
+    set_delivery_window(&fixture.store, &delivered, &first_window).await;
+    sqlx::query("UPDATE shipments SET carrier_tracking=json_set(carrier_tracking,'$.delivered_at','2031-02-16T12:30:00-05:00') WHERE id=?")
+        .bind(delivered.id.to_string()).execute(fixture.store.pool()).await.unwrap();
+    let no_actual = create_estimate(
+        &fixture.store,
+        "WINDOW005",
+        Direction::Inbound,
+        Status::Delivered,
+        None,
+    )
+    .await;
+    set_delivery_window(&fixture.store, &no_actual, &first_window).await;
+    let cancelled = fixture.correct(&date_only, Status::Cancelled).await;
+    // User decisions still filter ranges, and clearing one restores its range.
+    assert_eq!(
+        fixture
+            .store
+            .delivery_estimates(None, 200)
+            .await
+            .unwrap()
+            .len(),
+        3
+    );
+    fixture
+        .store
+        .set_override(cancelled.id, cancelled.revision, None, "owner")
+        .await
+        .unwrap();
+    let all = fixture.store.delivery_estimates(None, 200).await.unwrap();
+    assert_eq!(
+        all.iter()
+            .map(|entry| entry.estimate.id)
+            .collect::<Vec<_>>(),
+        [delivered.id, first.id, second.id, date_only.id]
+    );
+    assert_eq!(all[1].estimate.estimated_delivery_at, None);
+    assert_eq!(
+        all[1].estimate.estimated_delivery_window.as_ref(),
+        Some(&first_window)
+    );
+    assert_eq!(
+        all[2].estimate.estimated_delivery_at.as_deref(),
+        Some("2031-02-16T12:00:00Z")
+    );
+    assert_eq!(all[0].estimate.status, Status::Delivered);
+    assert_eq!(
+        all[0].estimate.delivered_at.as_deref(),
+        Some("2031-02-16T12:30:00-05:00")
+    );
+    assert_eq!(
+        fixture
+            .store
+            .get(first.id)
+            .await
+            .unwrap()
+            .carrier_tracking
+            .estimated_delivery_window,
+        Some(first_window)
+    );
+    let first_position = all.into_iter().nth(1).unwrap().position;
+    // Moving the previously read row later cannot mutate the captured cursor.
+    set_delivery_window(
+        &fixture.store,
+        &first,
+        &delivery_window("2031-02-20", "2031-02-21"),
+    )
+    .await;
+    let next = fixture
+        .store
+        .delivery_estimates(Some(first_position), 1)
+        .await
+        .unwrap();
+    assert_eq!(next[0].estimate.id, second.id);
+    let server = api::start(
+        "127.0.0.1:0".parse().unwrap(),
+        Arc::new(
+            api::Context::new(fixture.store.clone(), OWNER, None, None)
+                .with_integration(INTEGRATION),
+        ),
+    )
+    .unwrap();
+    let response = Client::new()
+        .get(format!(
+            "http://{}/v1/delivery-estimates",
+            server.local_addr()
+        ))
+        .bearer_auth(INTEGRATION)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let page: ResultsPage<DeliveryEstimate> = response.json().await.unwrap();
+    assert_eq!(
+        page.items
+            .iter()
+            .find(|item| item.id == second.id)
+            .unwrap()
+            .estimated_delivery_window
+            .as_ref(),
+        Some(&second_window)
+    );
+    assert!(!page.items.iter().any(|item| item.id == no_actual.id));
+    server.close().await.unwrap();
+    fixture.store.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn provider_window_migration_preserves_existing_history_and_rebuilds_calendar_index() {
+    use sqlx::{
+        migrate::Migrator,
+        sqlite::{SqliteConnectOptions, SqlitePoolOptions},
+    };
+    let directory = tempfile::tempdir().unwrap();
+    let old_migrations = directory.path().join("old-migrations");
+    std::fs::create_dir(&old_migrations).unwrap();
+    for entry in
+        std::fs::read_dir(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("migrations"))
+            .unwrap()
+    {
+        let entry = entry.unwrap();
+        let name = entry.file_name();
+        if name
+            .to_str()
+            .unwrap()
+            .split_once('_')
+            .unwrap()
+            .0
+            .parse::<u32>()
+            .unwrap()
+            < 20
+        {
+            std::fs::copy(entry.path(), old_migrations.join(name)).unwrap();
+        }
+    }
+    let path = directory.path().join("migration.sqlite3");
+    let old = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(
+            SqliteConnectOptions::new()
+                .filename(&path)
+                .create_if_missing(true)
+                .foreign_keys(true),
+        )
+        .await
+        .unwrap();
+    Migrator::new(old_migrations.as_path())
+        .await
+        .unwrap()
+        .run(&old)
+        .await
+        .unwrap();
+    let id = uuid::Uuid::now_v7();
+    let tracking = serde_json::json!({
+        "events": [{"status":"delivered", "datetime":"2031-02-16T14:00:00-05:00"}],
+        "delivered_at":"2031-02-16T14:00:00-05:00",
+        "estimated_delivery_at":"2031-02-19",
+        "estimated_delivery_window":{"start":"2031-02-18T12:00:00-05:00","end":"2031-02-18T14:00:00-05:00"}
+    }).to_string();
+    sqlx::query("INSERT INTO shipments(id,title,direction,tracking_number,tracking_carrier,revision,carrier_status,carrier_tracking,override_status,override_reason,archived) VALUES(?,'Window migration fixture','inbound','MIGRATIONWINDOW001','usps',7,'\"in_transit\"',?,'\"delivered\"','Recipient decision',0)")
+        .bind(id.to_string()).bind(&tracking).execute(&old).await.unwrap();
+    let before: (String, String, String, i64) = sqlx::query_as("SELECT carrier_tracking,override_status,override_reason,revision FROM shipments WHERE id=?").bind(id.to_string()).fetch_one(&old).await.unwrap();
+    old.close().await;
+    let store = Store::open(&path).await.unwrap();
+    let after: (String, String, String, i64) = sqlx::query_as("SELECT carrier_tracking,override_status,override_reason,revision FROM shipments WHERE id=?").bind(id.to_string()).fetch_one(store.pool()).await.unwrap();
+    assert_eq!(after, before);
+    let page = store.delivery_estimates(None, 1).await.unwrap();
+    assert_eq!(page.len(), 1);
+    assert_eq!(page[0].estimate.status, Status::Delivered);
+    let actual: i64 = sqlx::query_scalar("SELECT unixepoch('2031-02-16T14:00:00-05:00')")
+        .fetch_one(store.pool())
+        .await
+        .unwrap();
+    assert_eq!(page[0].position.sort_key, actual);
+    sqlx::query("UPDATE shipments SET override_status=NULL,override_reason=NULL,carrier_tracking=json_remove(carrier_tracking,'$.estimated_delivery_at') WHERE id=?").bind(id.to_string()).execute(store.pool()).await.unwrap();
+    let page = store.delivery_estimates(None, 1).await.unwrap();
+    assert_eq!(page[0].estimate.estimated_delivery_at, None);
+    assert_eq!(
+        page[0]
+            .estimate
+            .estimated_delivery_window
+            .as_ref()
+            .unwrap()
+            .start,
+        "2031-02-18T12:00:00-05:00"
+    );
+    let start: i64 = sqlx::query_scalar("SELECT unixepoch('2031-02-18T12:00:00-05:00')")
+        .fetch_one(store.pool())
+        .await
+        .unwrap();
+    assert_eq!(page[0].position.sort_key, start);
+    assert_eq!(
+        sqlx::query_scalar::<_, String>("PRAGMA integrity_check")
+            .fetch_one(store.pool())
+            .await
+            .unwrap(),
+        "ok"
+    );
+    store.close().await.unwrap();
+    Store::open(&path).await.unwrap().close().await.unwrap();
+}
+
+#[tokio::test]
+async fn successful_point_only_refresh_withdraws_stored_window_without_losing_decisions() {
+    use shipments::shipping_api::{
+        PreparedRegistration, ShippingApi,
+        types::{ApiFuture, ProviderId, Registration},
+    };
+    #[derive(Clone)]
+    struct PointSnapshot(Tracker);
+    impl ShippingApi for PointSnapshot {
+        fn id(&self) -> ProviderId {
+            ProviderId::EasyPost
+        }
+        fn blocked(&self) -> bool {
+            false
+        }
+        fn for_request(&self, _: &str, _: Option<&str>) -> Arc<dyn ShippingApi> {
+            Arc::new(self.clone())
+        }
+        fn check_connection(&self) -> ApiFuture<'_, ()> {
+            panic!("refresh must not check a live connection")
+        }
+        fn reconcile_registration<'a>(
+            &'a self,
+            _: &'a Registration,
+        ) -> ApiFuture<'a, Option<Tracker>> {
+            panic!("already registered fixture must not reconcile")
+        }
+        fn prepare_registration(
+            &self,
+            _: Registration,
+        ) -> ApiFuture<'_, Box<dyn PreparedRegistration>> {
+            panic!("refresh must not create a tracker")
+        }
+        fn retrieve<'a>(&'a self, id: &'a str, number: &'a str) -> ApiFuture<'a, Tracker> {
+            assert_eq!(id, self.0.id);
+            assert_eq!(number, self.0.tracking_code);
+            Box::pin(async { Ok(self.0.clone()) })
+        }
+    }
+    let fixture = Fixture::new().await;
+    let shipment = create_estimate(
+        &fixture.store,
+        "WITHDRAW001",
+        Direction::Inbound,
+        Status::InTransit,
+        Some("2031-02-17T18:00:00Z"),
+    )
+    .await;
+    let history: CarrierTracking = serde_json::from_value(serde_json::json!({
+        "estimated_delivery_at":"2031-02-17T18:00:00Z",
+        "estimated_delivery_window":{"start":"2031-02-17T12:00:00-05:00","end":"2031-02-17T14:00:00-05:00"},
+        "events":[{"status":"in_transit","datetime":"2031-02-16T13:00:00-05:00","carrier_code":"ACCEPTED","message":"Original carrier scan"}]
+    })).unwrap();
+    sqlx::query("UPDATE shipments SET carrier_tracking=? WHERE id=?")
+        .bind(serde_json::to_string(&history).unwrap())
+        .bind(shipment.id.to_string())
+        .execute(fixture.store.pool())
+        .await
+        .unwrap();
+    let shipment = fixture.correct(&shipment, Status::OutForDelivery).await;
+    let worker = SyncWorker::new(
+        fixture.store.pool().clone(),
+        Arc::new(PointSnapshot(Tracker {
+            provider: ProviderId::EasyPost,
+            id: shipment.sync.tracker_id.clone().unwrap(),
+            tracking_code: shipment.tracking.number.clone(),
+            carrier: shipment.tracking.carrier,
+            status: Status::InTransit,
+            public_url: None,
+            carrier_tracking: CarrierTracking {
+                estimated_delivery_at: Some("2031-02-18T19:00:00Z".into()),
+                ..Default::default()
+            },
+        })),
+    );
+    let mut previous_revision = shipment.revision;
+    for attempt in 0..2 {
+        sqlx::query("UPDATE shipments SET next_attempt_at=unixepoch() WHERE id=?")
+            .bind(shipment.id.to_string())
+            .execute(fixture.store.pool())
+            .await
+            .unwrap();
+        assert!(worker.tick().await.unwrap());
+        let current = fixture.store.get(shipment.id).await.unwrap();
+        assert_eq!(current.status, Status::OutForDelivery);
+        assert_eq!(
+            serde_json::to_value(&current.status_override).unwrap(),
+            serde_json::to_value(&shipment.status_override).unwrap()
+        );
+        assert_eq!(current.carrier_tracking.events, history.events);
+        assert_eq!(current.carrier_tracking.estimated_delivery_window, None);
+        assert_eq!(
+            current.carrier_tracking.estimated_delivery_at.as_deref(),
+            Some("2031-02-18T19:00:00Z")
+        );
+        assert_eq!(
+            current.revision,
+            previous_revision + i64::from(attempt == 0)
+        );
+        previous_revision = current.revision;
+        let estimates = fixture.store.delivery_estimates(None, 200).await.unwrap();
+        assert_eq!(estimates.len(), 1);
+        assert_eq!(estimates[0].estimate.estimated_delivery_window, None);
+        assert_eq!(
+            estimates[0].estimate.estimated_delivery_at.as_deref(),
+            Some("2031-02-18T19:00:00Z")
+        );
+    }
+    let history_events = fixture.store.events(shipment.id, 0, 200).await.unwrap();
+    assert!(
+        history_events
+            .iter()
+            .filter_map(|event| event.snapshot.as_ref())
+            .any(|snapshot| snapshot
+                .carrier_tracking
+                .estimated_delivery_window
+                .is_some())
+    );
+    fixture.store.close().await.unwrap();
+}
 
 struct Fixture {
     _directory: tempfile::TempDir,
@@ -948,7 +1329,7 @@ async fn event_feed_and_atomic_trigger_use_real_indexed_queries() {
     // These are the exact SQL shapes generated by the previous full-shipment
     // poll and the new bounded calendar projection, with representative binds.
     const CALENDAR_BEFORE: &str = r#"EXPLAIN QUERY PLAN SELECT shipments.*,expected_sort_key AS list_sort_key FROM shipments WHERE archived=? AND direction=? AND coalesce(override_status,carrier_status,'"expected"') NOT IN (?,?,?) ORDER BY expected_sort_key,id LIMIT ?"#;
-    const CALENDAR: &str = r#"SELECT id,title,tracking_carrier,coalesce(override_status,carrier_status,'"expected"') AS status,json_extract(carrier_tracking,'$.estimated_delivery_at') AS estimated_delivery_at,json_extract(carrier_tracking,'$.delivered_at') AS delivered_at,calendar_sort_key FROM shipments WHERE archived=0 AND direction='inbound' AND calendar_sort_key<9223372036854775807 AND coalesce(override_status,carrier_status,'"expected"') NOT IN ('"return_to_sender"','"cancelled"')"#;
+    const CALENDAR: &str = r#"SELECT id,title,tracking_carrier,coalesce(override_status,carrier_status,'"expected"') AS status,json_extract(carrier_tracking,'$.estimated_delivery_at') AS estimated_delivery_at,json_extract(carrier_tracking,'$.estimated_delivery_window') AS estimated_delivery_window,json_extract(carrier_tracking,'$.delivered_at') AS delivered_at,calendar_sort_key FROM shipments WHERE archived=0 AND direction='inbound' AND calendar_sort_key<9223372036854775807 AND coalesce(override_status,carrier_status,'"expected"') NOT IN ('"return_to_sender"','"cancelled"')"#;
     let previous = sqlx::query(CALENDAR_BEFORE)
         .bind(false)
         .bind("inbound")
