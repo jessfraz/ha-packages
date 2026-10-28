@@ -1,5 +1,7 @@
 # API
 
+For a typed command-line client, see [ha-shipments](cli.md).
+
 The Rust API is under `/v1`. The Home Assistant integration forwards it under
 `/api/shipments/v1` using Home Assistant authentication. The generated contract
 is available at `/openapi.json` and in the [OpenAPI schema](../openapi/api.json).

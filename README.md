@@ -114,6 +114,8 @@ the same input and key so the app can reconcile an existing tracker.
 For a Home Assistant app, enable the optional network port and substitute the
 host address. See [external API access](shipments/DOCS.md#agent-access).
 
+- [Rust CLI](docs/cli.md): `ha-shipments`, JSON I/O, native/HA authentication,
+  and Nix packages.
 - [API reference](docs/api.md): endpoints, filters, authentication, and errors.
 - [OpenAPI schema](openapi/api.json), also served at `/openapi.json`.
 - [Architecture](docs/architecture.md): provider implementations, persistence,
