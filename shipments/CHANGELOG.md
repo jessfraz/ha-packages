@@ -1,3 +1,12 @@
+## 0.6.11
+
+- Share civil-date precision between new and legacy EasyPost estimates, preserving
+  original ETA evidence and explicit timestamps. Keep calendar and due-today
+  selection on the same Home Assistant local-day/window projection.
+- Add deduplicated expected-today/out-for-delivery items with accurate statuses;
+  retain status-only sensors and delivery notifications. Use HA's timezone for
+  web date labels even when the browser is in another timezone.
+
 ## 0.6.10
 
 - Preserve explicit carrier delivery-window bounds separately from a point ETA.

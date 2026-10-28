@@ -17,6 +17,7 @@ async def test_summary_entities_and_unload(hass: HomeAssistant, entry) -> None:
     assert {state.entity_id: state.state for state in states} == {
         **{f"sensor.shipments_{key}": str(value) for key, value in SUMMARY.items()},
         "sensor.shipments_inbound_delivered_today": "1",
+        "sensor.shipments_inbound_due_today": "1",
         "sensor.shipments_inbound_active": "3",
         "sensor.shipments_inbound_out_for_delivery": "1",
         "sensor.shipments_inbound_exceptions": "0",
@@ -67,6 +68,7 @@ async def test_direction_counts_keep_existing_sensors_combined(
         "sensor.shipments_exceptions": "3",
         "sensor.shipments_sync_errors": "1",
         "sensor.shipments_inbound_delivered_today": "1",
+        "sensor.shipments_inbound_due_today": "1",
         "sensor.shipments_inbound_active": "4",
         "sensor.shipments_inbound_out_for_delivery": "1",
         "sensor.shipments_inbound_exceptions": "1",

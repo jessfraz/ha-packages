@@ -145,6 +145,21 @@ an ETA or an override's creation time. Effective user status remains authoritati
 archived, cancelled and returned shipments stay excluded. Keyset pagination
 orders delivered rows by actual date and other rows by window start or estimate.
 
+EasyPost untimed midnight-UTC ETA defaults are civil dates, even when optional
+local-date metadata is absent. Explicit carrier times, non-UTC offsets and
+fractional times remain instants. `carrier_tracking.estimated_delivery_raw`
+retains the original provider ETA. Legacy EasyPost snapshots use the same read
+projection until their next normal refresh; no scan history or user decisions
+are rewritten. AfterShip timestamps, actual delivery timestamps and paired
+windows are never subjected to this provider-specific date default.
+
+The native `inbound_due_today` sensor combines inbound estimates overlapping
+Home Assistant's local day with out-for-delivery parcels, deduplicated by UUID.
+It exposes bounded `items` with their actual status and an honest truncation
+flag. The status-only `inbound_out_for_delivery` sensor and notification
+semantics remain unchanged. Calendar and expected-today selection use the same
+event bounds, including date ranges, aware windows and DST boundaries.
+
 The native calendar shows genuine aware start/end delivery windows as timed
 events. Date-only bounds, default midnight bounds and lone ETAs remain all-day;
 no endpoint is invented from a point estimate. Date ranges include the latest

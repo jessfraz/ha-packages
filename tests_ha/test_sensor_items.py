@@ -254,9 +254,13 @@ async def test_sensor_details_are_capped_without_losing_the_authoritative_count(
     rows = backend.shipment_rows
     ordered = list(reversed(rows)) if delivered else rows
     assert [item["id"] for item in items] == [row.id for row in ordered[:20]]
-    assert len(shipment_requests(backend)) == 2
+    # Display attributes remain bounded. The OFD read is now fully paginated
+    # so the expected/OFD union can deduplicate IDs outside the first page.
+    assert all(request.query["limit"] == "20" for request in shipment_requests(backend))
     assert all(
-        "page_token" not in request.query for request in shipment_requests(backend)
+        "page_token" not in request.query
+        for request in shipment_requests(backend)
+        if "delivered_after" in request.query
     )
 
 

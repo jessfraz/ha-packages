@@ -236,6 +236,12 @@
             "nullable": true,
             "type": "string"
           },
+          "estimated_delivery_raw": {
+            "default": null,
+            "description": "Original provider ETA before civil-date normalization.",
+            "nullable": true,
+            "type": "string"
+          },
           "estimated_delivery_window": {
             "allOf": [
               {
@@ -780,6 +786,7 @@
             "default": {
               "delivered_at": null,
               "estimated_delivery_at": null,
+              "estimated_delivery_raw": null,
               "estimated_delivery_window": null,
               "events": [],
               "events_truncated": false,
@@ -888,6 +895,7 @@
             "default": {
               "delivered_at": null,
               "estimated_delivery_at": null,
+              "estimated_delivery_raw": null,
               "estimated_delivery_window": null,
               "events": [],
               "events_truncated": false,
@@ -1372,7 +1380,7 @@
   "info": {
     "description": "Persistent local shipment records, manual corrections, and carrier synchronization. Use a Bearer owner or ingestion token. Creates require Idempotency-Key; writes to an existing shipment require its quoted revision in If-Match.",
     "title": "Shipments API",
-    "version": "0.6.10"
+    "version": "0.6.11"
   },
   "openapi": "3.0.3",
   "paths": {

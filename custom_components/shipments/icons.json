@@ -36,6 +36,9 @@
       },
       "outbound_exceptions": {
         "default": "mdi:package-variant-remove"
+      },
+      "inbound_due_today": {
+        "default": "mdi:package-clock"
       }
     },
     "calendar": {

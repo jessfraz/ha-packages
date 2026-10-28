@@ -273,6 +273,7 @@ class DeliveryEstimate:
     delivered: bool = False
     window: DeliveryWindow | None = None
     raw_estimated: str | None = None
+    status: ShipmentStatus = ShipmentStatus.IN_TRANSIT
 
     def calendar_event(self) -> CalendarEvent:
         start: date | datetime
@@ -321,6 +322,26 @@ class DeliveryEstimate:
             uid=str(self.shipment_id),
         )
 
+    def due_on(self, day: DeliveryDay) -> bool:
+        """Calendar and expected-today items share these exact civil-day bounds."""
+        if self.delivered:
+            return False
+        event = self.calendar_event()
+        zone = ZoneInfo(day.time_zone)
+        start = datetime.combine(day.date, time.min, zone)
+        end = datetime.combine(day.date + timedelta(days=1), time.min, zone)
+        return event.start_datetime_local < end and event.end_datetime_local > start
+
+    def item(self) -> ShipmentItem:
+        return ShipmentItem(
+            self.shipment_id,
+            self.title,
+            self.carrier or "",
+            self.status,
+            None,
+            self.estimated,
+        )
+
     def _estimated_day(self) -> date | None:
         return (
             dt_util.as_local(self.estimated).date()
@@ -367,6 +388,9 @@ def delivery_estimate(record: object) -> tuple[UUID, DeliveryEstimate | None]:
             delivered,
             window,
             value if isinstance(value, str) else None,
+            ShipmentStatus(status)
+            if isinstance(status, str)
+            else ShipmentStatus.IN_TRANSIT,
         )
         if estimated is not None or window is not None
         else None

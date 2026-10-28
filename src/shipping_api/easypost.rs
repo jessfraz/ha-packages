@@ -141,6 +141,7 @@ impl From<ProviderTracker> for Tracker {
                 })
                 .collect(),
             signed_by: clean_text(raw.signed_by, 200),
+            estimated_delivery_raw: raw.est_delivery_date.clone(),
             estimated_delivery_at: clean_delivery_estimate(
                 raw.est_delivery_date,
                 raw.carrier_detail,
@@ -243,34 +244,24 @@ fn clean_datetime(value: Option<String>) -> Option<String> {
 }
 
 /// Prefer a carrier's explicit local date for an otherwise untimed midnight
-/// UTC estimate. Never infer date precision from midnight alone: an explicit
-/// carrier time, an offset, or absent date metadata retains timed precision.
+/// UTC estimate. An explicit carrier time or non-UTC offset retains timed
+/// precision; absent optional local-date metadata uses the encoded civil date.
 fn clean_delivery_estimate(
     value: Option<String>,
     detail: Option<ProviderCarrierDetail>,
 ) -> Option<String> {
     let value = value?;
-    let date_format = time::format_description::parse_borrowed::<2>("[year]-[month]-[day]").ok()?;
-    if value.len() == 10 {
-        return time::Date::parse(&value, &date_format)
-            .ok()
-            .map(|date| date.to_string());
-    }
-    let at =
-        time::OffsetDateTime::parse(&value, &time::format_description::well_known::Rfc3339).ok()?;
     let explicit_time = detail
         .as_ref()
         .and_then(|d| d.est_delivery_time_local.as_deref())
         .is_some_and(|value| !value.trim().is_empty());
-    if at.offset() == time::UtcOffset::UTC && at.time() == time::Time::MIDNIGHT && !explicit_time {
-        let local_date = detail
-            .and_then(|d| d.est_delivery_date_local)
-            .and_then(|value| time::Date::parse(&value, &date_format).ok());
-        if let Some(date) = local_date {
-            return Some(date.to_string());
-        }
-    }
-    clean_datetime(Some(value))
+    crate::delivery::estimate(
+        &value,
+        detail
+            .as_ref()
+            .and_then(|d| d.est_delivery_date_local.as_deref()),
+        explicit_time,
+    )
 }
 
 fn normalize_event(mut event: CarrierEvent) -> Option<CarrierEvent> {
@@ -1153,7 +1144,7 @@ mod tests {
             (
                 "2026-10-21T00:00:00Z",
                 serde_json::Value::Null,
-                "2026-10-21T00:00:00Z",
+                "2026-10-21",
             ),
             (
                 "2026-10-21T00:00:00Z",
