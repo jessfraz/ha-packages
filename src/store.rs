@@ -96,6 +96,16 @@ impl Record {
             .map(|value| value.status)
             .or(carrier_status)
             .unwrap_or_default();
+        let mut carrier_tracking: CarrierTracking = serde_json::from_str(&self.carrier_tracking)?;
+        let original_estimate = carrier_tracking.estimated_delivery_at.clone();
+        carrier_tracking.estimated_delivery_at = crate::delivery::legacy_estimate(
+            carrier_tracking.estimated_delivery_at,
+            carrier_tracking.estimated_delivery_raw.as_deref(),
+            self.tracking_provider == ProviderId::EasyPost,
+        );
+        if carrier_tracking.estimated_delivery_at != original_estimate {
+            carrier_tracking.estimated_delivery_raw = original_estimate;
+        }
         Ok(Shipment {
             id: parse_id(&self.id)?,
             revision: self.revision,
@@ -123,7 +133,7 @@ impl Record {
             },
             status,
             carrier_status,
-            carrier_tracking: serde_json::from_str(&self.carrier_tracking)?,
+            carrier_tracking,
             status_override,
             archived: self.archived,
             created_at: self.created_at,
@@ -1167,6 +1177,8 @@ impl Store {
             tracking_carrier: Option<String>,
             status: String,
             estimated_delivery_at: Option<String>,
+            estimated_delivery_raw: Option<String>,
+            tracking_provider: ProviderId,
             estimated_delivery_window: Option<String>,
             delivered_at: Option<String>,
             calendar_sort_key: i64,
@@ -1193,7 +1205,11 @@ impl Store {
                             })
                             .transpose()?,
                         status: serde_json::from_str(&row.status)?,
-                        estimated_delivery_at: row.estimated_delivery_at,
+                        estimated_delivery_at: crate::delivery::legacy_estimate(
+                            row.estimated_delivery_at,
+                            row.estimated_delivery_raw.as_deref(),
+                            row.tracking_provider == ProviderId::EasyPost,
+                        ),
                         estimated_delivery_window: row
                             .estimated_delivery_window
                             .as_deref()
@@ -1393,9 +1409,10 @@ fn delivery_estimates_query(
     limit: u32,
 ) -> QueryBuilder<Sqlite> {
     let mut query = QueryBuilder::new(
-        r#"SELECT id, title, tracking_carrier,
+        r#"SELECT id, title, tracking_carrier, tracking_provider,
                   coalesce(override_status, carrier_status, '"expected"') AS status,
                   json_extract(carrier_tracking, '$.estimated_delivery_at') AS estimated_delivery_at,
+                  json_extract(carrier_tracking, '$.estimated_delivery_raw') AS estimated_delivery_raw,
                   json_extract(carrier_tracking, '$.estimated_delivery_window') AS estimated_delivery_window,
                   json_extract(carrier_tracking, '$.delivered_at') AS delivered_at,
                   calendar_sort_key

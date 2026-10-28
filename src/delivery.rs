@@ -6,6 +6,47 @@ use time::{Date, OffsetDateTime};
 
 use crate::error::Error;
 
+/// Carrier ETA precision: date-only values never become UTC appointments.
+/// EasyPost's untimed midnight-UTC default encodes a civil date. Explicit
+/// carrier times (including midnight), offsets and fractional seconds remain
+/// instants. Actual delivery timestamps and paired windows never use this rule.
+pub(crate) fn estimate(
+    value: &str,
+    local_date: Option<&str>,
+    explicit_time: bool,
+) -> Option<String> {
+    let format = time::format_description::parse_borrowed::<2>("[year]-[month]-[day]").ok()?;
+    if value.len() == 10 {
+        return Date::parse(value, &format).ok().map(|day| day.to_string());
+    }
+    let at = OffsetDateTime::parse(value, &time::format_description::well_known::Rfc3339).ok()?;
+    if !explicit_time && at.offset() == time::UtcOffset::UTC && at.time() == time::Time::MIDNIGHT {
+        return Some(
+            local_date
+                .and_then(|day| Date::parse(day, &format).ok())
+                .unwrap_or(at.date())
+                .to_string(),
+        );
+    }
+    at.to_offset(time::UtcOffset::UTC)
+        .format(&time::format_description::well_known::Rfc3339)
+        .ok()
+}
+
+/// Read old EasyPost snapshots through the same contract as new ingestion.
+/// New snapshots preserve their raw ETA, so explicit midnight timestamps can
+/// never be mistaken for legacy date defaults. This does not rewrite history.
+pub(crate) fn legacy_estimate(
+    value: Option<String>,
+    raw: Option<&str>,
+    easypost: bool,
+) -> Option<String> {
+    match value {
+        Some(value) if raw.is_none() && easypost => estimate(&value, None, false),
+        value => value,
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DeliveryWindow {
     after: i64,
@@ -134,5 +175,44 @@ mod tests {
             };
             assert!(!changed.valid());
         }
+    }
+}
+
+#[cfg(test)]
+mod estimate_tests {
+    use super::{estimate, legacy_estimate};
+
+    #[test]
+    fn precision_is_preserved_at_ingestion_and_legacy_readback() {
+        for day in ["2026-03-08", "2026-11-01", "2026-10-28"] {
+            let raw = format!("{day}T00:00:00Z");
+            assert_eq!(estimate(&raw, None, false).as_deref(), Some(day));
+            assert_eq!(estimate(&raw, None, true).as_deref(), Some(raw.as_str()));
+            assert_eq!(
+                legacy_estimate(Some(raw.clone()), None, true).as_deref(),
+                Some(day)
+            );
+            assert_eq!(
+                legacy_estimate(Some(raw.clone()), Some(&raw), true).as_deref(),
+                Some(raw.as_str())
+            );
+            assert_eq!(
+                legacy_estimate(Some(raw.clone()), None, false).as_deref(),
+                Some(raw.as_str())
+            );
+        }
+        assert_eq!(
+            estimate("2026-10-29T03:00:00Z", None, false).as_deref(),
+            Some("2026-10-29T03:00:00Z")
+        );
+        assert_eq!(
+            estimate("2026-10-28T00:00:00-07:00", None, false).as_deref(),
+            Some("2026-10-28T07:00:00Z")
+        );
+        assert_eq!(
+            estimate("2026-10-28T00:00:00.001Z", None, false).as_deref(),
+            Some("2026-10-28T00:00:00.001Z")
+        );
+        assert!(estimate("2026-02-30", None, false).is_none());
     }
 }

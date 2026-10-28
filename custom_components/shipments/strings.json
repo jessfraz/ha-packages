@@ -92,6 +92,9 @@
       },
       "outbound_exceptions": {
         "name": "Outbound exceptions"
+      },
+      "inbound_due_today": {
+        "name": "Inbound deliveries today"
       }
     },
     "binary_sensor": {

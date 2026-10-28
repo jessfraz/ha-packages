@@ -21,3 +21,14 @@ test('date-only labels keep the carrier day in LA, including DST boundaries', ()
   });
   assert.equal(result.status, 0, result.stderr);
 });
+
+test('HA timezone overrides the remote browser and rejects missing/invalid dates', async () => {
+  const { calendarDate } = await import('../web/dates.js');
+  const now = new Date('2026-10-28T12:00:00Z');
+  assert.equal(calendarDate('2026-10-29T03:00:00Z', now, 'America/Los_Angeles'), 'today');
+  assert.equal(calendarDate('2026-10-28', now, 'America/Los_Angeles'), 'today');
+  assert.equal(calendarDate('2026-10-28T00:00:00Z', now, 'America/Los_Angeles'), 'yesterday');
+  assert.equal(calendarDate('2026-02-30', now), 'date not reported');
+  assert.equal(calendarDate(null, now), 'date not reported');
+  assert.equal(calendarDate('2026-10-28T00:00:00', now), 'date not reported');
+});

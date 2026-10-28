@@ -148,6 +148,7 @@ shipments, including **Exceptions** and **Sync errors**. It also adds:
 | Sensor key | Counts |
 | --- | --- |
 | `inbound_active` | Active packages you receive. |
+| `inbound_due_today` | Incoming parcels expected today or out for delivery, with deduplicated items and original statuses. |
 | `inbound_out_for_delivery` | Incoming packages out for delivery. |
 | `inbound_delivered_today` | Incoming packages delivered during Home Assistant’s local day, using actual carrier delivery timestamps. |
 | `inbound_exceptions` | Incoming packages with a delivery exception. |

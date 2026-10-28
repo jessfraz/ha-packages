@@ -73,7 +73,11 @@ class ShipmentCountSensor(CoordinatorEntity[ShipmentsCoordinator], SensorEntity)
         data = self.coordinator.data
         key = self.entity_description.key
         self._attr_native_value = data.get(key) if data is not None else None
-        if key not in {"inbound_delivered_today", "inbound_out_for_delivery"}:
+        if key not in {
+            "inbound_delivered_today",
+            "inbound_out_for_delivery",
+            "inbound_due_today",
+        }:
             self._attr_extra_state_attributes = {}
             return
         projection = (

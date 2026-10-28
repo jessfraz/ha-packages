@@ -196,7 +196,7 @@ async def test_mixed_versions_keep_unavailable_day_count_absent(
         "counts": {
             key: entry.runtime_data.data[key]
             for key in SENSOR_KEYS
-            if key != "inbound_delivered_today"
+            if key not in {"inbound_delivered_today", "inbound_due_today"}
         },
     }
     assert data["repairs"] == {

@@ -32,6 +32,7 @@ let loadingEvents = false;
 let savingEditor = false;
 let appliedSearch = "";
 let shownDeliveryWindow = null;
+let deliveryTimeZone;
 let activeDirection = "inbound";
 let routeGeneration = 0;
 let applyingRoute = false;
@@ -439,6 +440,8 @@ async function load(append = false) {
   try {
     const systemRequest = api("v1/system", { signal: controller.signal }).then(system => {
       if (!controller.signal.aborted && generation === listGeneration)
+        deliveryTimeZone = system.delivery_day?.time_zone;
+      if (!controller.signal.aborted && generation === listGeneration)
         setOwnerAccess(system.credential_role === "owner");
       return system;
     });
@@ -525,7 +528,7 @@ async function load(append = false) {
         ? deliveredDate(shipment)
         : shipment.carrier_tracking?.estimated_delivery_at;
       copy.append(element("p", deliveryDate
-        ? `${delivered ? "Delivered" : "Expected"} ${calendarDate(deliveryDate)}`
+        ? `${delivered ? "Delivered" : "Expected"} ${calendarDate(deliveryDate, new Date(), deliveryTimeZone)}`
         : delivered ? "Delivery date not reported" : "Delivery date not reported yet", "shipment-date"));
       const badges = shipmentBadges(shipment, "shipment-badges");
       row.append(copy, badges);
@@ -1145,7 +1148,7 @@ async function show(id, preserveView = false, section = route().get("section")) 
   };
   if (shipment.status === "delivered") fact("Delivered", dateLabel(deliveredDate(shipment)));
   else fact("Expected delivery", shipment.carrier_tracking?.estimated_delivery_at
-    ? calendarDate(shipment.carrier_tracking.estimated_delivery_at) : "Not reported yet");
+    ? calendarDate(shipment.carrier_tracking.estimated_delivery_at, new Date(), deliveryTimeZone) : "Not reported yet");
   fact("Signature", signatureLabel(shipment));
   if (shipment.carrier_tracking?.signed_by) fact("Signed by", shipment.carrier_tracking.signed_by);
   if (shipment.merchant) fact("Merchant", shipment.merchant);

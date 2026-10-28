@@ -1718,3 +1718,51 @@ async fn calendar_history_uses_actual_dates_and_preserves_decisions_across_pages
     );
     fixture.store.close().await.unwrap();
 }
+
+#[tokio::test]
+async fn legacy_eta_precision_is_shared_by_records_and_calendar_without_rewriting_storage() {
+    let fixture = Fixture::new().await;
+    for (number, raw_marker, expected) in [
+        ("PRECISION001", None, "2031-02-18"),
+        (
+            "PRECISION002",
+            Some("2031-02-18T00:00:00Z"),
+            "2031-02-18T00:00:00Z",
+        ),
+    ] {
+        let shipment = create_estimate(
+            &fixture.store,
+            number,
+            Direction::Inbound,
+            Status::InTransit,
+            Some("2031-02-18T00:00:00Z"),
+        )
+        .await;
+        if let Some(raw) = raw_marker {
+            sqlx::query("UPDATE shipments SET carrier_tracking=json_set(carrier_tracking,'$.estimated_delivery_raw',?) WHERE id=?")
+                .bind(raw).bind(shipment.id.to_string()).execute(fixture.store.pool()).await.unwrap();
+        }
+        let record = fixture.store.get(shipment.id).await.unwrap();
+        assert_eq!(
+            record.carrier_tracking.estimated_delivery_at.as_deref(),
+            Some(expected)
+        );
+        assert_eq!(
+            record.carrier_tracking.estimated_delivery_raw.as_deref(),
+            Some("2031-02-18T00:00:00Z")
+        );
+        let calendar = fixture.store.delivery_estimates(None, 200).await.unwrap();
+        let entry = calendar
+            .iter()
+            .find(|entry| entry.estimate.id == shipment.id)
+            .unwrap();
+        assert_eq!(
+            entry.estimate.estimated_delivery_at,
+            record.carrier_tracking.estimated_delivery_at
+        );
+        let stored: String = sqlx::query_scalar("SELECT json_extract(carrier_tracking,'$.estimated_delivery_at') FROM shipments WHERE id=?")
+            .bind(shipment.id.to_string()).fetch_one(fixture.store.pool()).await.unwrap();
+        assert_eq!(stored, "2031-02-18T00:00:00Z");
+    }
+    fixture.store.close().await.unwrap();
+}

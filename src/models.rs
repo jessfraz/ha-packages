@@ -334,6 +334,8 @@ pub struct CarrierTracking {
     pub events: Vec<CarrierEvent>,
     pub signed_by: Option<String>,
     pub estimated_delivery_at: Option<String>,
+    /// Original provider ETA before civil-date normalization.
+    pub estimated_delivery_raw: Option<String>,
     /// Explicit provider bounds; a lone ETA never implies a delivery window.
     #[serde(deserialize_with = "provider_optional")]
     pub estimated_delivery_window: Option<EstimatedDeliveryWindow>,
@@ -378,6 +380,7 @@ impl CarrierTracking {
         }
         if let Some(estimated_delivery_at) = &incoming.estimated_delivery_at {
             self.estimated_delivery_at = Some(estimated_delivery_at.clone());
+            self.estimated_delivery_raw = incoming.estimated_delivery_raw.clone();
         }
         // A successful provider snapshot is authoritative for its current
         // window, including withdrawal. Historical scans and overrides survive.

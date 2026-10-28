@@ -201,9 +201,10 @@ class Backend:
         else:
             rows = []
         limit = int(query.get("limit", "20"))
+        offset = int(query.get("page_token", "0"))
         return {
-            "items": [row.record() for row in rows[:limit]],
-            "next_page": "fixture-next-page" if len(rows) > limit else None,
+            "items": [row.record() for row in rows[offset : offset + limit]],
+            "next_page": str(offset + limit) if len(rows) > offset + limit else None,
         }
 
     async def handle(self, request: web.Request) -> web.Response:
