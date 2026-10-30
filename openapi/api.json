@@ -1498,6 +1498,24 @@
         ]
       }
     },
+    "/tracking-links.js": {
+      "get": {
+        "operationId": "tracking_links_script",
+        "responses": {
+          "default": {
+            "content": {
+              "*/*": {
+                "schema": {}
+              }
+            },
+            "description": ""
+          }
+        },
+        "tags": [
+          "web"
+        ]
+      }
+    },
     "/v1/agents": {
       "get": {
         "operationId": "agents_list",

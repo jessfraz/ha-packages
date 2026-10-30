@@ -953,6 +953,18 @@ async fn browser_authentication_mode_comes_only_from_the_listener() {
             .unwrap()
             .contains("export function calendarDate")
     );
+    let tracking = standalone
+        .request(Method::GET, "/tracking-links.js")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(tracking.status(), StatusCode::OK);
+    assert_eq!(tracking.headers()["cache-control"], "no-store");
+    assert_eq!(
+        tracking.headers()["content-type"],
+        "text/javascript; charset=utf-8"
+    );
+    assert!(!tracking.bytes().await.unwrap().is_empty());
     standalone.close().await;
 
     let ingress = App::new(Some("127.0.0.1".parse().unwrap())).await;
@@ -971,6 +983,16 @@ async fn browser_authentication_mode_comes_only_from_the_listener() {
     assert_eq!(
         forbidden
             .request(Method::GET, "/connection.js")
+            .header("X-Forwarded-For", "172.30.32.2")
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        forbidden
+            .request(Method::GET, "/tracking-links.js")
             .header("X-Forwarded-For", "172.30.32.2")
             .send()
             .await

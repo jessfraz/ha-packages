@@ -1,5 +1,6 @@
 import { waitForConnection } from "./connection.js";
 import { calendarDate } from "./dates.js";
+import { providerNames, trackingLinks } from "./tracking-links.js";
 
 const byId = (id) => document.getElementById(id);
 const labels = {
@@ -15,7 +16,6 @@ const labels = {
   cancelled: "Cancelled",
   error: "Tracking error",
 };
-const providerNames = { easypost: "EasyPost", aftership: "AfterShip", doordash: "DoorDash" };
 
 let token = "";
 let selected = null;
@@ -995,55 +995,6 @@ function currentDetail(id, generation) {
   );
 }
 
-function carrierTrackingUrl(tracking) {
-  if (tracking.carrier === "DoorDash") return recipientTrackingUrl(tracking.recipient_url);
-  const carriers = new Map([
-    ["usps", ["https://tools.usps.com/go/TrackConfirmAction", "tLabels"]],
-    ["ups", ["https://www.ups.com/track", "tracknum"]],
-    ["fedex", ["https://www.fedex.com/fedextrack/", "trknbr"]],
-    ["fedexdefault", ["https://www.fedex.com/fedextrack/", "trknbr"]],
-    ["fedexsmartpost", ["https://www.fedex.com/fedextrack/", "trknbr"]],
-    ["dhl", ["https://www.dhl.com/us-en/home/tracking.html", "tracking-id"]],
-    ["dhlexpress", ["https://www.dhl.com/us-en/home/tracking.html", "tracking-id"]],
-    ["dhlexpressdefault", ["https://www.dhl.com/us-en/home/tracking.html", "tracking-id"]],
-  ]);
-  const template = carriers.get(tracking.carrier?.toLowerCase());
-  if (!template) return null;
-  const url = new URL(template[0]);
-  url.searchParams.set(template[1], tracking.number);
-  return url;
-}
-
-function recipientTrackingUrl(value) {
-  if (!value) return null;
-  try {
-    const url = new URL(value);
-    const codes = url.searchParams.getAll("urlCode");
-    if (url.protocol === "https:" && url.host === "www.doordash.com" &&
-        url.pathname === "/orders/drive" && !url.username && !url.password && !url.hash &&
-        [...url.searchParams].length === 1 && codes.length === 1 && /^[A-Za-z0-9_-]{1,128}$/.test(codes[0]))
-      return url;
-  } catch {
-    // Server validation owns admission; unsafe links are never rendered.
-  }
-  return null;
-}
-
-function providerTrackingUrl(provider, value) {
-  if (!value) return null;
-  if (provider === "doordash") return recipientTrackingUrl(value);
-  const hosts = provider === "easypost" ? ["track.easypost.com"]
-    : provider === "aftership" ? ["www.aftership.com", "track.aftership.com"] : [];
-  try {
-    const url = new URL(value);
-    if (url.protocol === "https:" && hosts.includes(url.host) &&
-        !url.username && !url.password) return url;
-  } catch {
-    // An absent or invalid public tracking URL does not block shipment details.
-  }
-  return null;
-}
-
 function dateLabel(value, fallback = "Not reported") {
   if (value == null || value === "") return fallback;
   const date = new Date(value);
@@ -1124,13 +1075,7 @@ async function show(id, preserveView = false, section = route().get("section")) 
     element("span", shipment.tracking.number));
   hero.append(tracking);
   const links = element("div", undefined, "tracking-links");
-  const linked = new Set();
-  for (const [label, url] of [
-    [shipment.sync.provider === "doordash" ? "DoorDash recipient tracking" : "Carrier tracking", carrierTrackingUrl(shipment.tracking)],
-    [`${providerNames[shipment.sync.provider] || "Provider"} tracking`, providerTrackingUrl(shipment.sync.provider, shipment.sync.tracking_url)],
-  ]) {
-    if (!url || linked.has(url.href)) continue;
-    linked.add(url.href);
+  for (const [label, url] of trackingLinks(shipment)) {
     const link = element("a", `${label} ↗`);
     link.href = url.href;
     link.target = "_blank";
