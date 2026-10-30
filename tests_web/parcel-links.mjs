@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { carrierTrackingUrl, providerTrackingUrl, trackingLinks } from "../web/tracking-links.js";
+import { carrierTrackingUrl, providerTrackingUrl, trackingLinks } from "../web/parcel-links.js";
 
 const number = "SYNTHETIC123";
 const shipment = (carrier, provider = "aftership", tracking_url = null) => ({

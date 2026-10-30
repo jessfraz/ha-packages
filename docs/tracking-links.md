@@ -1,7 +1,7 @@
 # Public tracking links
 
 The shipment detail view resolves carrier links independently of its sync
-provider in `web/tracking-links.js`. Missing EasyPost or AfterShip public URLs
+provider in `web/parcel-links.js`. Missing EasyPost or AfterShip public URLs
 must not hide a supported carrier link. Supplied, validated provider URLs
 remain available alongside it.
 
