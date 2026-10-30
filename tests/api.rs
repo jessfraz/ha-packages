@@ -954,7 +954,7 @@ async fn browser_authentication_mode_comes_only_from_the_listener() {
             .contains("export function calendarDate")
     );
     let tracking = standalone
-        .request(Method::GET, "/tracking-links.js")
+        .request(Method::GET, "/parcel-links.js")
         .send()
         .await
         .unwrap();
@@ -992,7 +992,7 @@ async fn browser_authentication_mode_comes_only_from_the_listener() {
     );
     assert_eq!(
         forbidden
-            .request(Method::GET, "/tracking-links.js")
+            .request(Method::GET, "/parcel-links.js")
             .header("X-Forwarded-For", "172.30.32.2")
             .send()
             .await

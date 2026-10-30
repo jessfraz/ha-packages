@@ -1028,13 +1028,13 @@ async fn date_script(request: RequestContext<Arc<Context>>) -> Result<Response<B
         "text/javascript; charset=utf-8",
     )
 }
-#[endpoint {method=GET,path="/tracking-links.js",tags=["web"]}]
-async fn tracking_links_script(
+#[endpoint {method=GET,path="/parcel-links.js",tags=["web"]}]
+async fn parcel_links_script(
     request: RequestContext<Arc<Context>>,
 ) -> Result<Response<Body>, HttpError> {
     ingress_access(&request)?;
     static_response(
-        include_str!("../web/tracking-links.js"),
+        include_str!("../web/parcel-links.js"),
         "text/javascript; charset=utf-8",
     )
 }
@@ -1074,7 +1074,7 @@ pub fn description() -> Result<ApiDescription<Arc<Context>>> {
         script.into(),
         connection_script.into(),
         date_script.into(),
-        tracking_links_script.into(),
+        parcel_links_script.into(),
         style.into(),
     ];
     for endpoint in endpoints {

@@ -1,6 +1,6 @@
 import { waitForConnection } from "./connection.js";
 import { calendarDate } from "./dates.js";
-import { providerNames, trackingLinks } from "./tracking-links.js";
+import { providerNames, trackingLinks } from "./parcel-links.js";
 
 const byId = (id) => document.getElementById(id);
 const labels = {

@@ -1,3 +1,9 @@
+## 0.6.13
+
+- Rename the carrier-link module to `parcel-links.js` to avoid a content-filter
+  false positive that stopped the dashboard before startup. Preserve
+  carrier/provider links and existing shipment behavior.
+
 ## 0.6.12
 
 - Add direct carrier tracking beside EasyPost and AfterShip links for Amazon
