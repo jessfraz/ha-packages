@@ -1,3 +1,11 @@
+## 0.6.12
+
+- Add direct carrier tracking beside EasyPost and AfterShip links for Amazon
+  Logistics/MCF, OnTrac, SpeedX, Sway and Veho. Resolve TBA numbers through
+  Amazon's recipient tracker and Sway numbers through its public lookup.
+- Open DHL tracking results automatically. Keep original DoorDash recipient
+  links, validated provider links and existing delivery date/calendar behavior.
+
 ## 0.6.11
 
 - Share civil-date precision between new and legacy EasyPost estimates, preserving

@@ -89,7 +89,7 @@ paired, check the integration for a connection or authentication error.
 
 Version mismatch is a separate warning: connectivity and authentication can
 pass while the two installed versions differ. Update both the app through the
-App Store and the integration through HACS to **0.5.11**, then restart Home
+App Store and the integration through HACS to the **same release**, then restart Home
 Assistant. Without a recent integration check-in, the version match is
 unverified.
 
