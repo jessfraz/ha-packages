@@ -1,3 +1,8 @@
+## 0.6.25
+
+- Retain safe page-type, upstream-status and parser-shape diagnostics for
+  deferred Amazon parcels, without logging URLs or page contents.
+
 ## 0.6.24
 
 - Continue bounded Amazon discovery across recent-order pages instead of

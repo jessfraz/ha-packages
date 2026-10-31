@@ -26,9 +26,10 @@ async fn main() -> Result<()> {
         .api_token
         .as_deref()
         .context("missing owner credential")?;
-    let amazon = Arc::new(AmazonClient::new(
-        config.database.with_file_name("amazon-account.json"),
-    )?);
+    let amazon = Arc::new(
+        AmazonClient::new(config.database.with_file_name("amazon-account.json"))?
+            .with_logger(log.clone()),
+    );
     let mut context = api::Context::new(store.clone(), token, None, None)
         .with_provider(Arc::new(DoorDashClient::new()?.with_logger(log.clone())))
         .with_amazon(amazon.clone());
