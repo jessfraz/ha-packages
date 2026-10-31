@@ -68,6 +68,18 @@ fn retail_path(path: &str) -> &str {
         .unwrap_or(path)
 }
 
+pub(crate) fn page_kind(path: &str) -> crate::amazon::connection::PageKind {
+    use crate::amazon::connection::PageKind;
+    let path = retail_path(path).split('?').next().unwrap_or(path);
+    if is_tracking(path) {
+        PageKind::Tracking
+    } else if ["/your-orders/orders", "/gp/css/order-history"].contains(&path) {
+        PageKind::Orders
+    } else {
+        PageKind::Item
+    }
+}
+
 pub(crate) fn allowed_path(input: &str) -> Result<String, Error> {
     if input.len() > 2048 || input.chars().any(|c| c.is_control() || c.is_whitespace()) {
         return Err(provider_error(ErrorKind::InvalidResponse));

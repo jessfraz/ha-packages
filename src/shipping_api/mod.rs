@@ -16,6 +16,12 @@ pub trait ObservationGuard: Send {}
 impl ObservationGuard for () {}
 
 pub trait ShippingApi: Send + Sync {
+    /// Bounded network work that must fit inside the worker's ownership lease.
+    /// Providers without a total budget retain the ordinary lease.
+    fn operation_budget(&self) -> Option<std::time::Duration> {
+        None
+    }
+
     fn observation_guard(&self) -> ApiFuture<'_, Box<dyn ObservationGuard + '_>> {
         Box::pin(async { Ok(Box::new(()) as Box<dyn ObservationGuard>) })
     }

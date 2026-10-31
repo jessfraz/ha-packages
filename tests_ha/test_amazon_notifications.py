@@ -1,4 +1,4 @@
-"""Amazon account expiry uses HA notifications without breaking backend pairing."""
+"""Amazon account actions use stable HA notices without breaking backend pairing."""
 
 import json
 from collections.abc import AsyncIterator
@@ -52,14 +52,17 @@ def report(backend: Backend, amazon: object) -> None:
     )
 
 
-def account(state: str) -> dict[str, object]:
-    return {
+def account(state: str, *, challenge_required: bool | None = None) -> dict[str, object]:
+    value: dict[str, object] = {
         "state": state,
         "last_success_at": None,
         "last_error_code": "amazon_auth_required" if state == "auth_required" else None,
         "imports_enabled": True,
         "unexpected_secret": "PRIVATE-TOKEN-AND-ACCOUNT",
     }
+    if challenge_required is not None:
+        value["challenge_required"] = challenge_required
+    return value
 
 
 async def test_expired_account_with_no_shipments_notifies_once(
@@ -94,6 +97,41 @@ async def test_expired_account_with_no_shipments_notifies_once(
     assert notifications.updates == [pn.UpdateType.ADDED]
 
 
+async def test_website_challenge_retains_sign_in_and_notifies_once(
+    hass: HomeAssistant,
+    entry: MockConfigEntry,
+    backend: Backend,
+    notifications: Notifications,
+) -> None:
+    hass.config_entries.async_update_entry(
+        entry, data={**entry.data, CONF_ADDON_SLUG: "fixture_shipments"}
+    )
+    report(backend, account("connected", challenge_required=True))
+    await entry.runtime_data.async_refresh()
+    await hass.async_block_till_done()
+    key = f"shipments_{entry.entry_id}_amazon_auth_required"
+    assert list(notifications.current) == [key]
+    notice = notifications.current[key]
+    assert notice["title"] == "Shipments: verify Amazon"
+    assert "Your saved sign-in is retained" in notice["message"]
+    assert "automatic Amazon checks are paused" in notice["message"]
+    assert (
+        "[Amazon orders](https://www.amazon.com/your-orders/orders)"
+        in notice["message"]
+    )
+    assert "complete the requested check" in notice["message"]
+    assert (
+        "[retry Preview shipments](/shipments/shipments/amazon%3Dconnect)"
+        in notice["message"]
+    )
+    assert "reconnect" not in notice["message"].lower()
+    assert "PRIVATE-" not in json.dumps(notice, default=str)
+    assert not hass.config_entries.flow.async_progress_by_handler("shipments")
+    await entry.runtime_data.async_refresh()
+    await hass.async_block_till_done()
+    assert notifications.updates == [pn.UpdateType.ADDED]
+
+
 async def test_standalone_notification_opens_validated_backend_settings(
     hass: HomeAssistant,
     entry: MockConfigEntry,
@@ -117,6 +155,8 @@ async def test_standalone_notification_opens_validated_backend_settings(
         {"state": "unknown", "imports_enabled": True},
         {"state": "connected"},
         {"state": "connected", "imports_enabled": 1},
+        {"state": "connected", "imports_enabled": True, "challenge_required": None},
+        {"state": "connected", "imports_enabled": True, "challenge_required": "yes"},
     ],
 )
 async def test_incomplete_health_does_not_clear_an_expiry_notification(
@@ -133,6 +173,66 @@ async def test_incomplete_health_does_not_clear_an_expiry_notification(
     await hass.async_block_till_done()
     assert len(notifications.current) == 1
     assert notifications.updates == [pn.UpdateType.ADDED]
+
+
+async def test_expiry_and_website_challenge_update_the_same_notice(
+    hass: HomeAssistant,
+    entry: MockConfigEntry,
+    backend: Backend,
+    notifications: Notifications,
+) -> None:
+    key = f"shipments_{entry.entry_id}_amazon_auth_required"
+    report(backend, account("auth_required"))
+    await entry.runtime_data.async_refresh()
+    await hass.async_block_till_done()
+    assert list(notifications.current) == [key]
+    assert notifications.current[key]["title"] == "Shipments: reconnect Amazon"
+    report(backend, account("connected", challenge_required=True))
+    await entry.runtime_data.async_refresh()
+    await hass.async_block_till_done()
+    assert list(notifications.current) == [key]
+    assert notifications.current[key]["title"] == "Shipments: verify Amazon"
+    message = notifications.current[key]["message"]
+    assert f"[retry Preview shipments]({backend.url}/#amazon=connect)" in message
+    await entry.runtime_data.async_refresh()
+    await hass.async_block_till_done()
+    assert notifications.updates == [pn.UpdateType.ADDED, pn.UpdateType.UPDATED]
+    report(backend, account("auth_required", challenge_required=True))
+    await entry.runtime_data.async_refresh()
+    await hass.async_block_till_done()
+    assert list(notifications.current) == [key]
+    assert notifications.current[key]["title"] == "Shipments: reconnect Amazon"
+    assert notifications.updates == [
+        pn.UpdateType.ADDED,
+        pn.UpdateType.UPDATED,
+        pn.UpdateType.UPDATED,
+    ]
+
+
+@pytest.mark.parametrize("state", ["connected", "disconnected"])
+async def test_completed_verification_or_disconnect_clears_only_owned_notice(
+    hass: HomeAssistant,
+    entry: MockConfigEntry,
+    backend: Backend,
+    notifications: Notifications,
+    state: str,
+) -> None:
+    pn.async_create(hass, "Unrelated notification", notification_id="unrelated")
+    report(backend, account("connected", challenge_required=True))
+    await entry.runtime_data.async_refresh()
+    await hass.async_block_till_done()
+    key = f"shipments_{entry.entry_id}_amazon_auth_required"
+    assert key in notifications.current
+    # Missing the optional flag remains compatible with older health reports.
+    report(backend, account(state))
+    await entry.runtime_data.async_refresh()
+    await hass.async_block_till_done()
+    assert list(notifications.current) == ["unrelated"]
+    assert notifications.updates.count(pn.UpdateType.REMOVED) == 1
+    await entry.runtime_data.async_refresh()
+    await hass.async_block_till_done()
+    assert notifications.updates.count(pn.UpdateType.REMOVED) == 1
+    assert not hass.config_entries.flow.async_progress_by_handler("shipments")
 
 
 async def test_backend_outage_retains_notification_and_does_not_start_reauth(
@@ -172,13 +272,21 @@ async def test_reconnection_or_explicit_disconnect_clears_only_owned_notificatio
     assert notifications.updates.count(pn.UpdateType.REMOVED) == 1
 
 
+@pytest.mark.parametrize("challenge_required", [False, True])
 async def test_entry_reload_restores_one_stable_notice_and_removal_cleans_it(
     hass: HomeAssistant,
     entry: MockConfigEntry,
     backend: Backend,
     notifications: Notifications,
+    challenge_required: bool,
 ) -> None:
-    report(backend, account("auth_required"))
+    report(
+        backend,
+        account(
+            "connected" if challenge_required else "auth_required",
+            challenge_required=challenge_required,
+        ),
+    )
     await entry.runtime_data.async_refresh()
     key = f"shipments_{entry.entry_id}_amazon_auth_required"
     assert list(notifications.current) == [key]

@@ -44,9 +44,11 @@ _LOGGER = logging.getLogger(__name__)
 _BACKUP_TIMEOUT_SECONDS = 10
 _ITEM_LIMIT = 20
 
+type _AmazonNotice = Literal["none", "auth_required", "challenge_required"]
+
 
 def amazon_notification_id(entry_id: str) -> str:
-    """Keep one account-expiry notice stable across reloads and sign-ins."""
+    """Keep one account-action notice stable across reloads and sign-ins."""
     return f"{DOMAIN}_{entry_id}_amazon_auth_required"
 
 
@@ -105,7 +107,7 @@ class ShipmentsCoordinator(DataUpdateCoordinator[dict[str, int]]):
         self._after: int | None = None
         self._event_listeners: list[Callable[[ShipmentStatusEvent], None]] = []
         self.event_available = False
-        self._amazon_auth_required: bool | None = None
+        self._amazon_notice: _AmazonNotice | None = None
 
     async def _async_update_data(self) -> dict[str, int]:
         # A prior successful feed cannot establish availability for this refresh.
@@ -285,12 +287,19 @@ class ShipmentsCoordinator(DataUpdateCoordinator[dict[str, int]]):
             "disconnected",
         ):
             return
-        required = state == "auth_required"
-        if required == self._amazon_auth_required:
+        challenge = report.get("challenge_required", False)
+        if type(challenge) is not bool:
             return
-        self._amazon_auth_required = required
+        notice: _AmazonNotice = "none"
+        if state == "auth_required":
+            notice = "auth_required"
+        elif state == "connected" and challenge:
+            notice = "challenge_required"
+        if notice == self._amazon_notice:
+            return
+        self._amazon_notice = notice
         notification_id = amazon_notification_id(self._entry.entry_id)
-        if not required:
+        if notice == "none":
             persistent_notification.async_dismiss(self.hass, notification_id)
             return
         destination = (
@@ -298,11 +307,25 @@ class ShipmentsCoordinator(DataUpdateCoordinator[dict[str, int]]):
             if self._entry.data.get(CONF_ADDON_SLUG)
             else f"{self._entry.data[CONF_BACKEND_URL]}/#amazon=connect"
         )
+        if notice == "challenge_required":
+            message = (
+                "Amazon requires a website verification check. Your saved sign-in is "
+                "retained, and automatic Amazon checks are paused. Open "
+                "[Amazon orders](https://www.amazon.com/your-orders/orders) in your "
+                "browser and complete the requested check, then "
+                f"[retry Preview shipments]({destination})."
+            )
+            title = "Shipments: verify Amazon"
+        else:
+            message = (
+                "Amazon no longer accepts the saved sign-in. "
+                f"[Reconnect Amazon]({destination}) to resume Amazon tracking."
+            )
+            title = "Shipments: reconnect Amazon"
         persistent_notification.async_create(
             self.hass,
-            "Amazon no longer accepts the saved sign-in. "
-            f"[Reconnect Amazon]({destination}) to resume Amazon tracking.",
-            title="Shipments: reconnect Amazon",
+            message,
+            title=title,
             notification_id=notification_id,
         )
 

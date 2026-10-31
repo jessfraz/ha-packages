@@ -16,10 +16,10 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 const LEASE_SECONDS: i64 = 60;
-const MAX_RETRY_SECONDS: i64 = 6 * 60 * 60;
+pub(crate) const MAX_RETRY_SECONDS: i64 = 6 * 60 * 60;
 const BASE_POLL_SECONDS: i64 = 30 * 60;
 
-fn jitter(base: i64, key: &str) -> i64 {
+pub(crate) fn jitter(base: i64, key: &str) -> i64 {
     let hash = Sha256::digest(key.as_bytes());
     base + i64::from(u16::from_be_bytes([hash[0], hash[1]])) % (base / 10 + 1)
 }
@@ -96,6 +96,15 @@ impl SyncWorker {
         if self.client.blocked() {
             return Ok(false);
         }
+        let lease_seconds = self
+            .client
+            .operation_budget()
+            .map_or(LEASE_SECONDS, |budget| {
+                i64::try_from(budget.as_secs())
+                    .unwrap_or(i64::MAX)
+                    .saturating_add(30)
+                    .max(LEASE_SECONDS)
+            });
         let claim = sqlx::query_as::<_, Claim>(
             "UPDATE shipments SET lease_token = ?, lease_until = unixepoch() + ?, last_attempt_at = unixepoch()
              WHERE id = (
@@ -110,7 +119,7 @@ impl SyncWorker {
                        tracker_id, recipient_url, lease_token",
         )
         .bind(Uuid::now_v7().to_string())
-        .bind(LEASE_SECONDS)
+        .bind(lease_seconds)
         .bind(self.client.id().as_str())
         .fetch_optional(&self.pool)
         .await?;

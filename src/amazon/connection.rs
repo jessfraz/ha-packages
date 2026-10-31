@@ -36,6 +36,22 @@ impl ConnectionStage {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PageKind {
+    Orders,
+    Item,
+    Tracking,
+}
+impl PageKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Orders => "orders_listing",
+            Self::Item => "item_details",
+            Self::Tracking => "tracking_page",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ConnectionReason {
     InvalidInput,
     ExpiredFlow,
@@ -52,6 +68,7 @@ pub enum ConnectionReason {
     Configuration,
     UnsupportedOrdersLayout,
     ChallengePage,
+    InProgress,
 }
 impl ConnectionReason {
     pub fn as_str(self) -> &'static str {
@@ -71,6 +88,7 @@ impl ConnectionReason {
             Self::Configuration => "configuration",
             Self::UnsupportedOrdersLayout => "unsupported_orders_layout",
             Self::ChallengePage => "challenge_page",
+            Self::InProgress => "in_progress",
         }
     }
 }
@@ -82,11 +100,13 @@ pub struct ConnectionError {
     pub upstream_status: Option<u16>,
     source: Error,
     pub response_shape: Option<&'static str>,
+    pub page_kind: Option<PageKind>,
 }
 impl ConnectionError {
     pub(crate) fn new(stage: ConnectionStage, source: Error) -> Self {
         let reason = match source.kind {
             ErrorKind::AuthenticationRequired => ConnectionReason::UpstreamRejected,
+            ErrorKind::ProviderChallenge { .. } => ConnectionReason::ChallengePage,
             ErrorKind::Timeout => ConnectionReason::Timeout,
             ErrorKind::Connection => ConnectionReason::Connection,
             ErrorKind::Throttled { .. } | ErrorKind::Http { status: 429, .. } => {
@@ -103,6 +123,7 @@ impl ConnectionError {
             upstream_status,
             source,
             response_shape: None,
+            page_kind: None,
         }
     }
     pub(crate) fn with_status(stage: ConnectionStage, source: Error, status: u16) -> Self {
@@ -115,6 +136,7 @@ impl ConnectionError {
             upstream_status: None,
             source: provider_error(ErrorKind::InvalidResponse),
             response_shape: None,
+            page_kind: None,
         }
     }
     pub(crate) fn with_upstream_status(mut self, status: u16) -> Self {
@@ -133,6 +155,10 @@ impl ConnectionError {
     }
     pub(crate) fn with_shape(mut self, shape: &'static str) -> Self {
         self.response_shape = Some(shape);
+        self
+    }
+    pub(crate) fn with_page_kind(mut self, kind: PageKind) -> Self {
+        self.page_kind = Some(kind);
         self
     }
     pub fn retry_after(&self) -> Option<i64> {

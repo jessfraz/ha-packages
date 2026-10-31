@@ -8,11 +8,16 @@ pub struct Error {
     pub provider: ProviderId,
     pub kind: ErrorKind,
     pub provider_request_id: Option<uuid::Uuid>,
+    retry_after_seconds: Option<i64>,
 }
 
 #[derive(Debug)]
 pub enum ErrorKind {
     AuthenticationRequired,
+    ProviderChallenge {
+        status: Option<u16>,
+        retry_after: Option<i64>,
+    },
     Configuration,
     Timeout,
     LocalQueueTimeout,
@@ -64,6 +69,7 @@ impl Error {
             provider,
             kind,
             provider_request_id: None,
+            retry_after_seconds: None,
         }
     }
 
@@ -78,6 +84,7 @@ impl Error {
             ErrorKind::RegistrationAmbiguous => "registration_ambiguous",
             ErrorKind::RegistrationExpired => "registration_expired",
             ErrorKind::AuthenticationRequired => "provider_authentication_required",
+            ErrorKind::ProviderChallenge { .. } => "provider_challenge_required",
             ErrorKind::Configuration => "provider_configuration",
             ErrorKind::Timeout => "provider_timeout",
             ErrorKind::LocalQueueTimeout => "local_provider_queue_timeout",
@@ -98,6 +105,7 @@ impl Error {
 
     pub fn provider_status(&self) -> Option<u16> {
         match self.kind {
+            ErrorKind::ProviderChallenge { status, .. } => status,
             ErrorKind::Http { status, .. } | ErrorKind::ProviderRejected { status, .. } => {
                 Some(status)
             }
@@ -114,18 +122,24 @@ impl Error {
     }
 
     pub fn retry_after(&self) -> Option<i64> {
-        match self.kind {
+        let value = match self.kind {
+            ErrorKind::ProviderChallenge { retry_after, .. } => retry_after,
             ErrorKind::Http { retry_after, .. }
             | ErrorKind::ProviderRejected { retry_after, .. } => retry_after,
             ErrorKind::Throttled { retry_after } => Some(retry_after),
             _ => None,
-        }
+        };
+        self.retry_after_seconds.or(value)
     }
 
     pub(crate) fn set_retry_after(&mut self, value: i64) {
+        let value = value.max(0);
+        self.retry_after_seconds = Some(value);
         match &mut self.kind {
             ErrorKind::Http { retry_after, .. }
+            | ErrorKind::ProviderChallenge { retry_after, .. }
             | ErrorKind::ProviderRejected { retry_after, .. } => *retry_after = Some(value),
+            ErrorKind::Throttled { retry_after } => *retry_after = value,
             _ => {}
         }
     }
@@ -211,6 +225,7 @@ impl fmt::Display for Error {
         let provider = self.provider.name();
         match &self.kind {
             ErrorKind::AuthenticationRequired => write!(f, "{provider} requires sign-in again"),
+            ErrorKind::ProviderChallenge { .. } => write!(f, "{provider} requires website verification; the saved sign-in is retained"),
             ErrorKind::Configuration => write!(f, "invalid {provider} client configuration"),
             ErrorKind::Timeout => write!(f, "{provider} request timed out"),
             ErrorKind::LocalQueueTimeout => write!(f, "Local {provider} request queue deadline expired before sending"),

@@ -116,6 +116,10 @@
       },
       "AmazonStatus": {
         "properties": {
+          "challenge_required": {
+            "default": false,
+            "type": "boolean"
+          },
           "imports_enabled": {
             "type": "boolean"
           },
@@ -1386,6 +1390,7 @@
               }
             ],
             "default": {
+              "challenge_required": false,
               "imports_enabled": false,
               "last_error_code": null,
               "last_success_at": null,
@@ -1536,7 +1541,7 @@
   "info": {
     "description": "Persistent local shipment records, manual corrections, and carrier synchronization. Use a Bearer owner or ingestion token. Creates require Idempotency-Key; writes to an existing shipment require its quoted revision in If-Match.",
     "title": "Shipments API",
-    "version": "0.6.18"
+    "version": "0.6.19"
   },
   "openapi": "3.0.3",
   "paths": {
