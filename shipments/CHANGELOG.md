@@ -1,5 +1,7 @@
 ## 0.6.26
 
+- Restore the public Amazon tracking link for genuine MCF shipments with TBA
+  numbers, without changing their carrier or provider.
 - Discover independently identified packages from full order details when an
   item-pop page has no tracking link. Keep item-specific labels only when their
   package association is verified.
@@ -8,6 +10,8 @@
   rejection and package identity checks.
 - Report bounded discovery coverage and deferrals with safe counts and hashed
   order identities, without logging URLs or page contents.
+- Pause on confirmed Amazon human-verification checkpoints while keeping the
+  saved connection and import preference intact.
 
 ## 0.6.25
 

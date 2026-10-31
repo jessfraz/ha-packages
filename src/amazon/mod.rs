@@ -935,7 +935,9 @@ impl AmazonClient {
                                 for mut parcel in canonical {
                                     let key = crate::amazon::source_key(&customer, &parcel);
                                     if !imported.contains(&key) && scan.seen_sources.insert(key) {
-                                        parcel.titles = vec!["Package".into()];
+                                        if parcel.titles.is_empty() {
+                                            parcel.titles.push("Package".into());
+                                        }
                                         scan.pending.push_back(parcel);
                                     }
                                 }
@@ -1259,9 +1261,8 @@ impl AmazonClient {
                 .with_page_kind(kind)
                 .with_path(&path)
             };
-            if std::str::from_utf8(&body).is_ok_and(|page| pages::orders_shape(page) == "challenge")
-            {
-                return Err(ConnectionError::with_status(
+            let challenge = || {
+                ConnectionError::with_status(
                     stage,
                     provider_error(ErrorKind::ProviderChallenge {
                         status: Some(status),
@@ -1271,7 +1272,11 @@ impl AmazonClient {
                 )
                 .with_page_kind(kind)
                 .with_path(&path)
-                .with_shape("challenge"));
+                .with_shape("challenge")
+            };
+            if std::str::from_utf8(&body).is_ok_and(|page| pages::orders_shape(page) == "challenge")
+            {
+                return Err(challenge());
             }
             if (300..400).contains(&status) {
                 let location = headers
@@ -1281,6 +1286,9 @@ impl AmazonClient {
                 let base =
                     Url::parse(&format!("{}{path}", pages::ORIGIN)).map_err(|_| invalid())?;
                 let url = base.join(location).map_err(|_| invalid())?;
+                if pages::checkpoint_redirect(&url) {
+                    return Err(challenge());
+                }
                 if url.scheme() == "https"
                     && url.host_str() == Some("www.amazon.com")
                     && url.path() == "/ap/signin"
@@ -2193,6 +2201,181 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn canonical_shipment_titles_survive_fallback_without_unbound_item_labels() {
+        const POP: &str =
+            "/your-orders/pop?orderId=111-1234567-1234567&shipmentId=SHIP1&packageId=ORIGINAL";
+        const DETAILS: &str = "/your-orders/order-details?orderID=111-1234567-1234567";
+        const NAMED: &str =
+            "/progress-tracker/package?orderId=111-1234567-1234567&shipmentId=SHIP1&packageIndex=0";
+        const UNKNOWN: &str =
+            "/progress-tracker/package?orderId=111-1234567-1234567&shipmentId=SHIP1&packageIndex=1";
+        const SIBLING: &str =
+            "/progress-tracker/package?orderId=111-1234567-1234567&shipmentId=SHIP2&packageIndex=0";
+        let fixture = Fixture::new(|path| match path {
+            "/auth/token" => (200, ACCESS.into()),
+            "/ap/exchangetoken/cookies" => (200, COOKIES.into()),
+            "/your-orders/orders?timeFilter=months-3" => (
+                200,
+                format!(
+                    r#"<a class="item-card__link" href="{POP}" aria-label="Unbound POP product, Order placed 1 October 2026, Shipped"></a>"#
+                ),
+            ),
+            POP => (200, "<div>No tracking anchors</div>".into()),
+            DETAILS => (
+                200,
+                format!(
+                    r#"
+              <div data-component="itemTitle"><a>Whole-order title trap</a></div><a href="{UNKNOWN}">Unstructured package</a>
+              <div data-component="shipments"><div class="a-box-group">
+                <div class="a-fixed-right-grid-inner"><div data-component="shipmentsLeftGrid"><div data-component="purchasedItems"><div data-component="itemTitle"><a>Verified tripod</a></div></div></div><div data-component="shipmentsRightGrid"><div data-component="shipmentConnections"><a href="{NAMED}">Track</a></div></div></div>
+                <div class="a-fixed-right-grid-inner"><div data-component="shipmentsLeftGrid"><div data-component="purchasedItems"><div data-component="itemTitle"><a>Other shipment bracket</a></div></div></div><div data-component="shipmentsRightGrid"><div data-component="shipmentConnections"><a href="{SIBLING}">Track</a></div></div></div>
+                <div class="a-fixed-right-grid-inner"><div data-component="shipmentsLeftGrid"><div data-component="purchasedItems"><div data-component="itemTitle"><a>Unshipped monitor</a></div></div></div><div data-component="shipmentsRightGrid">Not shipped</div></div>
+              </div></div>"#
+                ),
+            ),
+            NAMED => (
+                200,
+                tracking().replace(
+                    "\"trackingId\":",
+                    "\"shipmentId\":\"SHIP1\",\"packageIndex\":\"0\",\"trackingId\":",
+                ),
+            ),
+            UNKNOWN => (
+                200,
+                tracking()
+                    .replace(NUMBER, "9400111122223333444466")
+                    .replace(
+                        "\"trackingId\":",
+                        "\"shipmentId\":\"SHIP1\",\"packageIndex\":\"1\",\"trackingId\":",
+                    ),
+            ),
+            SIBLING => (
+                200,
+                tracking()
+                    .replace(NUMBER, "9400111122223333444477")
+                    .replace(
+                        "\"trackingId\":",
+                        "\"shipmentId\":\"SHIP2\",\"packageIndex\":\"0\",\"trackingId\":",
+                    ),
+            ),
+            _ => (404, "Unexpected request".into()),
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let client = configured(&dir, &fixture);
+        let preview = client.preview().await.unwrap();
+        assert_eq!(preview.parcels.len(), 3);
+        for (path, title, number) in [
+            (NAMED, "Amazon: Verified tripod", NUMBER),
+            (UNKNOWN, "Amazon: Package", "9400111122223333444466"),
+            (
+                SIBLING,
+                "Amazon: Other shipment bracket",
+                "9400111122223333444477",
+            ),
+        ] {
+            let parcel = preview
+                .parcels
+                .iter()
+                .find(|parcel| parcel.tracker.id.ends_with(path))
+                .unwrap();
+            assert_eq!(parcel.title, title);
+            assert_eq!(parcel.tracker.tracking_code, number);
+        }
+        assert_eq!(preview.deferred_reasons.unverified_tracking, 1);
+        assert!(!client.status().await.imports_enabled);
+    }
+
+    #[tokio::test]
+    async fn canonical_identity_conflicts_do_not_admit_the_first_tracking_variant() {
+        const POP: &str =
+            "/your-orders/pop?orderId=111-1234567-1234567&shipmentId=SHIP1&packageId=ORIGINAL";
+        const DETAILS: &str = "/your-orders/order-details?orderID=111-1234567-1234567";
+        const FIRST: &str = "/progress-tracker/package?orderId=111-1234567-1234567&shipmentId=SHIP1&packageId=BOX1&packageIndex=0";
+        for (second, rejected) in [
+            (FIRST.replace("packageIndex=0", "packageIndex=1"), true),
+            (FIRST.replace("packageId=BOX1", "packageId=BOX2"), true),
+            (format!("{FIRST}&lineItemId=ITEM2"), false),
+        ] {
+            let fixture = Fixture::new(move |path| match path {
+                "/auth/token" => (200, ACCESS.into()),
+                "/ap/exchangetoken/cookies" => (200, COOKIES.into()),
+                "/your-orders/orders?timeFilter=months-3" => (
+                    200,
+                    format!(
+                        r#"<a class="item-card__link" href="{POP}" aria-label="Unbound product, Order placed 1 October 2026, Shipped"></a>"#
+                    ),
+                ),
+                POP => (200, "<div>No tracking anchors</div>".into()),
+                DETAILS => (
+                    200,
+                    format!(r#"<a href="{FIRST}">Track</a><a href="{second}">Another variant</a>"#),
+                ),
+                FIRST => (
+                    200,
+                    tracking().replace(
+                        "\"trackingId\":",
+                        "\"packageId\":\"BOX1\",\"packageIndex\":\"0\",\"trackingId\":",
+                    ),
+                ),
+                value if value == second && !rejected => (
+                    200,
+                    tracking().replace(
+                        "\"trackingId\":",
+                        "\"packageId\":\"BOX1\",\"packageIndex\":\"0\",\"trackingId\":",
+                    ),
+                ),
+                value if value == second => (
+                    200,
+                    tracking()
+                        .replace(NUMBER, "9400111122223333444466")
+                        .replace(
+                            "\"trackingId\":",
+                            if value.contains("packageIndex=1") {
+                                "\"packageId\":\"BOX1\",\"packageIndex\":\"1\",\"trackingId\":"
+                            } else {
+                                "\"packageId\":\"BOX2\",\"packageIndex\":\"0\",\"trackingId\":"
+                            },
+                        ),
+                ),
+                _ => (404, "Unexpected request".into()),
+            });
+            let dir = tempfile::tempdir().unwrap();
+            let client = configured(&dir, &fixture);
+            let preview = client.preview().await.unwrap();
+            if rejected {
+                assert!(
+                    preview.parcels.is_empty(),
+                    "a contradictory canonical set must not admit its first valid-looking tracker"
+                );
+                assert_eq!(preview.deferred_reasons.unverified_tracking, 1);
+                assert!(
+                    !fixture
+                        .calls
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .any(|path| path.starts_with("/progress-tracker/package?"))
+                );
+            } else {
+                assert_eq!(preview.parcels.len(), 1);
+                assert_eq!(preview.parcels[0].title, "Amazon: Package");
+                assert_eq!(preview.parcels[0].tracker.tracking_code, NUMBER);
+                assert_eq!(
+                    fixture
+                        .calls
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .filter(|path| path.starts_with("/progress-tracker/package?"))
+                        .count(),
+                    1
+                );
+            }
+            assert!(!client.status().await.imports_enabled);
+        }
+    }
+
+    #[tokio::test]
     async fn canonical_package_discovery_resumes_within_budget_and_deduplicates_shared_orders() {
         use crate::{
             amazon_sync::AmazonDiscoveryWorker,
@@ -2625,6 +2808,90 @@ mod tests {
         assert!(!text.contains("111-1234567-1234567"));
         assert!(!text.contains("orderId"));
         assert!(!text.contains("SHIP1"));
+    }
+
+    #[tokio::test]
+    async fn checkpoint_challenges_pause_without_following_redirects_or_losing_the_grant() {
+        const FORM: &str = r#"<form action="/checkpoint/validate"><input type="hidden" name="opaque" value="PRIVATE_CHECKPOINT_FIELD"><label><input type="checkbox" name="human">Check the box to continue. I am human.</label></form>"#;
+        for (status, location, body, challenge) in [
+            (302, Some("/checkpoint/continue"), "", true),
+            (
+                302,
+                Some("https://www.amazon.com/checkpoint/continue?opaque=PRIVATE_CHECKPOINT_FIELD"),
+                "",
+                true,
+            ),
+            (200, None, FORM, true),
+            (
+                302,
+                Some("https://evil.example/checkpoint/continue"),
+                "",
+                false,
+            ),
+            (302, Some("/unrecognized/continue"), "", false),
+            (503, None, "Service unavailable", false),
+        ] {
+            let fixture = Fixture::with_location(move |path| match path {
+                "/auth/token" => (200, None, ACCESS.into()),
+                "/ap/exchangetoken/cookies" => (200, None, COOKIES.into()),
+                _ => (status, location.map(str::to_owned), body.into()),
+            });
+            let dir = tempfile::tempdir().unwrap();
+            let client = configured(&dir, &fixture);
+            client.enable_imports().await.unwrap();
+            let generation = client.generation().await;
+            let error = client
+                .preview()
+                .await
+                .err()
+                .expect("the fixture must not become an empty successful preview");
+            assert_eq!(
+                matches!(
+                    error.provider_error().kind,
+                    ErrorKind::ProviderChallenge { .. }
+                ),
+                challenge
+            );
+            assert_eq!(client.status().await.challenge_required, challenge);
+            assert_eq!(client.blocked(), challenge);
+            assert_eq!(client.status().await.state, AmazonState::Connected);
+            assert!(client.status().await.imports_enabled);
+            assert_eq!(
+                *fixture.calls.lock().unwrap(),
+                [
+                    "/auth/token",
+                    "/ap/exchangetoken/cookies",
+                    "/your-orders/orders?timeFilter=months-3"
+                ]
+            );
+            if challenge {
+                assert_eq!(error.response_shape, Some("challenge"));
+                assert!(client.generation().await > generation);
+                assert!(client.commit_guard(generation).await.is_err());
+                assert!(client.discover().await.is_err());
+                assert_eq!(
+                    fixture.calls.lock().unwrap().len(),
+                    3,
+                    "paused discovery must not make another request"
+                );
+            }
+            let restored = AmazonClient::new(dir.path().join("amazon-account.json")).unwrap();
+            assert_eq!(restored.status().await.state, AmazonState::Connected);
+            assert!(restored.status().await.imports_enabled);
+            assert_eq!(restored.status().await.challenge_required, challenge);
+            assert_eq!(restored.blocked(), challenge);
+            assert_eq!(
+                restored
+                    .state
+                    .lock()
+                    .await
+                    .credential
+                    .as_ref()
+                    .unwrap()
+                    .refresh_token,
+                "SYNTHETIC_REFRESH"
+            );
+        }
     }
 
     #[tokio::test]
