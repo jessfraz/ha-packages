@@ -1,6 +1,7 @@
 //! Fixed-vocabulary connection diagnostics. Provider bodies and credentials
 //! never enter this type, the API error response, or operational logs.
 
+use sha2::{Digest, Sha256};
 use std::fmt;
 
 use crate::{
@@ -101,6 +102,7 @@ pub struct ConnectionError {
     source: Error,
     pub response_shape: Option<&'static str>,
     pub page_kind: Option<PageKind>,
+    pub page_fingerprint: Option<Box<str>>,
 }
 impl ConnectionError {
     pub(crate) fn new(stage: ConnectionStage, source: Error) -> Self {
@@ -124,6 +126,7 @@ impl ConnectionError {
             source,
             response_shape: None,
             page_kind: None,
+            page_fingerprint: None,
         }
     }
     pub(crate) fn with_status(stage: ConnectionStage, source: Error, status: u16) -> Self {
@@ -137,6 +140,7 @@ impl ConnectionError {
             source: provider_error(ErrorKind::InvalidResponse),
             response_shape: None,
             page_kind: None,
+            page_fingerprint: None,
         }
     }
     pub(crate) fn with_upstream_status(mut self, status: u16) -> Self {
@@ -159,6 +163,16 @@ impl ConnectionError {
     }
     pub(crate) fn with_page_kind(mut self, kind: PageKind) -> Self {
         self.page_kind = Some(kind);
+        self
+    }
+    pub(crate) fn with_path(mut self, path: &str) -> Self {
+        self.page_fingerprint = Some(
+            Sha256::digest(path.as_bytes())
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>()
+                .into_boxed_str(),
+        );
         self
     }
     pub fn retry_after(&self) -> Option<i64> {

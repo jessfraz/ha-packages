@@ -879,6 +879,7 @@ fn amazon_connection_error(
         "error_code" => error.reason.as_str(), "provider_status" => error.upstream_status,
         "response_shape" => error.response_shape,
         "page_kind" => error.page_kind.map(crate::amazon::connection::PageKind::as_str),
+        "page_fingerprint" => error.page_fingerprint.as_deref(),
         "retry_after_seconds" => error.retry_after(),
         "duration_ms" => u64::try_from(elapsed.as_millis()).unwrap_or(86_400_000));
     let status_code = match error.reason {
