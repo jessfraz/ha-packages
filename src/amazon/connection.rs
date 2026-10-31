@@ -178,6 +178,17 @@ impl ConnectionError {
     pub fn retry_after(&self) -> Option<i64> {
         self.source.retry_after()
     }
+    pub(crate) fn log(&self, log: &slog::Logger, elapsed: std::time::Duration) {
+        slog::warn!(log, "amazon_connection";
+            "provider" => "amazon_account", "operation" => self.stage.as_str(),
+            "outcome" => "error", "error_code" => self.reason.as_str(),
+            "provider_status" => self.upstream_status,
+            "response_shape" => self.response_shape,
+            "page_kind" => self.page_kind.map(PageKind::as_str),
+            "page_fingerprint" => self.page_fingerprint.as_deref(),
+            "retry_after_seconds" => self.retry_after(),
+            "duration_ms" => u64::try_from(elapsed.as_millis()).unwrap_or(86_400_000));
+    }
     pub fn into_provider(self) -> Error {
         self.source
     }

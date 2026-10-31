@@ -214,6 +214,7 @@ impl RequestSchedule {
 
 #[derive(Clone)]
 pub struct AmazonClient {
+    log: slog::Logger,
     path: Arc<PathBuf>,
     state: Arc<Mutex<State>>,
     paused: Arc<AtomicBool>,
@@ -249,6 +250,7 @@ impl AmazonClient {
             .user_agent("Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1")
             .build().map_err(|_| provider_error(ErrorKind::Configuration))?;
         Ok(Self {
+            log: crate::logging::logger(),
             path: Arc::new(path),
             state: Arc::new(Mutex::new(State {
                 credential,
@@ -296,6 +298,11 @@ impl AmazonClient {
         client.loopback = Some(endpoint);
         client.pause = Duration::ZERO;
         Ok(client)
+    }
+
+    pub fn with_logger(mut self, log: slog::Logger) -> Self {
+        self.log = log;
+        self
     }
 
     pub async fn status(&self) -> AmazonStatus {
@@ -791,7 +798,8 @@ impl AmazonClient {
             };
             (state.generation, customer, state.imported.clone(), scan)
         };
-        let deadline = Instant::now() + self.operation_timeout;
+        let started = Instant::now();
+        let deadline = started + self.operation_timeout;
         let mut parcels = Vec::new();
         let mut reads = 0;
         let mut listings = 0;
@@ -926,6 +934,9 @@ impl AmazonClient {
                     if error.stage == ConnectionStage::Orders
                         && matches!(error.provider_error().kind, ErrorKind::InvalidResponse) =>
                 {
+                    // Deferral must retain the same safe classification as a
+                    // failed preview, without logging page bodies or URLs.
+                    error.log(&self.log, started.elapsed());
                     scan.deferred.unverified_tracking += 1;
                     deferred += 1;
                 }
@@ -2212,7 +2223,10 @@ mod tests {
             _ => (404, None, String::new()),
         });
         let dir = tempfile::tempdir().unwrap();
-        let client = configured(&dir, &fixture);
+        let log_path = dir.path().join("safe.log");
+        let client = configured(&dir, &fixture).with_logger(crate::logging::with_writer(
+            std::fs::File::create(&log_path).unwrap(),
+        ));
         let preview = client.preview().await.unwrap();
         assert!(preview.parcels.is_empty());
         assert_eq!(preview.deferred, 1);
@@ -2226,6 +2240,26 @@ mod tests {
                 .any(|path| path == BARE || path == OTHER)
         );
         assert_eq!(client.status().await.state, AmazonState::Connected);
+        #[derive(serde::Deserialize)]
+        struct DeferredLog {
+            event: String,
+            provider_status: u16,
+            page_kind: String,
+            page_fingerprint: String,
+        }
+        let text = std::fs::read_to_string(log_path).unwrap();
+        let entries: Vec<DeferredLog> = text
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].event, "amazon_connection");
+        assert_eq!(entries[0].provider_status, 302);
+        assert_eq!(entries[0].page_kind, "tracking_page");
+        assert_eq!(entries[0].page_fingerprint.len(), 64);
+        assert!(!text.contains("111-1234567-1234567"));
+        assert!(!text.contains("orderId"));
+        assert!(!text.contains("SHIP1"));
     }
 
     #[tokio::test]
