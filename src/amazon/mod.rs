@@ -336,22 +336,10 @@ impl AmazonClient {
                 ));
             }
         }
-        self.clear_cookies()
-            .map_err(|e| ConnectionError::new(ConnectionStage::Cookies, e))?;
-        auth::authenticate(self, &registration.token).await?;
-        let page = self.page_once("/your-orders/orders").await?;
-        let page = match page {
-            Page::SignedOut(status) => {
-                return Err(ConnectionError::with_status(
-                    ConnectionStage::Orders,
-                    provider_error(ErrorKind::AuthenticationRequired),
-                    status,
-                ));
-            }
-            Page::Body(page) => page,
-        };
-        pages::listing(&page)
-            .map_err(|e| ConnectionError::with_status(ConnectionStage::Orders, e, 200))?;
+        // Registration identity and a successful access-token grant prove sign-in.
+        // Website cookies and order layouts belong to Preview, not credential durability.
+        let replacement = auth::refresh_access_token(self, &registration.token).await?;
+        let token = replacement.unwrap_or(registration.token);
         let mut state = self.state.lock().await;
         if state.generation != generation {
             return Err(ConnectionError::failure(
@@ -361,7 +349,7 @@ impl AmazonClient {
         }
         let imports_enabled = state.credential.as_ref().is_some_and(|c| c.imports_enabled);
         let credential = Credential {
-            refresh_token: registration.token,
+            refresh_token: token,
             device_serial: flow.serial,
             customer_id: registration.customer,
             generation: generation.saturating_add(1),
@@ -423,43 +411,41 @@ impl AmazonClient {
     }
 
     pub async fn discover(&self) -> Result<Discovery, Error> {
+        self.preview().await.map_err(ConnectionError::into_provider)
+    }
+
+    pub async fn preview(&self) -> Result<Discovery, ConnectionError> {
         let generation = self.generation().await;
         let result = self.discover_inner().await;
         if let Err(error) = &result {
-            self.record_error(generation, error).await?;
+            self.record_error(generation, error.provider_error())
+                .await
+                .map_err(|e| ConnectionError::new(ConnectionStage::Credentials, e))?;
         }
         result
     }
-    async fn discover_inner(&self) -> Result<Discovery, Error> {
+    async fn discover_inner(&self) -> Result<Discovery, ConnectionError> {
         let (generation, customer) = {
             let state = self.state.lock().await;
             let c = state
                 .credential
                 .as_ref()
                 .filter(|c| !c.auth_required)
-                .ok_or_else(|| provider_error(ErrorKind::AuthenticationRequired))?;
+                .ok_or_else(|| {
+                    ConnectionError::new(
+                        ConnectionStage::AccessToken,
+                        provider_error(ErrorKind::AuthenticationRequired),
+                    )
+                })?;
             (state.generation, c.customer_id.clone())
         };
         // Validate the saved refresh token once for the account's discovery
         // cycle, including when no parcels exist. Per-parcel reads share cookies.
         {
             let _session = self.session.lock().await;
-            let token = {
-                let state = self.state.lock().await;
-                if state.generation != generation {
-                    return Err(provider_error(ErrorKind::AuthenticationRequired));
-                }
-                state
-                    .credential
-                    .as_ref()
-                    .filter(|c| !c.auth_required)
-                    .ok_or_else(|| provider_error(ErrorKind::AuthenticationRequired))?
-                    .refresh_token
-                    .clone()
-            };
-            auth::authenticate(self, &token).await?;
+            self.authenticate_saved(generation).await?;
         }
-        let listing = pages::listing(&self.fetch_page("/your-orders/orders").await?)?;
+        let listing = self.order_listing().await?;
         let mut parcels = Vec::new();
         let mut deferred = listing.deferred;
         let (start, imported) = {
@@ -483,12 +469,14 @@ impl AmazonClient {
             self.state.lock().await.cursor = (index + 1) % count;
             let result = async {
                 let mut path = parcel.path.clone();
-                let mut page = self.fetch_page(&path).await?;
+                let mut page = self.fetch_page_detailed(&path).await?;
                 if !pages::is_tracking(&path) {
-                    path = pages::tracking_link(&page, parcel)?;
-                    page = self.fetch_page(&path).await?;
+                    path = pages::tracking_link(&page, parcel)
+                        .map_err(|e| ConnectionError::new(ConnectionStage::Orders, e))?;
+                    page = self.fetch_page_detailed(&path).await?;
                 }
                 pages::tracking(&page, &path, None)
+                    .map_err(|e| ConnectionError::new(ConnectionStage::Orders, e))
             }
             .await;
             match result {
@@ -506,7 +494,10 @@ impl AmazonClient {
                         tracker,
                     });
                 }
-                Err(error) if matches!(error.kind, ErrorKind::InvalidResponse) => {
+                Err(error)
+                    if error.stage == ConnectionStage::Orders
+                        && matches!(error.provider_error().kind, ErrorKind::InvalidResponse) =>
+                {
                     deferred += 1;
                 }
                 Err(error) => return Err(error),
@@ -514,7 +505,10 @@ impl AmazonClient {
         }
         let mut state = self.state.lock().await;
         if state.generation != generation {
-            return Err(provider_error(ErrorKind::AuthenticationRequired));
+            return Err(ConnectionError::failure(
+                ConnectionStage::Account,
+                ConnectionReason::SessionChanged,
+            ));
         }
         for parcel in &parcels {
             state
@@ -525,8 +519,10 @@ impl AmazonClient {
             state.observed.pop_first();
         }
         if let Some(c) = &mut state.credential {
-            c.last_success_at = Some(now()?);
-            save(&self.path, c)?;
+            c.last_success_at =
+                Some(now().map_err(|e| ConnectionError::new(ConnectionStage::Credentials, e))?);
+            save(&self.path, c)
+                .map_err(|e| ConnectionError::new(ConnectionStage::Credentials, e))?;
         }
         state.last_error = None;
         Ok(Discovery {
@@ -726,7 +722,19 @@ impl AmazonClient {
                     status,
                 ));
             }
-            let page = String::from_utf8(body).map_err(|_| invalid())?;
+            let page = String::from_utf8(body).map_err(|_| {
+                let shape = match headers
+                    .get(reqwest::header::CONTENT_ENCODING)
+                    .and_then(|v| v.to_str().ok())
+                {
+                    Some("gzip") => "encoded_gzip",
+                    Some("br") => "encoded_brotli",
+                    Some("deflate") => "encoded_deflate",
+                    Some(_) => "encoded_other",
+                    None => "invalid_utf8",
+                };
+                invalid().with_shape(shape)
+            })?;
             return Ok(if pages::signed_out(&page) {
                 Page::SignedOut(status)
             } else {
@@ -738,38 +746,141 @@ impl AmazonClient {
             provider_error(ErrorKind::InvalidResponse),
         ))
     }
-    async fn fetch_page(&self, path: &str) -> Result<String, Error> {
-        let _session = self.session.lock().await;
+    // Caller holds the shared session lock. A replacement is durable before
+    // website access, so a cookie outage cannot strand an otherwise valid grant.
+    async fn authenticate_saved(&self, generation: u64) -> Result<(), ConnectionError> {
         let token = {
             let state = self.state.lock().await;
-            let c = state
+            if state.generation != generation {
+                return Err(ConnectionError::failure(
+                    ConnectionStage::Account,
+                    ConnectionReason::SessionChanged,
+                ));
+            }
+            state
                 .credential
                 .as_ref()
                 .filter(|c| !c.auth_required)
-                .ok_or_else(|| provider_error(ErrorKind::AuthenticationRequired))?;
-            c.refresh_token.clone()
+                .ok_or_else(|| {
+                    ConnectionError::new(
+                        ConnectionStage::AccessToken,
+                        provider_error(ErrorKind::AuthenticationRequired),
+                    )
+                })?
+                .refresh_token
+                .clone()
         };
-        // The outer operation records failures against its original epoch.
-        // A reconnect between response and completion must not poison the new login.
-        let origin =
-            Url::parse(pages::ORIGIN).map_err(|_| provider_error(ErrorKind::Configuration))?;
+        let replacement = auth::refresh_access_token(self, &token).await?;
+        if let Some(replacement) = &replacement {
+            let mut state = self.state.lock().await;
+            let credential = state
+                .credential
+                .as_ref()
+                .filter(|c| state.generation == generation && c.refresh_token == token)
+                .ok_or_else(|| {
+                    ConnectionError::failure(
+                        ConnectionStage::Account,
+                        ConnectionReason::SessionChanged,
+                    )
+                })?;
+            let mut updated = credential.clone();
+            updated.refresh_token = replacement.clone();
+            save(&self.path, &updated).map_err(|_| {
+                ConnectionError::failure(
+                    ConnectionStage::Credentials,
+                    ConnectionReason::Persistence,
+                )
+            })?;
+            state.credential = Some(updated);
+        }
+        auth::exchange_cookies(self, replacement.as_deref().unwrap_or(&token)).await
+    }
+
+    async fn order_listing(&self) -> Result<pages::Listing, ConnectionError> {
+        let mut last = ConnectionError::failure(
+            ConnectionStage::Orders,
+            ConnectionReason::UnsupportedOrdersLayout,
+        );
+        for path in ["/your-orders/orders", "/gp/css/order-history"] {
+            match self.fetch_page_detailed(path).await {
+                Ok(page) => match pages::listing(&page) {
+                    Ok(listing) => return Ok(listing),
+                    Err(error) if matches!(error.kind, ErrorKind::InvalidResponse) => {
+                        let shape = pages::orders_shape(&page);
+                        let reason = if shape == "challenge" {
+                            ConnectionReason::ChallengePage
+                        } else {
+                            ConnectionReason::UnsupportedOrdersLayout
+                        };
+                        last = ConnectionError::failure(ConnectionStage::Orders, reason)
+                            .with_upstream_status(200)
+                            .with_shape(shape);
+                        if reason == ConnectionReason::ChallengePage {
+                            return Err(last);
+                        }
+                    }
+                    Err(error) => {
+                        return Err(ConnectionError::with_status(
+                            ConnectionStage::Orders,
+                            error,
+                            200,
+                        ));
+                    }
+                },
+                Err(error)
+                    if error.stage == ConnectionStage::Orders
+                        && error.upstream_status == Some(404) =>
+                {
+                    last = error
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        Err(last)
+    }
+
+    async fn fetch_page(&self, path: &str) -> Result<String, Error> {
+        self.fetch_page_detailed(path)
+            .await
+            .map_err(ConnectionError::into_provider)
+    }
+    async fn fetch_page_detailed(&self, path: &str) -> Result<String, ConnectionError> {
+        let _session = self.session.lock().await;
+        let generation = self.generation().await;
+        let origin = Url::parse(pages::ORIGIN).map_err(|_| {
+            ConnectionError::new(
+                ConnectionStage::Cookies,
+                provider_error(ErrorKind::Configuration),
+            )
+        })?;
         let empty = self
             .jar
             .read()
-            .map_err(|_| provider_error(ErrorKind::Configuration))?
+            .map_err(|_| {
+                ConnectionError::new(
+                    ConnectionStage::Cookies,
+                    provider_error(ErrorKind::Configuration),
+                )
+            })?
             .cookies(&origin)
             .is_none();
         if empty {
-            auth::authenticate(self, &token).await?;
+            self.authenticate_saved(generation).await?;
         }
         match self.page_once(path).await? {
             Page::Body(page) => Ok(page),
             Page::SignedOut(_) => {
-                self.clear_cookies()?;
-                auth::authenticate(self, &token).await?;
+                self.clear_cookies()
+                    .map_err(|e| ConnectionError::new(ConnectionStage::Cookies, e))?;
+                self.authenticate_saved(generation).await?;
                 match self.page_once(path).await? {
                     Page::Body(page) => Ok(page),
-                    Page::SignedOut(_) => Err(provider_error(ErrorKind::AuthenticationRequired)),
+                    Page::SignedOut(status) => Err(ConnectionError::failure(
+                        ConnectionStage::Orders,
+                        ConnectionReason::ChallengePage,
+                    )
+                    .with_upstream_status(status)
+                    .with_shape("sign_in")),
                 }
             }
         }
@@ -1688,7 +1799,7 @@ mod tests {
                 "/auth/token" => (200, ACCESS.into()),
                 "/ap/exchangetoken/cookies" => (200, cookies.clone()),
                 "/your-orders/orders" => (200, listing()),
-                _ => (404, String::new()),
+                _ => (200, tracking()),
             });
             let dir = tempfile::tempdir().unwrap();
             let client =
@@ -1700,7 +1811,8 @@ mod tests {
             let status = result.unwrap();
             assert_eq!(status.state, AmazonState::Connected);
             assert!(!status.imports_enabled);
-            assert_eq!(fixture.calls.lock().unwrap().len(), 4);
+            assert_eq!(fixture.calls.lock().unwrap().len(), 2);
+            assert_eq!(client.preview().await.unwrap().parcels.len(), 1);
         }
     }
 
@@ -1734,27 +1846,6 @@ mod tests {
                 200,
                 r#"{"unexpected":"PRIVATE_TOKEN"}"#,
                 ConnectionStage::AccessToken,
-                ConnectionReason::UnexpectedResponse,
-            ),
-            (
-                "/ap/exchangetoken/cookies",
-                200,
-                r#"{"unexpected":"PRIVATE_COOKIE"}"#,
-                ConnectionStage::Cookies,
-                ConnectionReason::UnexpectedResponse,
-            ),
-            (
-                "/your-orders/orders",
-                200,
-                "<html>PRIVATE_UNRECOGNIZED_PAGE</html>",
-                ConnectionStage::Orders,
-                ConnectionReason::UnexpectedResponse,
-            ),
-            (
-                "/your-orders/orders",
-                403,
-                "PRIVATE_BODY",
-                ConnectionStage::Orders,
                 ConnectionReason::UnexpectedResponse,
             ),
         ];
@@ -1943,5 +2034,153 @@ mod tests {
                 "https://www.amazon.com/ap/maplanding?openid.oa2.authorization_code=SYNTHETIC_CODE",
             )
             .await
+    }
+    #[tokio::test]
+    async fn verified_sign_in_is_durable_without_fetching_orders() {
+        let fixture = Fixture::new(|path| match path {
+            "/auth/register" => (200, REGISTER.into()),
+            "/auth/token" => (200, ACCESS.into()),
+            "/ap/exchangetoken/cookies" => (200, COOKIES.into()),
+            _ => (200, "<html>Unrecognized orders layout</html>".into()),
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("account.json");
+        let client = AmazonClient::for_test(path.clone(), fixture.url.clone()).unwrap();
+        let flow = client.begin_sign_in("owner").await.unwrap();
+        let status = client
+            .complete_sign_in(
+                "owner",
+                &flow.flow_id,
+                "https://www.amazon.com/ap/maplanding?openid.oa2.authorization_code=SYNTHETIC_CODE",
+            )
+            .await
+            .unwrap();
+        assert_eq!(status.state, AmazonState::Connected);
+        assert!(!status.imports_enabled);
+        assert_eq!(
+            AmazonClient::new(path).unwrap().status().await.state,
+            AmazonState::Connected
+        );
+        assert_eq!(
+            *fixture.calls.lock().unwrap(),
+            vec!["/auth/register", "/auth/token"]
+        );
+    }
+
+    #[tokio::test]
+    async fn legacy_orders_fallback_is_bounded_and_unknown_pages_keep_the_saved_grant() {
+        use crate::amazon::connection::ConnectionReason;
+        for recognized in [true, false] {
+            let fixture = Fixture::new(move |path| match path {
+                "/auth/token" => (200, ACCESS.into()),
+                "/ap/exchangetoken/cookies" => (200, COOKIES.into()),
+                "/your-orders/orders" => (200, "<html>Unknown first layout</html>".into()),
+                "/gp/css/order-history" if recognized => (200, listing()),
+                "/gp/css/order-history" => (200, "<html>Unknown legacy layout</html>".into()),
+                _ => (200, tracking()),
+            });
+            let dir = tempfile::tempdir().unwrap();
+            let client = configured(&dir, &fixture);
+            let path = dir.path().join("amazon-account.json");
+            let before = std::fs::read(&path).unwrap();
+            let result = client.preview().await;
+            if recognized {
+                assert_eq!(result.unwrap().parcels.len(), 1);
+            } else {
+                let error = result.err().unwrap();
+                assert_eq!(error.reason, ConnectionReason::UnsupportedOrdersLayout);
+                assert_eq!(error.response_shape, Some("unrecognized_html"));
+                assert_eq!(error.upstream_status, Some(200));
+                assert!(
+                    std::fs::read(&path).unwrap() == before,
+                    "A layout failure changed saved credentials"
+                );
+                assert_eq!(
+                    AmazonClient::new(path).unwrap().status().await.state,
+                    AmazonState::Connected
+                );
+            }
+            assert_eq!(client.status().await.state, AmazonState::Connected);
+            assert!(!client.status().await.imports_enabled);
+            let calls = fixture.calls.lock().unwrap();
+            assert_eq!(
+                calls
+                    .iter()
+                    .filter(|p| p.as_str() == "/gp/css/order-history")
+                    .count(),
+                1
+            );
+            assert!(!calls.iter().any(|p| p == "/auth/register"));
+        }
+    }
+
+    #[tokio::test]
+    async fn outages_and_challenges_do_not_become_empty_orders_or_expired_credentials() {
+        use crate::amazon::connection::ConnectionReason;
+        for (status, body, reason) in [
+            (503, "outage", ConnectionReason::UpstreamHttp),
+            (429, "limited", ConnectionReason::UpstreamHttp),
+            (500, "outage", ConnectionReason::UpstreamHttp),
+            (
+                200,
+                "<input id=captchacharacters>",
+                ConnectionReason::ChallengePage,
+            ),
+        ] {
+            let fixture = Fixture::new(move |path| match path {
+                "/auth/token" => (200, ACCESS.into()),
+                "/ap/exchangetoken/cookies" => (200, COOKIES.into()),
+                _ => (status, body.into()),
+            });
+            let dir = tempfile::tempdir().unwrap();
+            let client = configured(&dir, &fixture);
+            let error = client.preview().await.err().unwrap();
+            assert_eq!(
+                error.reason,
+                if status == 429 {
+                    ConnectionReason::RateLimited
+                } else {
+                    reason
+                }
+            );
+            assert_eq!(client.status().await.state, AmazonState::Connected);
+            assert!(
+                !fixture
+                    .calls
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|p| p == "/gp/css/order-history")
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn refresh_rotation_survives_a_cookie_outage_and_reconstruction() {
+        use crate::amazon::connection::ConnectionStage;
+        let fixture = Fixture::new(|path| match path {
+            "/auth/token" => (
+                200,
+                r#"{"access_token":"SYNTHETIC_ACCESS","refresh_token":"SYNTHETIC_ROTATED"}"#.into(),
+            ),
+            "/ap/exchangetoken/cookies" => (503, "outage".into()),
+            _ => panic!("Unexpected synthetic request"),
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let client = configured(&dir, &fixture);
+        let error = client.preview().await.err().unwrap();
+        assert_eq!(error.stage, ConnectionStage::Cookies);
+        let restored = AmazonClient::new(dir.path().join("amazon-account.json")).unwrap();
+        let state = restored.state.lock().await;
+        assert!(
+            state.credential.as_ref().unwrap().refresh_token == "SYNTHETIC_ROTATED",
+            "Replacement refresh token was not persisted"
+        );
+        assert!(!state.credential.as_ref().unwrap().auth_required);
+        assert!(!state.credential.as_ref().unwrap().imports_enabled);
+        assert_eq!(
+            *fixture.calls.lock().unwrap(),
+            vec!["/auth/token", "/ap/exchangetoken/cookies"]
+        );
     }
 }

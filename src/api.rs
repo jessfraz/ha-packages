@@ -877,6 +877,7 @@ fn amazon_connection_error(
         "request_id" => request.request_id.clone(), "provider" => "amazon_account",
         "operation" => error.stage.as_str(), "outcome" => "error",
         "error_code" => error.reason.as_str(), "provider_status" => error.upstream_status,
+        "response_shape" => error.response_shape,
         "duration_ms" => u64::try_from(elapsed.as_millis()).unwrap_or(86_400_000));
     let status_code = match error.reason {
         ConnectionReason::InvalidInput
@@ -1002,10 +1003,14 @@ async fn amazon_preview(
     request: RequestContext<Arc<Context>>,
 ) -> Result<HttpResponseHeaders<HttpResponseOk<AmazonPreview>, PrivateHeaders>, HttpError> {
     require_owner(&request).await?;
-    let result = amazon_client(&request)?
-        .discover()
-        .await
-        .map_err(amazon_error)?;
+    let started = std::time::Instant::now();
+    let result = amazon_client(&request)?.preview().await.map_err(|error| {
+        let mut response = amazon_connection_error(&request, error, started.elapsed());
+        response.error_code = response
+            .error_code
+            .map(|code| code.replacen("amazon_connect_", "amazon_preview_", 1));
+        response
+    })?;
     let shipments = result
         .parcels
         .into_iter()

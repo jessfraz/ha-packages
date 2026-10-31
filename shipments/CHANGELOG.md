@@ -1,3 +1,11 @@
+## 0.6.16
+
+- Save verified Amazon sign-in before website requests. Preview failures retain
+  the persistent grant rather than requiring another device registration.
+- Retry the supported legacy orders route for unrecognized layouts, with safe
+  layout/challenge diagnostics and no imports from unknown parcels.
+- Persist refresh-token replacements atomically before cookie requests.
+
 ## 0.6.15
 
 - Honor Amazon's cookie paths, including omitted and empty paths. Report the exact

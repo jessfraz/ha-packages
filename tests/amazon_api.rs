@@ -408,7 +408,9 @@ async fn every_downstream_connection_boundary_has_a_safe_correlated_error_and_lo
                         }
                     }
                 };
-                let (status, body) = if path == case.failed_path {
+                let (status, body) = if path == case.failed_path
+                    || (case.stage == "orders" && path == "/gp/css/order-history")
+                {
                     (case.upstream_status, case.body)
                 } else {
                     (
@@ -428,7 +430,10 @@ async fn every_downstream_connection_boundary_has_a_safe_correlated_error_and_lo
                     body.len()
                 );
                 stream.write_all(reply.as_bytes()).await.unwrap();
-                if path == case.failed_path {
+                if (path == case.failed_path && case.stage != "orders")
+                    || (case.stage == "orders" && path == "/gp/css/order-history")
+                    || (case.stage == "credentials" && path == "/auth/token")
+                {
                     break;
                 }
             }
@@ -478,12 +483,33 @@ async fn every_downstream_connection_boundary_has_a_safe_correlated_error_and_lo
             landing_url: &'a str,
         }
         let response=client.post(format!("{base}/v1/amazon/complete")).bearer_auth(OWNER).json(&Complete{flow_id:&flow.flow_id,landing_url:"https://www.amazon.com/ap/maplanding?openid.oa2.authorization_code=PRIVATE_CODE_SENTINEL"}).send().await.unwrap();
+        let preview = matches!(case.stage, "cookies" | "orders");
+        let response = if preview {
+            assert_eq!(response.status(), StatusCode::OK);
+            client
+                .post(format!("{base}/v1/amazon/preview"))
+                .bearer_auth(OWNER)
+                .send()
+                .await
+                .unwrap()
+        } else {
+            response
+        };
         assert_eq!(response.status(), case.response_status);
         assert_eq!(response.headers()["cache-control"], "no-store");
         let failure: dropshot::HttpErrorResponseBody = response.json().await.unwrap();
         assert_eq!(
             failure.error_code,
-            Some(format!("amazon_connect_{}_{}", case.stage, case.reason))
+            Some(format!(
+                "amazon_{}_{}_{}",
+                if preview { "preview" } else { "connect" },
+                case.stage,
+                if case.stage == "orders" {
+                    "unsupported_orders_layout"
+                } else {
+                    case.reason
+                }
+            ))
         );
         assert!(uuid::Uuid::parse_str(&failure.request_id).is_ok());
         assert!(!failure.message.contains("PRIVATE_"));
@@ -494,6 +520,12 @@ async fn every_downstream_connection_boundary_has_a_safe_correlated_error_and_lo
             );
         } else if case.stage == "credentials" {
             assert!(path.is_dir());
+        } else if preview {
+            assert!(path.exists());
+            assert_eq!(
+                account.status().await.state,
+                shipments::amazon::AmazonState::Connected
+            );
         } else {
             assert!(!path.exists());
         }
@@ -524,7 +556,14 @@ async fn every_downstream_connection_boundary_has_a_safe_correlated_error_and_lo
             Some(failure.request_id.as_str())
         );
         assert_eq!(event.operation.as_deref(), Some(case.stage));
-        assert_eq!(event.error_code.as_deref(), Some(case.reason));
+        assert_eq!(
+            event.error_code.as_deref(),
+            Some(if case.stage == "orders" {
+                "unsupported_orders_layout"
+            } else {
+                case.reason
+            })
+        );
         assert_eq!(
             event.provider_status,
             (!case.local_failure).then_some(case.upstream_status)

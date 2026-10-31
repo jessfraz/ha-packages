@@ -49,6 +49,8 @@ struct Fields {
     #[serde(skip_serializing_if = "Option::is_none")]
     provider_status: Option<u16>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    response_shape: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     provider_error_code: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     provider_request_id: Option<Uuid>,
@@ -171,6 +173,22 @@ impl slog::Serializer for Fields {
             "uri" => self.route = Some(route_template(&value.to_string())),
             "response_code" => self.response_code = http_status(&value.to_string()),
             "provider_status" => self.provider_status = http_status(&value.to_string()),
+            "response_shape" => {
+                self.response_shape = allowed(
+                    &value.to_string(),
+                    &[
+                        "challenge",
+                        "sign_in",
+                        "business_shell",
+                        "unrecognized_html",
+                        "encoded_gzip",
+                        "encoded_brotli",
+                        "encoded_deflate",
+                        "encoded_other",
+                        "invalid_utf8",
+                    ],
+                )
+            }
             "provider_request_id" => {
                 self.provider_request_id = Uuid::parse_str(&value.to_string()).ok()
             }
@@ -292,6 +310,8 @@ impl slog::Serializer for Fields {
                         "upstream_http",
                         "persistence",
                         "configuration",
+                        "unsupported_orders_layout",
+                        "challenge_page",
                     ],
                 )
             }

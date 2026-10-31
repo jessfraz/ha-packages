@@ -49,6 +49,18 @@ pub(crate) fn signed_out(page: &str) -> bool {
         .is_some()
 }
 
+// Fixed shape labels only. Never retain page contents, CSRF values or order data.
+pub(crate) fn orders_shape(page: &str) -> &'static str {
+    if page.contains("captchacharacters") || page.contains("/errors/validateCaptcha") {
+        "challenge"
+    } else if page.contains("ab-your-orders-anticsrf-token") && page.contains("yourOrdersStateData")
+    {
+        "business_shell"
+    } else {
+        "unrecognized_html"
+    }
+}
+
 pub(crate) fn allowed_path(input: &str) -> Result<String, Error> {
     if input.len() > 2048 || input.chars().any(|c| c.is_control() || c.is_whitespace()) {
         return Err(provider_error(ErrorKind::InvalidResponse));
