@@ -193,7 +193,10 @@ async fn account_management_requires_owner_and_keeps_one_time_data_out_of_health
         flow.flow_id.as_str(),
         "code_challenge",
     ] {
-        assert!(!log.contains(secret), "Log exposed {secret}");
+        assert!(
+            !log.contains(secret),
+            "Sensitive data appeared in captured logs"
+        );
     }
     assert!(!directory.path().join("amazon.json").exists());
 }
