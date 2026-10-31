@@ -1223,6 +1223,17 @@ mod tests {
         fn with_location(
             handler: impl Fn(&str) -> (u16, Option<String>, String) + Send + 'static,
         ) -> Self {
+            Self::with_response(move |path| {
+                let (status, location, body) = handler(path);
+                let headers = location
+                    .map(|value| format!("Location: {value}\r\n"))
+                    .unwrap_or_default();
+                (status, headers, body.into_bytes())
+            })
+        }
+        fn with_response(
+            handler: impl Fn(&str) -> (u16, String, Vec<u8>) + Send + 'static,
+        ) -> Self {
             let listener = TcpListener::bind("127.0.0.1:0").unwrap();
             listener.set_nonblocking(true).unwrap();
             let url = reqwest::Url::parse(&format!("http://{}/", listener.local_addr().unwrap()))
@@ -1290,15 +1301,13 @@ mod tests {
                         bytes.extend_from_slice(&buffer[..n]);
                     }
                     thread_calls.lock().unwrap().push(path.clone());
-                    let (status, location, body) = handler(&path);
-                    let location = location
-                        .map(|value| format!("Location: {value}\r\n"))
-                        .unwrap_or_default();
+                    let (status, headers, body) = handler(&path);
                     let reply = format!(
-                        "HTTP/1.1 {status} fixture\r\n{location}Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        "HTTP/1.1 {status} fixture\r\n{headers}Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
                         body.len()
                     );
                     let _ = stream.write_all(reply.as_bytes());
+                    let _ = stream.write_all(&body);
                 }
             });
             Self {
@@ -1343,6 +1352,72 @@ mod tests {
         .unwrap();
         AmazonClient::for_test(path, fixture.url.clone()).unwrap()
     }
+    fn compressed_fixture(orders: &'static [u8]) -> Fixture {
+        Fixture::with_response(move |path| match path {
+            "/auth/token" => (200, String::new(), ACCESS.as_bytes().to_vec()),
+            "/ap/exchangetoken/cookies" => (200, String::new(), COOKIES.as_bytes().to_vec()),
+            "/your-orders/orders" => (200, "Content-Encoding: gzip\r\n".into(), orders.to_vec()),
+            _ => (
+                200,
+                "Content-Encoding: gzip\r\n".into(),
+                include_bytes!("../../tests/fixtures/amazon/tracking.html.gz").to_vec(),
+            ),
+        })
+    }
+
+    #[tokio::test]
+    async fn gzip_orders_and_tracking_preview_verified_parcels() {
+        let dir = tempfile::tempdir().unwrap();
+        let fixture =
+            compressed_fixture(include_bytes!("../../tests/fixtures/amazon/orders.html.gz"));
+        let client = configured(&dir, &fixture);
+        let preview = client.preview().await.unwrap();
+        assert_eq!(preview.parcels.len(), 1);
+        assert_eq!(preview.deferred, 0);
+        assert_eq!(preview.parcels[0].title, "Widget");
+        assert_eq!(preview.parcels[0].tracker.tracking_code, NUMBER);
+        assert_eq!(
+            preview.parcels[0].tracker.status,
+            crate::models::Status::InTransit
+        );
+        assert_eq!(client.status().await.state, AmazonState::Connected);
+        assert!(!client.status().await.imports_enabled);
+    }
+
+    #[tokio::test]
+    async fn gzip_expansion_respects_the_decoded_response_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let fixture = compressed_fixture(include_bytes!(
+            "../../tests/fixtures/amazon/oversized.html.gz"
+        ));
+        let client = configured(&dir, &fixture);
+        let error = client
+            .preview()
+            .await
+            .err()
+            .expect("Oversized preview must fail");
+        assert!(matches!(
+            error.provider_error().kind,
+            ErrorKind::ResponseTooLarge
+        ));
+        assert_eq!(client.status().await.state, AmazonState::Connected);
+        assert!(!client.status().await.imports_enabled);
+        let restored = AmazonClient::new(dir.path().join("amazon-account.json")).unwrap();
+        assert_eq!(restored.status().await.state, AmazonState::Connected);
+    }
+
+    #[tokio::test]
+    async fn malformed_gzip_retains_the_saved_connection() {
+        let dir = tempfile::tempdir().unwrap();
+        let fixture = compressed_fixture(b"invalid compressed response");
+        let client = configured(&dir, &fixture);
+        assert!(client.preview().await.is_err());
+        assert_eq!(client.status().await.state, AmazonState::Connected);
+        assert!(!client.status().await.imports_enabled);
+        let restored = AmazonClient::new(dir.path().join("amazon-account.json")).unwrap();
+        assert_eq!(restored.status().await.state, AmazonState::Connected);
+    }
+
     #[tokio::test]
     async fn sign_in_is_private_owner_bound_and_one_use() {
         use std::os::unix::fs::PermissionsExt;

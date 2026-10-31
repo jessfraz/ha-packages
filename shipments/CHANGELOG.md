@@ -1,3 +1,8 @@
+## 0.6.17
+
+- Decode gzip-compressed Amazon orders and tracking responses before parsing.
+  Keep the decoded response limit and saved sign-in protections.
+
 ## 0.6.16
 
 - Save verified Amazon sign-in before website requests. Preview failures retain
