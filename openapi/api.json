@@ -70,6 +70,9 @@
             "minimum": 0,
             "type": "integer"
           },
+          "deferred_reasons": {
+            "$ref": "#/components/schemas/DeferredCounts"
+          },
           "shipments": {
             "items": {
               "$ref": "#/components/schemas/AmazonPreviewParcel"
@@ -79,6 +82,7 @@
         },
         "required": [
           "deferred",
+          "deferred_reasons",
           "shipments"
         ],
         "type": "object"
@@ -487,6 +491,43 @@
         "required": [
           "credential",
           "token"
+        ],
+        "type": "object"
+      },
+      "DeferredCounts": {
+        "properties": {
+          "missing_identity": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "missing_product": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "request_limit": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "unsupported_link": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "unverified_tracking": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "missing_identity",
+          "missing_product",
+          "request_limit",
+          "unsupported_link",
+          "unverified_tracking"
         ],
         "type": "object"
       },
@@ -1495,7 +1536,7 @@
   "info": {
     "description": "Persistent local shipment records, manual corrections, and carrier synchronization. Use a Bearer owner or ingestion token. Creates require Idempotency-Key; writes to an existing shipment require its quoted revision in If-Match.",
     "title": "Shipments API",
-    "version": "0.6.17"
+    "version": "0.6.18"
   },
   "openapi": "3.0.3",
   "paths": {

@@ -990,6 +990,7 @@ async fn amazon_complete(
 struct AmazonPreview {
     shipments: Vec<AmazonPreviewParcel>,
     deferred: usize,
+    deferred_reasons: crate::amazon::DeferredCounts,
 }
 #[derive(Serialize, JsonSchema)]
 struct AmazonPreviewParcel {
@@ -1011,6 +1012,14 @@ async fn amazon_preview(
             .map(|code| code.replacen("amazon_connect_", "amazon_preview_", 1));
         response
     })?;
+    slog::info!(request.log, "amazon_preview";
+        "provider"=>"amazon_account", "request_id"=>request.request_id.clone(),
+        "verified_parcels"=>result.parcels.len(),
+        "deferred_link"=>result.deferred_reasons.unsupported_link,
+        "deferred_identity"=>result.deferred_reasons.missing_identity,
+        "deferred_product"=>result.deferred_reasons.missing_product,
+        "deferred_tracking"=>result.deferred_reasons.unverified_tracking,
+        "deferred_limit"=>result.deferred_reasons.request_limit);
     let shipments = result
         .parcels
         .into_iter()
@@ -1028,6 +1037,7 @@ async fn amazon_preview(
         HttpResponseOk(AmazonPreview {
             shipments,
             deferred: result.deferred,
+            deferred_reasons: result.deferred_reasons,
         }),
         private_headers(),
     ))

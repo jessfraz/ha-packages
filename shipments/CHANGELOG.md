@@ -1,3 +1,10 @@
+## 0.6.18
+
+- Resolve Amazon item-pop links to uniquely verified indexed tracking pages,
+  preserving package identities, split-parcel products and saved sign-in.
+- Report fixed deferral counts for unsupported links, missing identity or product
+  evidence, unverified tracking pages and bounded request limits.
+
 ## 0.6.17
 
 - Decode gzip-compressed Amazon orders and tracking responses before parsing.

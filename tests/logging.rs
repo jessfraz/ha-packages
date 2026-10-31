@@ -366,3 +366,27 @@ fn recipient_and_aftership_failures_keep_safe_codes_without_recipient_links() {
     assert!(!output.contains("doordash.com"));
     assert!(!output.contains(recipient_url));
 }
+
+#[test]
+fn amazon_preview_counts_are_bounded_and_exclude_provider_payloads() {
+    #[derive(Deserialize)]
+    struct Counts {
+        event: String,
+        verified_parcels: Option<u64>,
+        deferred_identity: Option<u64>,
+        deferred_product: Option<u64>,
+        deferred_tracking: Option<u64>,
+    }
+    let capture = Capture::default();
+    let logger = logging::with_writer(capture.clone());
+    slog::info!(logger,"amazon_preview"; "verified_parcels"=>2usize,"deferred_identity"=>3usize,"deferred_product"=>"PRIVATE_PROVIDER_FIELD","deferred_tracking"=>501u64,"raw_html"=>"PRIVATE_PAGE_CONTENT");
+    let output = capture.text();
+    let parsed: Counts = serde_json::from_str(output.trim()).unwrap();
+    assert_eq!(parsed.event, "amazon_preview");
+    assert_eq!(parsed.verified_parcels, Some(2));
+    assert_eq!(parsed.deferred_identity, Some(3));
+    assert_eq!(parsed.deferred_product, None);
+    assert_eq!(parsed.deferred_tracking, None);
+    assert!(!output.contains("PRIVATE_PROVIDER_FIELD"));
+    assert!(!output.contains("PRIVATE_PAGE_CONTENT"));
+}

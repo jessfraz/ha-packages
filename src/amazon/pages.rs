@@ -8,7 +8,7 @@ use scraper::{Html, Selector};
 use serde::Deserialize;
 
 use crate::{
-    amazon::provider_error,
+    amazon::{DeferredCounts, provider_error},
     carrier::Carrier,
     models::{CarrierTracking, Status, Tracking},
     shipping_api::{
@@ -31,6 +31,7 @@ pub(crate) struct ParcelPage {
 pub(crate) struct Listing {
     pub parcels: Vec<ParcelPage>,
     pub deferred: usize,
+    pub deferred_reasons: DeferredCounts,
 }
 
 fn selector(value: &str) -> Result<Selector, Error> {
@@ -61,6 +62,12 @@ pub(crate) fn orders_shape(page: &str) -> &'static str {
     }
 }
 
+fn retail_path(path: &str) -> &str {
+    path.strip_prefix("/-/en")
+        .filter(|tail| tail.starts_with('/'))
+        .unwrap_or(path)
+}
+
 pub(crate) fn allowed_path(input: &str) -> Result<String, Error> {
     if input.len() > 2048 || input.chars().any(|c| c.is_control() || c.is_whitespace()) {
         return Err(provider_error(ErrorKind::InvalidResponse));
@@ -69,16 +76,18 @@ pub(crate) fn allowed_path(input: &str) -> Result<String, Error> {
         .and_then(|base| base.join(input))
         .map_err(|_| provider_error(ErrorKind::InvalidResponse))?;
     let path = url.path();
-    let supported = ["/your-orders/orders", "/gp/css/order-history"].contains(&path)
+    let retail = retail_path(path);
+    let supported = ["/your-orders/orders", "/gp/css/order-history"].contains(&retail)
         || [
             "/gp/your-account/ship-track",
             "/progress-tracker/package",
             "/gp/your-account/order-details",
+            "/your-orders/pop",
         ]
         .iter()
         .any(|prefix| {
-            path == *prefix
-                || path
+            retail == *prefix
+                || retail
                     .strip_prefix(prefix)
                     .is_some_and(|tail| tail.starts_with("/ref="))
         });
@@ -100,6 +109,8 @@ pub(crate) fn allowed_path(input: &str) -> Result<String, Error> {
             "orderid" => "orderId",
             "shipmentid" => "shipmentId",
             "packageid" => "packageId",
+            "packageindex" => "packageIndex",
+            "lineitemid" => "lineItemId",
             "itemid" => "itemId",
             "trackingid" => "trackingId",
             _ => continue,
@@ -127,34 +138,74 @@ fn identity_part(value: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'))
 }
 
-fn query_identity(path: &str) -> Result<(String, String, String), Error> {
+struct ParcelIdentity {
+    order: String,
+    shipment: String,
+    package: Option<String>,
+    index: Option<String>,
+}
+
+impl ParcelIdentity {
+    // Item-pop and tracking URLs can name the same slot differently. Link
+    // resolution compares shared fields; redirects also retain all known fields.
+    fn compatible_with(&self, other: &Self) -> bool {
+        self.order == other.order
+            && self.shipment == other.shipment
+            && !self
+                .package
+                .as_ref()
+                .zip(other.package.as_ref())
+                .is_some_and(|(a, b)| a != b)
+            && !self
+                .index
+                .as_ref()
+                .zip(other.index.as_ref())
+                .is_some_and(|(a, b)| a != b)
+    }
+}
+
+fn query_identity(path: &str) -> Result<ParcelIdentity, Error> {
     let url = Url::parse(ORIGIN)
         .and_then(|base| base.join(path))
         .map_err(|_| provider_error(ErrorKind::InvalidResponse))?;
     let mut values = BTreeMap::new();
     for (key, value) in url.query_pairs() {
         let key = key.to_ascii_lowercase();
-        if ["orderid", "shipmentid", "packageid"].contains(&key.as_str())
-            && values.insert(key, value.into_owned()).is_some()
+        if ["orderid", "shipmentid", "packageid", "packageindex"].contains(&key.as_str())
+            && (!identity_part(&value) || values.insert(key, value.into_owned()).is_some())
         {
             return Err(provider_error(ErrorKind::InvalidResponse));
         }
     }
-    let mut take = |key| {
-        values
-            .remove(key)
-            .filter(|value| identity_part(value))
-            .ok_or_else(|| provider_error(ErrorKind::InvalidResponse))
-    };
-    Ok((take("orderid")?, take("shipmentid")?, take("packageid")?))
+    Ok(ParcelIdentity {
+        order: values
+            .remove("orderid")
+            .ok_or_else(|| provider_error(ErrorKind::InvalidResponse))?,
+        shipment: values
+            .remove("shipmentid")
+            .ok_or_else(|| provider_error(ErrorKind::InvalidResponse))?,
+        package: values.remove("packageid"),
+        index: values.remove("packageindex"),
+    })
 }
 
 pub(crate) fn same_parcel_identity(original: &str, destination: &str) -> bool {
     match (query_identity(original), query_identity(destination)) {
-        (Ok(original), Ok(destination)) => original == destination,
+        (Ok(original), Ok(destination)) => {
+            original.compatible_with(&destination)
+                && original
+                    .package
+                    .as_ref()
+                    .is_none_or(|package| destination.package.as_ref() == Some(package))
+                && original
+                    .index
+                    .as_ref()
+                    .is_none_or(|index| destination.index.as_ref() == Some(index))
+        }
         (Err(_), Err(_)) => {
-            ["/your-orders/orders", "/gp/css/order-history"].contains(&original)
-                && ["/your-orders/orders", "/gp/css/order-history"].contains(&destination)
+            ["/your-orders/orders", "/gp/css/order-history"].contains(&retail_path(original))
+                && ["/your-orders/orders", "/gp/css/order-history"]
+                    .contains(&retail_path(destination))
         }
         _ => false,
     }
@@ -163,85 +214,105 @@ pub(crate) fn same_parcel_identity(original: &str, destination: &str) -> bool {
 pub(crate) fn listing(page: &str) -> Result<Listing, Error> {
     let html = Html::parse_document(page);
     let mut groups: BTreeMap<(String, String, String), ParcelPage> = BTreeMap::new();
-    let mut deferred = 0;
+    let mut reasons = DeferredCounts::default();
     let mut found = false;
-    let mut nodes = 0;
-    for node in html.select(&selector("a.item-card__link")?).take(501) {
+    for (index, node) in html
+        .select(&selector("a.item-card__link")?)
+        .take(501)
+        .enumerate()
+    {
         found = true;
-        nodes += 1;
-        if nodes > 500 {
+        if index >= 500 {
             return Err(provider_error(ErrorKind::ResponseTooLarge));
         }
-        let parsed = (|| {
-            let path = allowed_path(node.value().attr("href")?).ok()?;
-            let (order, shipment, package) = query_identity(&path).ok()?;
-            // The mobile listing's product name precedes its own order/status text.
-            // Generic order links and unrecognised layouts are not product evidence.
-            let label = node.value().attr("aria-label")?;
-            let title = label.split_once(", Order placed ")?.0.trim();
-            if title.is_empty() || title.len() > 500 || title.chars().any(char::is_control) {
-                return None;
-            }
-            Some((path, order, shipment, package, title.to_owned()))
-        })();
-        let Some((path, order, shipment, package, title)) = parsed else {
-            deferred += 1;
+        let Some(path) = node
+            .value()
+            .attr("href")
+            .and_then(|href| allowed_path(href).ok())
+        else {
+            reasons.unsupported_link += 1;
             continue;
         };
+        let Some(identity) = query_identity(&path)
+            .ok()
+            .filter(|value| value.package.is_some())
+        else {
+            reasons.missing_identity += 1;
+            continue;
+        };
+        let Some(title) = node
+            .value()
+            .attr("aria-label")
+            .and_then(|label| label.split_once(", Order placed "))
+            .map(|(title, _)| title.trim())
+            .filter(|title| {
+                !title.is_empty() && title.len() <= 500 && !title.chars().any(char::is_control)
+            })
+        else {
+            reasons.missing_product += 1;
+            continue;
+        };
+        let Some(package) = identity.package else {
+            return Err(provider_error(ErrorKind::InvalidResponse));
+        };
         let parcel = groups
-            .entry((order.clone(), shipment.clone(), package.clone()))
+            .entry((
+                identity.order.clone(),
+                identity.shipment.clone(),
+                package.clone(),
+            ))
             .or_insert_with(|| ParcelPage {
-                order,
-                shipment,
+                order: identity.order,
+                shipment: identity.shipment,
                 package,
                 path,
                 titles: Vec::new(),
             });
-        if !parcel.titles.contains(&title) {
-            parcel.titles.push(title);
+        if !parcel.titles.iter().any(|value| value == title) {
+            parcel.titles.push(title.to_owned());
         }
     }
-    // A recognised empty-orders screen is legitimate; an empty parse is not.
     if !found
         && !page.contains("You have not placed any orders")
         && !page.contains("You have no orders")
     {
         return Err(provider_error(ErrorKind::InvalidResponse));
     }
-    if groups.len() > 500 {
-        return Err(provider_error(ErrorKind::ResponseTooLarge));
-    }
     Ok(Listing {
         parcels: groups.into_values().collect(),
-        deferred,
+        deferred: reasons.total(),
+        deferred_reasons: reasons,
     })
 }
 
-pub(crate) fn tracking_link(page: &str, identity: &ParcelPage) -> Result<String, Error> {
+pub(crate) fn tracking_link(page: &str, parcel: &ParcelPage) -> Result<String, Error> {
+    let identity = query_identity(&parcel.path)?;
+    let mut links = BTreeSet::new();
     for node in Html::parse_document(page).select(&selector("a[href]")?) {
-        let Some(href) = node.value().attr("href") else {
+        let Some(path) = node
+            .value()
+            .attr("href")
+            .and_then(|href| allowed_path(href).ok())
+        else {
             continue;
         };
-        let Ok(path) = allowed_path(href) else {
-            continue;
-        };
-        if !is_tracking(&path) {
-            continue;
-        }
-        if query_identity(&path).ok().as_ref()
-            == Some(&(
-                identity.order.clone(),
-                identity.shipment.clone(),
-                identity.package.clone(),
-            ))
+        if is_tracking(&path)
+            && query_identity(&path).is_ok_and(|other| identity.compatible_with(&other))
         {
-            return Ok(path);
+            links.insert(path);
         }
     }
-    Err(provider_error(ErrorKind::InvalidResponse))
+    if links.len() != 1 {
+        return Err(provider_error(ErrorKind::InvalidResponse));
+    }
+    links
+        .into_iter()
+        .next()
+        .ok_or_else(|| provider_error(ErrorKind::InvalidResponse))
 }
 
 pub(crate) fn is_tracking(path: &str) -> bool {
+    let path = retail_path(path);
     path.starts_with("/gp/your-account/ship-track") || path.starts_with("/progress-tracker/package")
 }
 
@@ -299,6 +370,26 @@ fn status(value: &str) -> Option<Status> {
 }
 
 pub(crate) fn tracking(page: &str, path: &str, expected: Option<&str>) -> Result<Tracker, Error> {
+    tracking_with_package(page, path, expected, None)
+}
+
+pub(crate) fn tracking_parcel(
+    page: &str,
+    path: &str,
+    parcel: &ParcelPage,
+) -> Result<Tracker, Error> {
+    if !query_identity(&parcel.path)?.compatible_with(&query_identity(path)?) {
+        return Err(provider_error(ErrorKind::InvalidResponse));
+    }
+    tracking_with_package(page, path, None, Some(&parcel.package))
+}
+
+fn tracking_with_package(
+    page: &str,
+    path: &str,
+    expected: Option<&str>,
+    package: Option<&str>,
+) -> Result<Tracker, Error> {
     let path = allowed_path(path)?;
     if !is_tracking(&path) {
         return Err(provider_error(ErrorKind::InvalidResponse));
@@ -322,13 +413,22 @@ pub(crate) fn tracking(page: &str, path: &str, expected: Option<&str>) -> Result
         return Err(provider_error(ErrorKind::InvalidResponse));
     }
     let state = states.remove(0);
-    if [
-        (state.order_id.as_deref(), identity.0.as_str()),
-        (state.shipment_id.as_deref(), identity.1.as_str()),
-        (state.package_id.as_deref(), identity.2.as_str()),
-    ]
-    .into_iter()
-    .any(|(observed, expected)| observed.is_some_and(|id| id != expected))
+    let expected_package = identity.package.as_deref().or(package);
+    if identity
+        .package
+        .as_deref()
+        .zip(package)
+        .is_some_and(|(a, b)| a != b)
+        || [
+            (state.order_id.as_deref(), Some(identity.order.as_str())),
+            (
+                state.shipment_id.as_deref(),
+                Some(identity.shipment.as_str()),
+            ),
+            (state.package_id.as_deref(), expected_package),
+        ]
+        .into_iter()
+        .any(|(observed, expected)| observed.zip(expected).is_some_and(|(a, b)| a != b))
     {
         return Err(provider_error(ErrorKind::InvalidResponse));
     }
@@ -433,6 +533,69 @@ mod tests {
         assert!(listing.parcels.is_empty());
         assert_eq!(listing.deferred, 1);
     }
+    #[test]
+    fn localized_pop_preserves_item_identity_and_checks_tracking_package_state() {
+        let pop = "/-/en/your-orders/pop/ref=fixture?orderId=111-1234567-1234567&shipmentId=SHIP1&packageId=1&lineItemId=ITEM1";
+        let listing = pages::listing(&format!(r#"<a class="item-card__link" href="{pop}" aria-label="Widget, Order placed 1 October 2026, Shipped"></a>"#)).unwrap();
+        assert_eq!(listing.parcels.len(), 1);
+        let parcel = &listing.parcels[0];
+        assert!(parcel.path.contains("lineItemId=ITEM1"));
+        let path = "/-/en/gp/your-account/ship-track?orderId=111-1234567-1234567&shipmentId=SHIP1&packageIndex=0&itemId=ITEM1";
+        let found =
+            pages::tracking_link(&format!(r#"<a href="{path}">Track</a>"#), parcel).unwrap();
+        assert_eq!(found, path);
+        let valid = page("9400111122223333444455");
+        assert!(pages::tracking_parcel(&valid, &found, parcel).is_ok());
+        let mismatch = valid.replace("\"trackingId\":", "\"packageId\":\"2\",\"trackingId\":");
+        assert!(pages::tracking_parcel(&mismatch, &found, parcel).is_err());
+        assert!(!pages::same_parcel_identity(
+            path,
+            &path.replace("packageIndex=0", "packageIndex=1")
+        ));
+        assert!(!pages::same_parcel_identity(
+            path,
+            &path.replace("&packageIndex=0", "")
+        ));
+        assert!(!pages::same_parcel_identity(
+            PATH,
+            &PATH.replace("&packageId=1", "")
+        ));
+    }
+
+    #[test]
+    fn item_pop_never_selects_an_ambiguous_or_different_shipment() {
+        let listing=pages::listing(&format!(r#"<a class="item-card__link" href="{PATH}" aria-label="Widget, Order placed 1 October 2026, Shipped"></a>"#)).unwrap();
+        let parcel = &listing.parcels[0];
+        let first = PATH.replace("packageId=1", "packageIndex=0");
+        let second = PATH.replace("packageId=1", "packageIndex=1");
+        let ambiguous =
+            format!(r#"<a href="{first}">Track</a><a href="{second}">Track another</a>"#);
+        assert!(pages::tracking_link(&ambiguous, parcel).is_err());
+        let other = first.replace("shipmentId=SHIP1", "shipmentId=SHIP2");
+        assert!(pages::tracking_link(&format!(r#"<a href="{other}">Track</a>"#), parcel).is_err());
+        let duplicates = format!(r#"<a href="{first}">Track</a><a href="{first}">Track again</a>"#);
+        assert_eq!(pages::tracking_link(&duplicates, parcel).unwrap(), first);
+    }
+
+    #[test]
+    fn incomplete_listing_reports_only_fixed_deferral_counts() {
+        let missing = PATH.replace("&packageId=1", "");
+        let html = format!(
+            r#"<a class="item-card__link" href="/gp/buy" aria-label="PRIVATE_TITLE"></a><a class="item-card__link" href="{missing}" aria-label="PRIVATE_TITLE"></a><a class="item-card__link" href="{PATH}" aria-label="PRIVATE_TITLE"></a>"#
+        );
+        let listing = pages::listing(&html).unwrap();
+        assert!(listing.parcels.is_empty());
+        assert_eq!(listing.deferred, 3);
+        assert_eq!(listing.deferred_reasons.unsupported_link, 1);
+        assert_eq!(listing.deferred_reasons.missing_identity, 1);
+        assert_eq!(listing.deferred_reasons.missing_product, 1);
+        assert!(
+            !serde_json::to_string(&listing.deferred_reasons)
+                .unwrap()
+                .contains("PRIVATE_TITLE")
+        );
+    }
+
     #[test]
     fn tracking_requires_real_number_carrier_and_known_state() {
         let tracker = pages::tracking(&page("9400111122223333444455"), PATH, None).unwrap();
