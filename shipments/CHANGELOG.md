@@ -1,3 +1,10 @@
+## 0.6.21
+
+- Preserve order identity across supported order-details redirects.
+- Report fixed parser-failure categories and one-way page fingerprints in safe
+  Amazon diagnostics. Distinguish missing links, changed tracking state, and
+  generic Amazon service-error pages without logging page contents or URLs.
+
 ## 0.6.20
 
 - Read current Amazon carrier headings and indexed parcel links. Validate the

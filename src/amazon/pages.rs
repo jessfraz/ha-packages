@@ -85,6 +85,28 @@ pub(crate) fn orders_shape(page: &str) -> &'static str {
     }
 }
 
+pub(crate) fn page_error_shape(page: &str) -> &'static str {
+    if page.contains("Sorry! Something went wrong!")
+        || page.contains("/images/G/01/error/en_US/500_503.png")
+        || page.contains("/images/G/01/error/en_US/title._TTD_.png")
+    {
+        "amazon_service_error_page"
+    } else {
+        "unclassified_error_page"
+    }
+}
+
+fn diagnostic_page_shape(page: &str) -> Option<&'static str> {
+    match orders_shape(page) {
+        shape @ ("challenge" | "business_shell") => Some(shape),
+        _ if signed_out(page) => Some("sign_in"),
+        _ if page_error_shape(page) == "amazon_service_error_page" => {
+            Some("amazon_service_error_page")
+        }
+        _ => None,
+    }
+}
+
 fn retail_path(path: &str) -> &str {
     path.strip_prefix("/-/en")
         .filter(|tail| tail.starts_with('/'))
@@ -241,12 +263,35 @@ pub(crate) fn same_parcel_identity(original: &str, destination: &str) -> bool {
                     .is_none_or(|index| destination.index.as_ref() == Some(index))
         }
         (Err(_), Err(_)) => {
-            ["/your-orders/orders", "/gp/css/order-history"].contains(&retail_path(original))
+            (["/your-orders/orders", "/gp/css/order-history"].contains(&retail_path(original))
                 && ["/your-orders/orders", "/gp/css/order-history"]
-                    .contains(&retail_path(destination))
+                    .contains(&retail_path(destination)))
+                || order_details_identity(original)
+                    .zip(order_details_identity(destination))
+                    .is_some_and(|(original, destination)| original == destination)
         }
         _ => false,
     }
+}
+
+fn order_details_identity(path: &str) -> Option<String> {
+    let path = allowed_path(path).ok()?;
+    let url = Url::parse(ORIGIN).ok()?.join(&path).ok()?;
+    if ![
+        "/your-orders/order-details",
+        "/gp/your-account/order-details",
+    ]
+    .contains(&retail_path(url.path()))
+    {
+        return None;
+    }
+    // Only an order-only page may redirect without a known parcel identity.
+    let mut pairs = url.query_pairs();
+    let (key, order) = pairs.next()?;
+    if !key.eq_ignore_ascii_case("orderid") || pairs.next().is_some() {
+        return None;
+    }
+    Some(order.into_owned())
 }
 
 pub(crate) fn listing(page: &str) -> Result<Listing, Error> {
@@ -366,6 +411,56 @@ pub(crate) fn order_tracking_pages(page: &str, order: &str) -> Result<Vec<Parcel
     Ok(parcels.into_values().collect())
 }
 
+pub(crate) fn order_details_failure_shape(page: &str, expected_order: &str) -> &'static str {
+    if let Some(shape) = diagnostic_page_shape(page) {
+        return shape;
+    }
+    let html = Html::parse_document(page);
+    if Selector::parse("a.item-card__link, .order-card.js-order-card")
+        .ok()
+        .is_some_and(|selector| html.select(&selector).next().is_some())
+    {
+        return "order_details_listing_page";
+    }
+    let Ok(selector) = Selector::parse("a[href]") else {
+        return "order_details_identity_mismatch";
+    };
+    let mut tracking_link = false;
+    let mut missing_identity = false;
+    let mut different_order = false;
+    for node in html.select(&selector) {
+        let Some(path) = node
+            .value()
+            .attr("href")
+            .and_then(|href| allowed_path(href).ok())
+            .filter(|path| is_tracking(path))
+        else {
+            continue;
+        };
+        tracking_link = true;
+        let Ok(identity) = query_identity(&path) else {
+            missing_identity = true;
+            continue;
+        };
+        if identity.package.is_none() && identity.index.is_none() {
+            missing_identity = true;
+        } else if identity.order != expected_order {
+            different_order = true;
+        } else {
+            return "order_details_identity_mismatch";
+        }
+    }
+    if !tracking_link {
+        "order_details_tracking_links_missing"
+    } else if missing_identity {
+        "order_details_tracking_identity_missing"
+    } else if different_order {
+        "order_details_tracking_order_mismatch"
+    } else {
+        "order_details_identity_mismatch"
+    }
+}
+
 pub(crate) fn tracking_link(page: &str, parcel: &ParcelPage) -> Result<String, Error> {
     let identity = query_identity(&parcel.path)?;
     let mut links = BTreeSet::new();
@@ -416,6 +511,36 @@ struct Progress {
     last_reached_milestone: Option<String>,
 }
 
+fn page_state_blocks(html: &Html) -> Result<Vec<String>, Error> {
+    Ok(html
+        .select(&selector("script")?)
+        .filter(|script| {
+            script
+                .value()
+                .attrs()
+                .any(|(key, value)| key.contains("page-state") || value.contains("page-state"))
+        })
+        .map(|script| script.text().collect())
+        .collect())
+}
+
+fn header_carriers(html: &Html) -> Result<Vec<Carrier>, Error> {
+    let mut carriers = Vec::new();
+    for header in html.select(&selector("h2, h3")?) {
+        let text = header.text().collect::<Vec<_>>().join(" ");
+        let text = text.trim();
+        if let Some(carrier) = text
+            .strip_prefix("Delivery By ")
+            .or_else(|| text.strip_prefix("Delivery facilitated by "))
+            .and_then(carrier)
+            && !carriers.contains(&carrier)
+        {
+            carriers.push(carrier);
+        }
+    }
+    Ok(carriers)
+}
+
 fn carrier(value: &str) -> Option<Carrier> {
     match value.trim().to_ascii_uppercase().as_str() {
         "AMAZON" | "AMZN_US" | "AMZL_US" | "AMAZON LOGISTICS" => Some(Carrier::AmazonMcf),
@@ -451,6 +576,76 @@ fn status(value: &str) -> Option<Status> {
     }
 }
 
+fn observed_status(state: &PageState) -> Option<Status> {
+    state
+        .progress_tracker
+        .as_ref()
+        .and_then(|progress| progress.last_reached_milestone.as_deref())
+        .and_then(status)
+        .or_else(|| state.short_status.as_deref().and_then(status))
+}
+
+pub(crate) fn tracking_failure_shape(page: &str) -> &'static str {
+    if let Some(shape) = diagnostic_page_shape(page) {
+        return shape;
+    }
+    let html = Html::parse_document(page);
+    let Ok(mut states) = page_state_blocks(&html) else {
+        return "tracking_page_state_invalid_shape";
+    };
+    if states.is_empty() {
+        return "tracking_page_state_missing";
+    }
+    if states.len() != 1 {
+        return "tracking_page_state_multiple";
+    }
+    let value = states.remove(0);
+    let state = match serde_json::from_str::<PageState>(&value) {
+        Ok(state) => state,
+        Err(_) => {
+            // Inspect only safe type kinds at this dynamic JSON boundary.
+            let Ok(value) = serde_json::from_str::<serde_json::Value>(&value) else {
+                return "tracking_page_state_invalid_json";
+            };
+            if value
+                .get("packageId")
+                .is_some_and(serde_json::Value::is_number)
+            {
+                return "tracking_package_id_numeric";
+            }
+            if value
+                .get("packageIndex")
+                .is_some_and(serde_json::Value::is_number)
+            {
+                return "tracking_package_index_numeric";
+            }
+            return "tracking_page_state_invalid_shape";
+        }
+    };
+    let Ok(headers) = header_carriers(&html) else {
+        return "tracking_page_state_invalid_shape";
+    };
+    if state.carrier_code.as_deref().and_then(carrier).is_none() && headers.is_empty() {
+        return "tracking_carrier_missing";
+    }
+    let text = html.root_element().text().collect::<Vec<_>>().join(" ");
+    let visible_number = text
+        .split_once("Tracking ID:")
+        .and_then(|(_, tail)| tail.split_whitespace().next());
+    if state
+        .tracking_id
+        .as_deref()
+        .is_none_or(|number| number.trim().is_empty())
+        && visible_number.is_none()
+    {
+        return "tracking_number_missing";
+    }
+    if observed_status(&state).is_none() {
+        return "tracking_status_unsupported";
+    }
+    "tracking_identity_mismatch"
+}
+
 pub(crate) fn tracking(page: &str, path: &str, expected: Option<&str>) -> Result<Tracker, Error> {
     tracking_with_package(page, path, expected, None)
 }
@@ -479,17 +674,10 @@ fn tracking_with_package(
     let identity = query_identity(&path)?;
     let html = Html::parse_document(page);
     let mut states = Vec::new();
-    for script in html.select(&selector("script")?) {
-        if script
-            .value()
-            .attrs()
-            .any(|(key, value)| key.contains("page-state") || value.contains("page-state"))
-        {
-            let value = script.text().collect::<String>();
-            let state: PageState = serde_json::from_str(&value)
-                .map_err(|_| provider_error(ErrorKind::InvalidResponse))?;
-            states.push(state);
-        }
+    for value in page_state_blocks(&html)? {
+        let state: PageState =
+            serde_json::from_str(&value).map_err(|_| provider_error(ErrorKind::InvalidResponse))?;
+        states.push(state);
     }
     if states.len() != 1 {
         return Err(provider_error(ErrorKind::InvalidResponse));
@@ -517,19 +705,7 @@ fn tracking_with_package(
     }
     let text = html.root_element().text().collect::<Vec<_>>().join(" ");
     let state_carrier = state.carrier_code.as_deref().and_then(carrier);
-    let mut header_carriers = Vec::new();
-    for header in html.select(&selector("h2, h3")?) {
-        let text = header.text().collect::<Vec<_>>().join(" ");
-        let text = text.trim();
-        if let Some(carrier) = text
-            .strip_prefix("Delivery By ")
-            .or_else(|| text.strip_prefix("Delivery facilitated by "))
-            .and_then(carrier)
-            && !header_carriers.contains(&carrier)
-        {
-            header_carriers.push(carrier);
-        }
-    }
+    let header_carriers = header_carriers(&html)?;
     if header_carriers.len() > 1
         || state_carrier
             .zip(header_carriers.first().copied())
@@ -575,13 +751,8 @@ fn tracking_with_package(
     if expected.is_some_and(|expected| expected != number) {
         return Err(provider_error(ErrorKind::InvalidResponse));
     }
-    let actual_status = state
-        .progress_tracker
-        .as_ref()
-        .and_then(|p| p.last_reached_milestone.as_deref())
-        .and_then(status)
-        .or_else(|| state.short_status.as_deref().and_then(status))
-        .ok_or_else(|| provider_error(ErrorKind::InvalidResponse))?;
+    let actual_status =
+        observed_status(&state).ok_or_else(|| provider_error(ErrorKind::InvalidResponse))?;
     Ok(Tracker {
         provider: ProviderId::AmazonAccount,
         id: path.clone(),
@@ -603,6 +774,133 @@ mod tests {
             r#"<h3>Delivery By USPS</h3><script id="page-state">{{"trackingId":"{number}","shortStatus":"IN_TRANSIT"}}</script>"#
         )
     }
+
+    #[test]
+    fn tracking_failures_report_only_fixed_producer_guard_shapes() {
+        let number = "9400111122223333444455";
+        for (html, expected) in [
+            (
+                "<main>PRIVATE_PAGE_BODY</main>".to_owned(),
+                "tracking_page_state_missing",
+            ),
+            (page(number) + &page(number), "tracking_page_state_multiple"),
+            (
+                r#"<script id="page-state">{"trackingId":"PRIVATE_VALUE", broken}</script>"#
+                    .to_owned(),
+                "tracking_page_state_invalid_json",
+            ),
+            (
+                r#"<script id="page-state">{"trackingId":["PRIVATE_VALUE"]}</script>"#
+                    .to_owned(),
+                "tracking_page_state_invalid_shape",
+            ),
+            (
+                r#"<script id="page-state">{"packageId":1,"trackingId":"PRIVATE_VALUE"}</script>"#
+                    .to_owned(),
+                "tracking_package_id_numeric",
+            ),
+            (
+                r#"<script id="page-state">{"packageIndex":0,"trackingId":"PRIVATE_VALUE"}</script>"#
+                    .to_owned(),
+                "tracking_package_index_numeric",
+            ),
+            (
+                page(number).replace("Delivery By USPS", "PRIVATE_CARRIER"),
+                "tracking_carrier_missing",
+            ),
+            (page(""), "tracking_number_missing"),
+            (
+                page(number).replace("IN_TRANSIT", "PRIVATE_UNKNOWN_STATUS"),
+                "tracking_status_unsupported",
+            ),
+            (
+                page(number).replace(
+                    "\"trackingId\":",
+                    "\"orderId\":\"111-1234567-7654321\",\"trackingId\":",
+                ),
+                "tracking_identity_mismatch",
+            ),
+        ] {
+            assert!(pages::tracking(&html, PATH, None).is_err());
+            assert_eq!(pages::tracking_failure_shape(&html), expected);
+        }
+    }
+
+    #[test]
+    fn order_details_failures_distinguish_missing_foreign_and_listing_markup() {
+        const ORDER: &str = "111-1234567-1234567";
+        for (html, expected) in [
+            (
+                "<main>PRIVATE_PAGE_BODY</main>",
+                "order_details_tracking_links_missing",
+            ),
+            (
+                r#"<a href="/progress-tracker/package?orderId=111-1234567-1234567&packageIndex=0">Track package</a>"#,
+                "order_details_tracking_identity_missing",
+            ),
+            (
+                r#"<a href="/progress-tracker/package?orderId=111-1234567-7654321&shipmentId=SHIP1&packageIndex=0">Track package</a>"#,
+                "order_details_tracking_order_mismatch",
+            ),
+            (
+                r#"<a href="/progress-tracker/package/delivery-information/delivery-feedback?orderId=111-1234567-1234567&shipmentId=SHIP1&packageIndex=0">Delivery feedback</a>"#,
+                "order_details_tracking_links_missing",
+            ),
+            (
+                r#"<a class="item-card__link" href="/your-orders/pop">PRIVATE_PRODUCT</a>"#,
+                "order_details_listing_page",
+            ),
+            (
+                r#"<div class="order-card js-order-card">PRIVATE_PRODUCT</div>"#,
+                "order_details_listing_page",
+            ),
+        ] {
+            assert!(pages::order_tracking_pages(html, ORDER).unwrap().is_empty());
+            assert_eq!(pages::order_details_failure_shape(html, ORDER), expected);
+        }
+        let valid = r#"<a href="/progress-tracker/package?orderId=111-1234567-1234567&shipmentId=SHIP1&packageIndex=0">Track package</a>"#;
+        assert_eq!(pages::order_tracking_pages(valid, ORDER).unwrap().len(), 1);
+        assert_eq!(
+            pages::order_details_failure_shape(valid, ORDER),
+            "order_details_identity_mismatch"
+        );
+    }
+
+    #[test]
+    fn positive_known_page_shapes_are_not_guessed_from_error_words() {
+        for (html, expected) in [
+            ("<input id=captchacharacters>", "challenge"),
+            ("<input type=password value=PRIVATE_VALUE>", "sign_in"),
+            (
+                "<script>ab-your-orders-anticsrf-token yourOrdersStateData PRIVATE_VALUE</script>",
+                "business_shell",
+            ),
+            (
+                "<title>Sorry! Something went wrong!</title>",
+                "amazon_service_error_page",
+            ),
+            (
+                r#"<img src="https://images-na.ssl-images-amazon.com/images/G/01/error/en_US/500_503.png">"#,
+                "amazon_service_error_page",
+            ),
+        ] {
+            assert_eq!(pages::tracking_failure_shape(html), expected);
+            assert_eq!(pages::order_details_failure_shape(html, "ORDER"), expected);
+        }
+        assert_eq!(
+            pages::page_error_shape("<main>503 CAPTCHA ban PRIVATE_VALUE</main>"),
+            "unclassified_error_page"
+        );
+        assert_eq!(
+            pages::page_error_shape("<input id=captchacharacters>"),
+            "unclassified_error_page"
+        );
+        assert_eq!(
+            pages::orders_shape("<input id=captchacharacters>"),
+            "challenge"
+        );
+    }
+
     #[test]
     fn split_packages_keep_their_own_items() {
         let html = format!(
@@ -698,6 +996,45 @@ mod tests {
             pages::allowed_path(path).unwrap(),
             "/your-orders/order-details?orderID=111-1234567-1234567"
         );
+    }
+
+    #[test]
+    fn order_only_details_redirects_retain_the_order_across_supported_routes() {
+        let routes = [
+            "/your-orders/order-details?orderID=111-1234567-1234567",
+            "/gp/your-account/order-details?orderId=111-1234567-1234567",
+            "/-/en/your-orders/order-details/ref=fixture?orderID=111-1234567-1234567",
+            "/-/en/gp/your-account/order-details/ref=fixture?orderID=111-1234567-1234567",
+        ];
+        for original in routes {
+            for destination in routes {
+                assert!(pages::same_parcel_identity(original, destination));
+            }
+        }
+    }
+
+    #[test]
+    fn order_details_redirects_never_drop_or_replace_known_identity() {
+        const ORDER: &str = "/your-orders/order-details?orderID=111-1234567-1234567";
+        for destination in [
+            "/gp/your-account/order-details?orderId=111-1234567-7654321",
+            "/gp/your-account/order-details",
+            "/gp/your-account/order-details?orderId=111-1234567-1234567&orderId=111-1234567-7654321",
+            "/your-orders/orders?orderId=111-1234567-1234567",
+            "https://evil.example/your-orders/order-details?orderID=111-1234567-1234567",
+        ] {
+            assert!(!pages::same_parcel_identity(ORDER, destination));
+        }
+        for original in [
+            format!("{ORDER}&shipmentId=SHIP1"),
+            format!("{ORDER}&packageId=1"),
+            format!("{ORDER}&packageIndex=0"),
+            format!("{ORDER}&lineItemId=ITEM1"),
+            format!("{ORDER}&itemId=ITEM1"),
+            format!("{ORDER}&trackingId=TBA000000000020"),
+        ] {
+            assert!(!pages::same_parcel_identity(&original, ORDER));
+        }
     }
 
     #[test]

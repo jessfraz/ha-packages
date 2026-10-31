@@ -380,6 +380,70 @@ fn recipient_and_aftership_failures_keep_safe_codes_without_recipient_links() {
 }
 
 #[test]
+fn amazon_page_diagnostics_keep_only_fixed_shapes_and_hex_fingerprints() {
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct PageDiagnostic {
+        timestamp: String,
+        level: String,
+        event: String,
+        page_kind: String,
+        page_fingerprint: Option<String>,
+        response_shape: Option<String>,
+    }
+
+    let capture = Capture::default();
+    let logger = logging::with_writer(capture.clone());
+    let fingerprint = "0123456789abcdef".repeat(4);
+    let invalid_fingerprint = format!("{:0<64}", "PRIVATE_SENTINEL");
+    let private_url =
+        "https://www.amazon.com/progress-tracker/package?orderId=PRIVATE_SENTINEL_ORDER";
+    slog::warn!(logger, "amazon_connection";
+        "page_kind" => "tracking_page",
+        "page_fingerprint" => fingerprint.as_str(),
+        "response_shape" => "tracking_package_index_numeric",
+        "url" => private_url,
+        "raw_html" => "<script>PRIVATE_SENTINEL_PAGE</script>",
+        "refresh_token" => "PRIVATE_SENTINEL_REFRESH_TOKEN",
+        "authorization" => "Bearer PRIVATE_SENTINEL_AUTHORIZATION",
+    );
+    slog::warn!(logger, "amazon_connection";
+        "page_kind" => "tracking_page",
+        "page_fingerprint" => invalid_fingerprint,
+        "response_shape" => "PRIVATE_SENTINEL_RESPONSE_SHAPE",
+        "url" => private_url,
+        "raw_html" => "PRIVATE_SENTINEL_RAW_HTML",
+        "credentials" => "PRIVATE_SENTINEL_CREDENTIALS",
+    );
+
+    let output = capture.text();
+    let entries: Vec<PageDiagnostic> = output
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(entries.len(), 2);
+    for entry in &entries {
+        OffsetDateTime::parse(&entry.timestamp, &Rfc3339).unwrap();
+        assert_eq!(entry.level, "warn");
+        assert_eq!(entry.event, "amazon_connection");
+        assert_eq!(entry.page_kind, "tracking_page");
+    }
+    assert_eq!(
+        entries[0].page_fingerprint.as_deref(),
+        Some(fingerprint.as_str())
+    );
+    assert_eq!(
+        entries[0].response_shape.as_deref(),
+        Some("tracking_package_index_numeric")
+    );
+    assert_eq!(entries[1].page_fingerprint, None);
+    assert_eq!(entries[1].response_shape, None);
+    assert!(!output.contains("PRIVATE_SENTINEL"));
+    assert!(!output.contains("amazon.com"));
+    assert!(!output.contains(private_url));
+}
+
+#[test]
 fn amazon_preview_counts_are_bounded_and_exclude_provider_payloads() {
     #[derive(Deserialize)]
     struct Counts {

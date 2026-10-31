@@ -581,18 +581,41 @@ impl AmazonClient {
             (state.generation, credential.customer_id.clone())
         };
         let verify = async {
-            let page = self
-                .fetch_page_detailed(&format!("/your-orders/order-details?orderID={order}"))
-                .await?;
-            let candidates = pages::order_tracking_pages(&page, order).map_err(|_| invalid())?;
+            let details_path = format!("/your-orders/order-details?orderID={order}");
+            let page = self.fetch_page_detailed(&details_path).await?;
+            let details_shape = || {
+                invalid()
+                    .with_upstream_status(200)
+                    .with_page_kind(connection::PageKind::Item)
+                    .with_path(&details_path)
+                    .with_shape(pages::order_details_failure_shape(&page, order))
+            };
+            let candidates =
+                pages::order_tracking_pages(&page, order).map_err(|_| details_shape())?;
+            let mut last_error = None;
             for candidate in candidates.into_iter().take(MAX_TRACK_LOADS) {
                 let page = self.fetch_page_detailed(&candidate.path).await?;
                 let mut tracker = match pages::tracking_parcel(&page, &candidate.path, &candidate) {
                     Ok(tracker) => tracker,
-                    Err(error) if matches!(error.kind, ErrorKind::InvalidResponse) => continue,
+                    Err(error) if matches!(error.kind, ErrorKind::InvalidResponse) => {
+                        last_error = Some(
+                            ConnectionError::with_status(ConnectionStage::Orders, error, 200)
+                                .with_page_kind(connection::PageKind::Tracking)
+                                .with_path(&candidate.path)
+                                .with_shape(pages::tracking_failure_shape(&page)),
+                        );
+                        continue;
+                    }
                     Err(error) => return Err(ConnectionError::new(ConnectionStage::Orders, error)),
                 };
                 if tracker.tracking_code != expected.number || tracker.carrier != expected.carrier {
+                    last_error = Some(
+                        invalid()
+                            .with_upstream_status(200)
+                            .with_page_kind(connection::PageKind::Tracking)
+                            .with_path(&candidate.path)
+                            .with_shape("tracking_identity_mismatch"),
+                    );
                     continue;
                 }
                 tracker.id = format!("{}:{}", account_key(&customer), tracker.id);
@@ -603,7 +626,7 @@ impl AmazonClient {
                     tracker,
                 });
             }
-            Err(invalid())
+            Err(last_error.unwrap_or_else(details_shape))
         };
         let result = match tokio::time::timeout(self.operation_timeout, verify).await {
             Ok(result) => result,
@@ -736,12 +759,20 @@ impl AmazonClient {
                 let mut path = parcel.path.clone();
                 let mut page = self.fetch_page_detailed(&path).await?;
                 if !pages::is_tracking(&path) {
-                    path = pages::tracking_link(&page, parcel)
-                        .map_err(|e| ConnectionError::new(ConnectionStage::Orders, e))?;
+                    path = pages::tracking_link(&page, parcel).map_err(|e| {
+                        ConnectionError::with_status(ConnectionStage::Orders, e, 200)
+                            .with_page_kind(connection::PageKind::Item)
+                            .with_path(&path)
+                            .with_shape(pages::order_details_failure_shape(&page, &parcel.order))
+                    })?;
                     page = self.fetch_page_detailed(&path).await?;
                 }
-                pages::tracking_parcel(&page, &path, parcel)
-                    .map_err(|e| ConnectionError::new(ConnectionStage::Orders, e))
+                pages::tracking_parcel(&page, &path, parcel).map_err(|e| {
+                    ConnectionError::with_status(ConnectionStage::Orders, e, 200)
+                        .with_page_kind(connection::PageKind::Tracking)
+                        .with_path(&path)
+                        .with_shape(pages::tracking_failure_shape(&page))
+                })
             }
             .await;
             match result {
@@ -965,10 +996,11 @@ impl AmazonClient {
             let request = self
                 .request(Method::GET, &format!("{}{path}", pages::ORIGIN))
                 .map_err(|e| ConnectionError::new(stage, e))?;
-            let (status, headers, body) = self
-                .response(request)
-                .await
-                .map_err(|e| ConnectionError::new(stage, e).with_page_kind(kind))?;
+            let (status, headers, body) = self.response(request).await.map_err(|e| {
+                ConnectionError::new(stage, e)
+                    .with_page_kind(kind)
+                    .with_path(&path)
+            })?;
             let invalid = || {
                 ConnectionError::with_status(
                     stage,
@@ -976,6 +1008,7 @@ impl AmazonClient {
                     status,
                 )
                 .with_page_kind(kind)
+                .with_path(&path)
             };
             if std::str::from_utf8(&body).is_ok_and(|page| pages::orders_shape(page) == "challenge")
             {
@@ -988,6 +1021,7 @@ impl AmazonClient {
                     status,
                 )
                 .with_page_kind(kind)
+                .with_path(&path)
                 .with_shape("challenge"));
             }
             if (300..400).contains(&status) {
@@ -1026,7 +1060,10 @@ impl AmazonClient {
                 return Err(
                     ConnectionError::with_status(stage, provider_error(kind), status)
                         .with_page_kind(pages::page_kind(&path))
-                        .with_shape("unclassified_error_page"),
+                        .with_path(&path)
+                        .with_shape(pages::page_error_shape(
+                            std::str::from_utf8(&body).unwrap_or_default(),
+                        )),
                 );
             }
             let page = String::from_utf8(body).map_err(|_| {
@@ -1189,6 +1226,7 @@ impl AmazonClient {
                         status,
                     )
                     .with_page_kind(pages::page_kind(&path))
+                    .with_path(&path)
                     .with_shape("sign_in")),
                 }
             }
@@ -3165,6 +3203,10 @@ mod tests {
                     error.reason,
                     crate::amazon::connection::ConnectionReason::ChallengePage
                 );
+                assert_eq!(
+                    error.page_kind,
+                    Some(crate::amazon::connection::PageKind::Item)
+                );
                 assert!(client.status().await.challenge_required);
                 let calls = fixture.calls.lock().unwrap().len();
                 assert!(
@@ -3186,8 +3228,20 @@ mod tests {
                     error.reason,
                     crate::amazon::connection::ConnectionReason::UnexpectedResponse
                 );
+                assert_eq!(error.upstream_status, Some(200));
+                assert_eq!(
+                    error.page_kind,
+                    Some(crate::amazon::connection::PageKind::Tracking)
+                );
+                assert_eq!(error.response_shape, Some("tracking_identity_mismatch"));
                 assert!(!client.status().await.challenge_required);
             }
+            assert!(error.page_fingerprint.as_deref().is_some_and(|value| {
+                value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+            }));
+            let diagnostic = format!("{error:?} {error}");
+            assert!(!diagnostic.contains("111-1234567-1234567"));
+            assert!(!diagnostic.contains(NUMBER));
         }
     }
 }

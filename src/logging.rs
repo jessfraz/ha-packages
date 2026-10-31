@@ -53,6 +53,8 @@ struct Fields {
     #[serde(skip_serializing_if = "Option::is_none")]
     page_kind: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    page_fingerprint: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     provider_error_code: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     provider_request_id: Option<Uuid>,
@@ -200,6 +202,12 @@ impl slog::Serializer for Fields {
                     &["orders_listing", "item_details", "tracking_page"],
                 )
             }
+            "page_fingerprint" => {
+                let value = value.to_string();
+                if value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+                    self.page_fingerprint = Some(value);
+                }
+            }
             "response_shape" => {
                 self.response_shape = allowed(
                     &value.to_string(),
@@ -214,6 +222,22 @@ impl slog::Serializer for Fields {
                         "encoded_other",
                         "invalid_utf8",
                         "unclassified_error_page",
+                        "amazon_service_error_page",
+                        "tracking_page_state_missing",
+                        "tracking_page_state_multiple",
+                        "tracking_page_state_invalid_json",
+                        "tracking_page_state_invalid_shape",
+                        "tracking_package_id_numeric",
+                        "tracking_package_index_numeric",
+                        "tracking_carrier_missing",
+                        "tracking_number_missing",
+                        "tracking_status_unsupported",
+                        "tracking_identity_mismatch",
+                        "order_details_listing_page",
+                        "order_details_tracking_links_missing",
+                        "order_details_tracking_identity_missing",
+                        "order_details_tracking_order_mismatch",
+                        "order_details_identity_mismatch",
                     ],
                 )
             }
