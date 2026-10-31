@@ -3,6 +3,8 @@
 - Read explicit carrier labels across semantic shipping headings, independent
   of heading level, capitalization and whitespace. Preserve carrier-conflict
   rejection and package identity checks.
+- Report bounded discovery coverage and deferrals with safe counts and hashed
+  order identities, without logging URLs or page contents.
 
 ## 0.6.25
 

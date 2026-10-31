@@ -114,6 +114,7 @@ pub struct Discovery {
     pub deferred_reasons: DeferredCounts,
     pub has_more: bool,
     pub complete: bool,
+    pub(crate) listing_pages: usize,
     pub failure: Option<ConnectionError>,
 }
 
@@ -936,7 +937,16 @@ impl AmazonClient {
                 {
                     // Deferral must retain the same safe classification as a
                     // failed preview, without logging page bodies or URLs.
-                    error.log(&self.log, started.elapsed());
+                    let order_fingerprint = Sha256::digest(candidate.order.as_bytes())
+                        .iter()
+                        .map(|byte| format!("{byte:02x}"))
+                        .collect::<String>();
+                    error.log(
+                        &self
+                            .log
+                            .new(slog::o!("order_fingerprint" => order_fingerprint)),
+                        started.elapsed(),
+                    );
                     scan.deferred.unverified_tracking += 1;
                     deferred += 1;
                 }
@@ -954,6 +964,7 @@ impl AmazonClient {
         let mut deferred_reasons = scan.deferred.clone();
         deferred_reasons.request_limit = scan.pending.len() + scan.retry.len();
         let complete = !has_more && failure.is_none();
+        let listing_pages = scan.seen_pages.len();
         let mut state = self.state.lock().await;
         if state.generation != generation {
             return Err(ConnectionError::failure(
@@ -1016,6 +1027,7 @@ impl AmazonClient {
             deferred_reasons,
             has_more,
             complete,
+            listing_pages,
             failure,
         })
     }
