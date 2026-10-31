@@ -1,3 +1,9 @@
+## 0.6.15
+
+- Add the existing parcel icon beside the app name, matching FileVault header
+  sizing, spacing, alignment and light/dark branding. Preserve shipment cards
+  and the rest of the dashboard styling.
+
 ## 0.6.14
 
 - Connect one Amazon.com account from Shipments settings, preview verified parcels

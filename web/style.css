@@ -193,6 +193,23 @@ h1 {
   margin: 0;
   font-weight: 600;
 }
+header > h1 {
+  display: flex;
+}
+.wordmark {
+  --brand-ink: #1d1e20;
+  --brand-soft: #f0f0ee;
+  --brand-paper: #ffffff;
+  --brand-side: #e1e1de;
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  color: inherit;
+  text-decoration: none;
+}
+.wordmark svg {
+  flex-shrink: 0;
+}
 h2 {
   font-size: 22px;
   line-height: 1.25;
@@ -620,6 +637,12 @@ dialog::backdrop {
   }
 }
 @media (prefers-color-scheme: dark) {
+  .wordmark {
+    --brand-ink: #f5f5f3;
+    --brand-soft: #35383d;
+    --brand-paper: #25282c;
+    --brand-side: #44484e;
+  }
   :root {
     color: #e6e6e4;
     background: #131415;
