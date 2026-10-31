@@ -712,12 +712,17 @@ fn page_state_blocks(html: &Html) -> Result<Vec<String>, Error> {
 
 fn header_carriers(html: &Html) -> Result<Vec<Carrier>, Error> {
     let mut carriers = Vec::new();
-    for header in html.select(&selector("h2, h3")?) {
-        let text = header.text().collect::<Vec<_>>().join(" ");
-        let text = text.trim();
+    for header in html.select(&selector("h1, h2, h3, h4, h5, h6, [role=heading]")?) {
+        let text = header
+            .text()
+            .flat_map(str::split_whitespace)
+            .collect::<Vec<_>>()
+            .join(" ")
+            .to_ascii_uppercase();
         if let Some(carrier) = text
-            .strip_prefix("Delivery By ")
-            .or_else(|| text.strip_prefix("Delivery facilitated by "))
+            .strip_prefix("DELIVERY BY ")
+            .or_else(|| text.strip_prefix("DELIVERY FACILITATED BY "))
+            .or_else(|| text.strip_prefix("SHIPPED WITH "))
             .and_then(carrier)
             && !carriers.contains(&carrier)
         {
@@ -1800,6 +1805,57 @@ mod tests {
         );
         assert_eq!(tracker.status, Status::Delivered);
         assert_eq!(tracker.tracking_code, "TBA000000000020");
+    }
+
+    #[test]
+    fn semantic_shipping_headings_verify_explicit_carriers_without_carrier_code() {
+        for (heading, number, expected) in [
+            (
+                "<h1>Delivery\n by   Amazon</h1>",
+                "TBA000000000020",
+                Carrier::AmazonAccount,
+            ),
+            (
+                "<h4>Shipped with <span>Amazon</span></h4>",
+                "TBA000000000020",
+                Carrier::AmazonAccount,
+            ),
+            (
+                "<div role=heading>delivery facilitated BY USPS</div>",
+                "9400111122223333444455",
+                Carrier::Usps,
+            ),
+            (
+                "<h6>shipped WITH FedEx</h6>",
+                "781234567890",
+                Carrier::FedExDefault,
+            ),
+        ] {
+            let html = page(number).replace("<h3>Delivery By USPS</h3>", heading);
+            let tracker = pages::tracking(&html, PATH, Some(number)).unwrap();
+            assert_eq!(tracker.carrier, expected);
+            assert_eq!(tracker.tracking_code, number);
+            assert_eq!(tracker.status, Status::InTransit);
+        }
+    }
+
+    #[test]
+    fn shipping_headings_do_not_guess_carriers_or_override_conflicting_evidence() {
+        for heading in [
+            "<h1>Shipped with Unknown carrier</h1>",
+            "<p>Shipped with Amazon</p>",
+            "<h4>Shipped with Amazon</h4><h6>Delivery by USPS</h6>",
+        ] {
+            let html = page("TBA000000000020").replace("<h3>Delivery By USPS</h3>", heading);
+            assert!(pages::tracking(&html, PATH, None).is_err());
+        }
+        let conflict = page("9400111122223333444455")
+            .replace("<h3>Delivery By USPS</h3>", "<h4>Shipped with Amazon</h4>")
+            .replace(
+                "\"trackingId\":",
+                "\"carrierCode\":\"USPS\",\"trackingId\":",
+            );
+        assert!(pages::tracking(&conflict, PATH, None).is_err());
     }
 
     #[test]

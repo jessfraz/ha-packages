@@ -1,3 +1,9 @@
+## 0.6.26
+
+- Read explicit carrier labels across semantic shipping headings, independent
+  of heading level, capitalization and whitespace. Preserve carrier-conflict
+  rejection and package identity checks.
+
 ## 0.6.25
 
 - Retain safe page-type, upstream-status and parser-shape diagnostics for
