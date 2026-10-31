@@ -1,3 +1,8 @@
+## 0.6.22
+
+- Request the desktop item-details and tracking layouts expected by their
+  parsers. Keep the mobile order-listing and authentication profiles unchanged.
+
 ## 0.6.21
 
 - Preserve order identity across supported order-details redirects.
