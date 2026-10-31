@@ -32,7 +32,7 @@ use tokio::{
 use uuid::Uuid;
 
 use crate::{
-    amazon::connection::{ConnectionError, ConnectionReason, ConnectionStage},
+    amazon::connection::{ConnectionError, ConnectionReason, ConnectionStage, PageKind},
     carrier::Carrier,
     models::Tracking,
     shipping_api::{
@@ -996,6 +996,12 @@ impl AmazonClient {
             let request = self
                 .request(Method::GET, &format!("{}{path}", pages::ORIGIN))
                 .map_err(|e| ConnectionError::new(stage, e))?;
+            let request = match kind {
+                // The listing parser reads mobile item cards; leaf-page parsing
+                // reads desktop page-state documents. Authentication stays mobile.
+                PageKind::Orders => request,
+                PageKind::Item | PageKind::Tracking => request.header(reqwest::header::USER_AGENT, "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/156.0.0.0 Safari/537.36"),
+            };
             let (status, headers, body) = self.response(request).await.map_err(|e| {
                 ConnectionError::new(stage, e)
                     .with_page_kind(kind)
@@ -1603,9 +1609,15 @@ mod tests {
     const ACCESS: &str = r#"{"access_token":"SYNTHETIC_ACCESS"}"#;
     const COOKIES: &str = r#"{"response":{"tokens":{"cookies":{".amazon.com":[{"Name":"session-id","Value":"SYNTHETIC_COOKIE","Path":"/"}]}}}}"#;
     const REGISTER: &str = r#"{"response":{"success":{"tokens":{"bearer":{"refresh_token":"SYNTHETIC_REFRESH"}},"extensions":{"customer_info":{"user_id":"SYNTHETIC_CUSTOMER"}}}}}"#;
+    #[derive(Debug)]
+    struct RequestAgent {
+        path: String,
+        user_agent: Option<String>,
+    }
     struct Fixture {
         url: reqwest::Url,
         calls: Arc<Mutex<Vec<String>>>,
+        request_agents: Arc<Mutex<Vec<RequestAgent>>>,
         stop: Arc<AtomicBool>,
         thread: Option<thread::JoinHandle<()>>,
     }
@@ -1635,8 +1647,10 @@ mod tests {
             let url = reqwest::Url::parse(&format!("http://{}/", listener.local_addr().unwrap()))
                 .unwrap();
             let calls = Arc::new(Mutex::new(Vec::new()));
+            let request_agents = Arc::new(Mutex::new(Vec::new()));
             let stop = Arc::new(AtomicBool::new(false));
             let thread_calls = calls.clone();
+            let thread_agents = request_agents.clone();
             let thread_stop = stop.clone();
             let thread = thread::spawn(move || {
                 while !thread_stop.load(Ordering::Acquire) {
@@ -1689,6 +1703,11 @@ mod tests {
                                 .and_then(|s| s.parse::<usize>().ok())
                         })
                         .unwrap_or(0);
+                    let user_agent = headers.lines().find_map(|line| {
+                        let (name, value) = line.split_once(':')?;
+                        name.eq_ignore_ascii_case("user-agent")
+                            .then(|| value.trim().to_owned())
+                    });
                     while bytes.len() < header_end + length {
                         let n = stream.read(&mut buffer).unwrap_or(0);
                         if n == 0 {
@@ -1697,6 +1716,10 @@ mod tests {
                         bytes.extend_from_slice(&buffer[..n]);
                     }
                     thread_calls.lock().unwrap().push(path.clone());
+                    thread_agents.lock().unwrap().push(RequestAgent {
+                        path: path.clone(),
+                        user_agent,
+                    });
                     let (status, headers, body) = handler(&path);
                     let reply = format!(
                         "HTTP/1.1 {status} fixture\r\n{headers}Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
@@ -1709,6 +1732,7 @@ mod tests {
             Self {
                 url,
                 calls,
+                request_agents,
                 stop,
                 thread: Some(thread),
             }
@@ -1813,6 +1837,90 @@ mod tests {
         assert!(!client.status().await.imports_enabled);
         let restored = AmazonClient::new(dir.path().join("amazon-account.json")).unwrap();
         assert_eq!(restored.status().await.state, AmazonState::Connected);
+    }
+
+    #[tokio::test]
+    async fn retail_page_profiles_preserve_mobile_auth_and_listing() {
+        const POP: &str = "/your-orders/pop?orderId=111-1234567-1234567&shipmentId=SHIP1&packageId=1&lineItemId=ITEM1";
+        const TRACK: &str =
+            "/progress-tracker/package?orderId=111-1234567-1234567&shipmentId=SHIP1&packageIndex=0";
+        const AMAZON_NUMBER: &str = "TBA000000000061";
+        let fixture = Fixture::new(|path| match path {
+            "/auth/register" => (200, REGISTER.into()),
+            "/auth/token" => (200, ACCESS.into()),
+            "/ap/exchangetoken/cookies" => (200, COOKIES.into()),
+            "/your-orders/orders" => (
+                200,
+                format!(
+                    r#"<a class="item-card__link" href="{POP}" aria-label="Widget, Order placed 1 October 2026, Shipped"></a>"#
+                ),
+            ),
+            POP => (200, format!(r#"<a href="{TRACK}">Track package</a>"#)),
+            TRACK => (
+                200,
+                format!(
+                    r#"<h3>Delivery facilitated by Amazon</h3><script id="page-state">{{"trackingId":"{AMAZON_NUMBER}","orderId":"111-1234567-1234567","shipmentId":"SHIP1","packageIndex":"0","shortStatus":"DELIVERED"}}</script>"#
+                ),
+            ),
+            _ => (404, String::new()),
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let client =
+            AmazonClient::for_test(dir.path().join("account.json"), fixture.url.clone()).unwrap();
+        let flow = client.begin_sign_in("owner").await.unwrap();
+        client
+            .complete_sign_in(
+                "owner",
+                &flow.flow_id,
+                "https://www.amazon.com/ap/maplanding?openid.oa2.authorization_code=SYNTHETIC_CODE",
+            )
+            .await
+            .unwrap();
+        let preview = client.preview().await.unwrap();
+        assert_eq!(preview.parcels.len(), 1);
+        assert_eq!(preview.deferred, 0);
+        let tracker = &preview.parcels[0].tracker;
+        assert_eq!(tracker.tracking_code, AMAZON_NUMBER);
+        assert_eq!(tracker.carrier, crate::carrier::Carrier::AmazonMcf);
+        assert_eq!(tracker.status, crate::models::Status::Delivered);
+        assert!(!client.status().await.imports_enabled);
+        let requests = fixture.request_agents.lock().unwrap();
+        assert_eq!(
+            requests
+                .iter()
+                .map(|request| request.path.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "/auth/register",
+                "/auth/token",
+                "/auth/token",
+                "/ap/exchangetoken/cookies",
+                "/your-orders/orders",
+                POP,
+                TRACK,
+            ]
+        );
+        for request in requests.iter() {
+            let agent = request
+                .user_agent
+                .as_deref()
+                .expect("Missing wire user-agent");
+            if [POP, TRACK].contains(&request.path.as_str()) {
+                assert!(
+                    agent.contains("Macintosh") && agent.contains("Chrome/"),
+                    "{}: {agent}",
+                    request.path
+                );
+                assert!(!agent.contains("iPhone"));
+            } else {
+                assert!(
+                    agent.contains("iPhone") && agent.contains("Mobile/"),
+                    "{}: {agent}",
+                    request.path
+                );
+                assert!(!agent.contains("Macintosh"));
+            }
+        }
     }
 
     #[tokio::test]
