@@ -1,3 +1,5 @@
+import { safeRequestId } from "./api-error.js";
+
 // Account credentials stay on the server. The one-time landing address only
 // lives in the submit handler and is cleared before its request starts.
 export function amazonSignInUrl(value) {
@@ -11,6 +13,71 @@ export function amazonSignInUrl(value) {
     // An invalid sign-in destination never becomes a clickable link.
   }
   return null;
+}
+
+const requestFailures = {
+  upstream_rejected: "Amazon rejected this step. Start a new sign-in and complete any verification Amazon requests.",
+  unexpected_response: "Amazon returned an unexpected response. Reopen Amazon settings to check the connection. If it keeps failing, check the app logs.",
+  timeout: "Amazon did not respond in time. Check the app’s internet connection, then reopen Amazon settings before starting another sign-in.",
+  connection: "The app could not reach Amazon. Check its internet connection, then reopen Amazon settings before starting another sign-in.",
+  rate_limited: "Amazon is limiting requests. Wait before starting another sign-in; repeated attempts may extend the limit.",
+  upstream_http: "Amazon returned an unsuccessful response. Reopen Amazon settings to check the connection. If it keeps failing, check the app logs.",
+  configuration: "The app could not prepare this Amazon request. Check the app configuration and logs before starting another sign-in.",
+};
+const sessionChanged = "The Amazon connection changed during sign-in. Reopen Amazon settings to check its current state before starting another sign-in.";
+const connectionSteps = {
+  callback: {
+    label: "Reading the Amazon sign-in address",
+    failures: { invalid_input: "The final address was not recognized. Start a new sign-in and paste the complete final address from Amazon’s address bar." },
+  },
+  flow: {
+    label: "Checking the sign-in attempt",
+    failures: {
+      invalid_input: "This sign-in attempt could not be matched to this tab. Start a new sign-in in this tab.",
+      expired_flow: "This sign-in attempt expired or was already used. Start a new sign-in and paste the new final address promptly.",
+      session_changed: sessionChanged,
+    },
+  },
+  registration: {
+    label: "Amazon device registration",
+    failures: {
+      ...requestFailures,
+      account_identity_missing: "Amazon did not provide a stable account ID. Shipments could not confirm the connection. Check the app logs before starting another sign-in.",
+    },
+  },
+  access_token: { label: "Checking the Amazon access token", failures: requestFailures },
+  cookies: { label: "Opening the Amazon website session", failures: requestFailures },
+  orders: { label: "Checking the Amazon orders page", failures: requestFailures },
+  account: {
+    label: "Verifying the Amazon account",
+    failures: {
+      account_mismatch: "The selected Amazon account differs from the connected account. Sign in to the connected account. To switch accounts, disconnect Amazon in settings first.",
+      session_changed: sessionChanged,
+    },
+  },
+  credentials: {
+    label: "Saving the Amazon connection",
+    failures: {
+      persistence: "Shipments could not confirm that the connection was saved. Check the app’s data storage and free space, then reopen Amazon settings to check its state before starting another sign-in.",
+      configuration: "Shipments could not access its private credential storage. Check the app’s data-directory permissions and logs, then reopen Amazon settings to check the connection.",
+    },
+  },
+};
+
+function connectionError(error, fallback) {
+  let explanation = fallback;
+  if (typeof error?.code === "string") {
+    for (const [stage, step] of Object.entries(connectionSteps)) {
+      const prefix = `amazon_connect_${stage}_`;
+      if (!error.code.startsWith(prefix)) continue;
+      const reason = error.code.slice(prefix.length);
+      if (Object.hasOwn(step.failures, reason))
+        explanation = `${step.label}: ${step.failures[reason]} Do not reuse the previous final Amazon address.`;
+      break;
+    }
+  }
+  const requestId = safeRequestId(error?.requestId);
+  return requestId ? `${explanation} Request ID: ${requestId}.` : explanation;
 }
 
 function validStatus(value) {
@@ -109,7 +176,7 @@ export function installAmazonSettings(root, request, onUnauthorized) {
         onUnauthorized();
         return;
       }
-      message(failure, true);
+      message(connectionError(error, failure), true);
     } finally {
       if (current === generation) {
         busy = false;

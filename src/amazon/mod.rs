@@ -2,6 +2,7 @@
 //! the ordinary provider worker owns saved tracking updates.
 
 mod auth;
+pub mod connection;
 mod pages;
 
 use std::{
@@ -31,6 +32,7 @@ use tokio::{
 use uuid::Uuid;
 
 use crate::{
+    amazon::connection::{ConnectionError, ConnectionReason, ConnectionStage},
     carrier::Carrier,
     shipping_api::{
         PreparedRegistration, ShippingApi,
@@ -201,7 +203,10 @@ impl AmazonClient {
     pub async fn status(&self) -> AmazonStatus {
         let state = self.state.lock().await;
         match &state.credential {
-            None => AmazonStatus::default(),
+            None => AmazonStatus {
+                last_error_code: state.last_error.clone(),
+                ..Default::default()
+            },
             Some(c) => AmazonStatus {
                 state: if c.auth_required {
                     AmazonState::AuthRequired
@@ -271,8 +276,29 @@ impl AmazonClient {
         owner: &str,
         flow_id: &str,
         landing_url: &str,
-    ) -> Result<AmazonStatus, Error> {
-        let code = auth::code(landing_url)?;
+    ) -> Result<AmazonStatus, ConnectionError> {
+        let generation = self.generation().await;
+        let result = self
+            .complete_sign_in_inner(owner, flow_id, landing_url)
+            .await;
+        if let Err(error) = &result {
+            let mut state = self.state.lock().await;
+            if state.generation == generation && state.credential.is_none() {
+                state.last_error = Some(error.code());
+            }
+        }
+        result
+    }
+
+    async fn complete_sign_in_inner(
+        &self,
+        owner: &str,
+        flow_id: &str,
+        landing_url: &str,
+    ) -> Result<AmazonStatus, ConnectionError> {
+        let code = auth::code(landing_url).map_err(|_| {
+            ConnectionError::failure(ConnectionStage::Callback, ConnectionReason::InvalidInput)
+        })?;
         let (flow, generation) = {
             let mut state = self.state.lock().await;
             // A wrong caller cannot consume someone else's flow.
@@ -280,41 +306,58 @@ impl AmazonClient {
                 .flow
                 .as_ref()
                 .filter(|f| f.id == flow_id && f.owner == owner && f.expires > Instant::now())
-                .ok_or_else(|| provider_error(ErrorKind::InvalidResponse))?;
+                .ok_or_else(|| {
+                    ConnectionError::failure(ConnectionStage::Flow, ConnectionReason::ExpiredFlow)
+                })?;
             let id = flow.id.clone();
-            let flow = state
-                .flow
-                .take()
-                .filter(|f| f.id == id)
-                .ok_or_else(|| provider_error(ErrorKind::InvalidResponse))?;
+            let flow = state.flow.take().filter(|f| f.id == id).ok_or_else(|| {
+                ConnectionError::failure(ConnectionStage::Flow, ConnectionReason::ExpiredFlow)
+            })?;
             (flow, state.generation)
         };
         let _session = self.session.lock().await;
         let registration = auth::register(self, &flow.serial, &flow.verifier, &code).await?;
         {
             let state = self.state.lock().await;
-            if state.generation != generation
-                || state
-                    .credential
-                    .as_ref()
-                    .is_some_and(|c| c.customer_id != registration.customer)
+            if state.generation != generation {
+                return Err(ConnectionError::failure(
+                    ConnectionStage::Account,
+                    ConnectionReason::SessionChanged,
+                ));
+            }
+            if state
+                .credential
+                .as_ref()
+                .is_some_and(|c| c.customer_id != registration.customer)
             {
-                return Err(provider_error(ErrorKind::InvalidResponse));
+                return Err(ConnectionError::failure(
+                    ConnectionStage::Account,
+                    ConnectionReason::AccountMismatch,
+                ));
             }
         }
-        self.clear_cookies()?;
+        self.clear_cookies()
+            .map_err(|e| ConnectionError::new(ConnectionStage::Cookies, e))?;
         auth::authenticate(self, &registration.token).await?;
         let page = self.page_once("/your-orders/orders").await?;
-        if matches!(page, Page::SignedOut) {
-            return Err(provider_error(ErrorKind::AuthenticationRequired));
-        }
-        let Page::Body(page) = page else {
-            return Err(provider_error(ErrorKind::InvalidResponse));
+        let page = match page {
+            Page::SignedOut(status) => {
+                return Err(ConnectionError::with_status(
+                    ConnectionStage::Orders,
+                    provider_error(ErrorKind::AuthenticationRequired),
+                    status,
+                ));
+            }
+            Page::Body(page) => page,
         };
-        pages::listing(&page)?;
+        pages::listing(&page)
+            .map_err(|e| ConnectionError::with_status(ConnectionStage::Orders, e, 200))?;
         let mut state = self.state.lock().await;
         if state.generation != generation {
-            return Err(provider_error(ErrorKind::InvalidResponse));
+            return Err(ConnectionError::failure(
+                ConnectionStage::Account,
+                ConnectionReason::SessionChanged,
+            ));
         }
         let imports_enabled = state.credential.as_ref().is_some_and(|c| c.imports_enabled);
         let credential = Credential {
@@ -324,9 +367,13 @@ impl AmazonClient {
             generation: generation.saturating_add(1),
             imports_enabled,
             auth_required: false,
-            last_success_at: Some(now()?),
+            last_success_at: Some(
+                now().map_err(|e| ConnectionError::new(ConnectionStage::Credentials, e))?,
+            ),
         };
-        save(&self.path, &credential)?;
+        save(&self.path, &credential).map_err(|_| {
+            ConnectionError::failure(ConnectionStage::Credentials, ConnectionReason::Persistence)
+        })?;
         state.generation = credential.generation;
         self.epoch.store(credential.generation, Ordering::Release);
         state.credential = Some(credential);
@@ -593,41 +640,61 @@ impl AmazonClient {
     }
     pub(crate) async fn json<T: DeserializeOwned>(
         &self,
+        stage: ConnectionStage,
         request: RequestBuilder,
-    ) -> Result<T, Error> {
-        let (status, headers, body) = self.response(request).await?;
+    ) -> Result<T, ConnectionError> {
+        let (status, headers, body) = self
+            .response(request)
+            .await
+            .map_err(|e| ConnectionError::new(stage, e))?;
         if status != 200 {
-            if matches!(status, 400 | 401 | 403) && confirmed_rejection(&body) {
-                return Err(provider_error(ErrorKind::AuthenticationRequired));
-            }
-            return Err(provider_error(if matches!(status, 401 | 403) {
+            let kind = if matches!(status, 400 | 401 | 403) && confirmed_rejection(&body) {
+                ErrorKind::AuthenticationRequired
+            } else if matches!(status, 401 | 403) {
                 ErrorKind::InvalidResponse
             } else {
                 ErrorKind::Http {
                     status,
                     retry_after: retry_after(&headers),
                 }
-            }));
+            };
+            return Err(ConnectionError::with_status(
+                stage,
+                provider_error(kind),
+                status,
+            ));
         }
-        serde_json::from_slice(&body).map_err(|_| provider_error(ErrorKind::InvalidResponse))
+        serde_json::from_slice(&body).map_err(|_| {
+            ConnectionError::with_status(stage, provider_error(ErrorKind::InvalidResponse), status)
+        })
     }
 
-    async fn page_once(&self, path: &str) -> Result<Page, Error> {
-        let mut path = pages::allowed_path(path)?;
+    async fn page_once(&self, path: &str) -> Result<Page, ConnectionError> {
+        let stage = ConnectionStage::Orders;
+        let mut path = pages::allowed_path(path).map_err(|e| ConnectionError::new(stage, e))?;
         for _ in 0..3 {
+            let request = self
+                .request(Method::GET, &format!("{}{path}", pages::ORIGIN))
+                .map_err(|e| ConnectionError::new(stage, e))?;
             let (status, headers, body) = self
-                .response(self.request(Method::GET, &format!("{}{path}", pages::ORIGIN))?)
-                .await?;
+                .response(request)
+                .await
+                .map_err(|e| ConnectionError::new(stage, e))?;
+            let invalid = || {
+                ConnectionError::with_status(
+                    stage,
+                    provider_error(ErrorKind::InvalidResponse),
+                    status,
+                )
+            };
             if (300..400).contains(&status) {
                 let location = headers
                     .get(reqwest::header::LOCATION)
                     .and_then(|v| v.to_str().ok())
-                    .ok_or_else(|| provider_error(ErrorKind::InvalidResponse))?;
-                let base = Url::parse(&format!("{}{path}", pages::ORIGIN))
-                    .map_err(|_| provider_error(ErrorKind::InvalidResponse))?;
-                let url = base
-                    .join(location)
-                    .map_err(|_| provider_error(ErrorKind::InvalidResponse))?;
+                    .ok_or_else(invalid)?;
+                let base =
+                    Url::parse(&format!("{}{path}", pages::ORIGIN)).map_err(|_| invalid())?;
+                let url = base.join(location).map_err(|_| invalid())?;
                 if url.scheme() == "https"
                     && url.host_str() == Some("www.amazon.com")
                     && url.path() == "/ap/signin"
@@ -635,34 +702,41 @@ impl AmazonClient {
                     && url.password().is_none()
                     && url.port().is_none()
                 {
-                    return Ok(Page::SignedOut);
+                    return Ok(Page::SignedOut(status));
                 }
-                let destination = pages::allowed_path(url.as_str())?;
+                let destination = pages::allowed_path(url.as_str()).map_err(|_| invalid())?;
                 if !pages::same_parcel_identity(&path, &destination) {
-                    return Err(provider_error(ErrorKind::InvalidResponse));
+                    return Err(invalid());
                 }
                 path = destination;
                 continue;
             }
             if status != 200 {
-                return Err(provider_error(if matches!(status, 401 | 403) {
+                let kind = if matches!(status, 401 | 403) {
                     ErrorKind::InvalidResponse
                 } else {
                     ErrorKind::Http {
                         status,
                         retry_after: retry_after(&headers),
                     }
-                }));
+                };
+                return Err(ConnectionError::with_status(
+                    stage,
+                    provider_error(kind),
+                    status,
+                ));
             }
-            let page =
-                String::from_utf8(body).map_err(|_| provider_error(ErrorKind::InvalidResponse))?;
+            let page = String::from_utf8(body).map_err(|_| invalid())?;
             return Ok(if pages::signed_out(&page) {
-                Page::SignedOut
+                Page::SignedOut(status)
             } else {
                 Page::Body(page)
             });
         }
-        Err(provider_error(ErrorKind::InvalidResponse))
+        Err(ConnectionError::new(
+            stage,
+            provider_error(ErrorKind::InvalidResponse),
+        ))
     }
     async fn fetch_page(&self, path: &str) -> Result<String, Error> {
         let _session = self.session.lock().await;
@@ -690,12 +764,12 @@ impl AmazonClient {
         }
         match self.page_once(path).await? {
             Page::Body(page) => Ok(page),
-            Page::SignedOut => {
+            Page::SignedOut(_) => {
                 self.clear_cookies()?;
                 auth::authenticate(self, &token).await?;
                 match self.page_once(path).await? {
                     Page::Body(page) => Ok(page),
-                    Page::SignedOut => Err(provider_error(ErrorKind::AuthenticationRequired)),
+                    Page::SignedOut(_) => Err(provider_error(ErrorKind::AuthenticationRequired)),
                 }
             }
         }
@@ -763,7 +837,7 @@ impl AmazonClient {
 
 enum Page {
     Body(String),
-    SignedOut,
+    SignedOut(u16),
 }
 
 fn retry_after(headers: &HeaderMap) -> Option<i64> {
@@ -1204,31 +1278,44 @@ mod tests {
     }
     #[tokio::test]
     async fn expired_flow_and_unsafe_callback_never_reach_network() {
+        use crate::amazon::connection::{ConnectionReason, ConnectionStage};
         let dir = tempfile::tempdir().unwrap();
         let fixture = Fixture::normal();
         let client =
             AmazonClient::for_test(dir.path().join("account.json"), fixture.url.clone()).unwrap();
         let flow = client.begin_sign_in("owner").await.unwrap();
         client.state.lock().await.flow.as_mut().unwrap().expires = tokio::time::Instant::now();
-        assert!(
-            client
-                .complete_sign_in(
-                    "owner",
-                    &flow.flow_id,
-                    "https://www.amazon.com/ap/maplanding?openid.oa2.authorization_code=TEST"
-                )
-                .await
-                .is_err()
+        let expired = client
+            .complete_sign_in(
+                "owner",
+                &flow.flow_id,
+                "https://www.amazon.com/ap/maplanding?openid.oa2.authorization_code=TEST",
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(
+            (expired.stage, expired.reason, expired.upstream_status),
+            (ConnectionStage::Flow, ConnectionReason::ExpiredFlow, None)
         );
-        assert!(
-            client
-                .complete_sign_in(
-                    "owner",
-                    &flow.flow_id,
-                    "https://evil.example/?openid.oa2.authorization_code=TEST"
-                )
-                .await
-                .is_err()
+        let unsafe_url = client
+            .complete_sign_in(
+                "owner",
+                &flow.flow_id,
+                "https://evil.example/?openid.oa2.authorization_code=TEST",
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(
+            (
+                unsafe_url.stage,
+                unsafe_url.reason,
+                unsafe_url.upstream_status
+            ),
+            (
+                ConnectionStage::Callback,
+                ConnectionReason::InvalidInput,
+                None
+            )
         );
         assert!(fixture.calls.lock().unwrap().is_empty());
     }
@@ -1589,5 +1676,272 @@ mod tests {
                 );
             }
         }
+    }
+    #[tokio::test]
+    async fn empty_and_missing_cookie_paths_complete_real_connection_flow() {
+        for cookies in [
+            COOKIES.replace("\"Path\":\"/\"", "\"Path\":\"\""),
+            COOKIES.replace(",\"Path\":\"/\"", ""),
+        ] {
+            let fixture = Fixture::new(move |path| match path {
+                "/auth/register" => (200, REGISTER.into()),
+                "/auth/token" => (200, ACCESS.into()),
+                "/ap/exchangetoken/cookies" => (200, cookies.clone()),
+                "/your-orders/orders" => (200, listing()),
+                _ => (404, String::new()),
+            });
+            let dir = tempfile::tempdir().unwrap();
+            let client =
+                AmazonClient::for_test(dir.path().join("account.json"), fixture.url.clone())
+                    .unwrap();
+            let flow = client.begin_sign_in("owner").await.unwrap();
+            let result = client.complete_sign_in("owner", &flow.flow_id,
+                "https://www.amazon.com/ap/maplanding?openid.oa2.authorization_code=SYNTHETIC_CODE").await;
+            let status = result.unwrap();
+            assert_eq!(status.state, AmazonState::Connected);
+            assert!(!status.imports_enabled);
+            assert_eq!(fixture.calls.lock().unwrap().len(), 4);
+        }
+    }
+
+    #[tokio::test]
+    async fn connection_failures_identify_the_boundary_without_saving_or_reusing_a_flow() {
+        use crate::amazon::connection::{ConnectionReason, ConnectionStage};
+        let cases = [
+            (
+                "/auth/register",
+                200,
+                r#"{"response":{"success":{"tokens":{"bearer":{"refresh_token":"PRIVATE_TOKEN"}}}}}"#,
+                ConnectionStage::Registration,
+                ConnectionReason::AccountIdentityMissing,
+            ),
+            (
+                "/auth/register",
+                401,
+                r#"{"error":"invalid_grant","message":"PRIVATE_BODY"}"#,
+                ConnectionStage::Registration,
+                ConnectionReason::UpstreamRejected,
+            ),
+            (
+                "/auth/register",
+                500,
+                "PRIVATE_BODY",
+                ConnectionStage::Registration,
+                ConnectionReason::UpstreamHttp,
+            ),
+            (
+                "/auth/token",
+                200,
+                r#"{"unexpected":"PRIVATE_TOKEN"}"#,
+                ConnectionStage::AccessToken,
+                ConnectionReason::UnexpectedResponse,
+            ),
+            (
+                "/ap/exchangetoken/cookies",
+                200,
+                r#"{"unexpected":"PRIVATE_COOKIE"}"#,
+                ConnectionStage::Cookies,
+                ConnectionReason::UnexpectedResponse,
+            ),
+            (
+                "/your-orders/orders",
+                200,
+                "<html>PRIVATE_UNRECOGNIZED_PAGE</html>",
+                ConnectionStage::Orders,
+                ConnectionReason::UnexpectedResponse,
+            ),
+            (
+                "/your-orders/orders",
+                403,
+                "PRIVATE_BODY",
+                ConnectionStage::Orders,
+                ConnectionReason::UnexpectedResponse,
+            ),
+        ];
+        for (failed_path, status, body, stage, reason) in cases {
+            let fixture = Fixture::new(move |path| {
+                if path == failed_path {
+                    return (status, body.into());
+                }
+                match path {
+                    "/auth/register" => (200, REGISTER.into()),
+                    "/auth/token" => (200, ACCESS.into()),
+                    "/ap/exchangetoken/cookies" => (200, COOKIES.into()),
+                    "/your-orders/orders" => (200, listing()),
+                    _ => (404, String::new()),
+                }
+            });
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("account.json");
+            let client = AmazonClient::for_test(path.clone(), fixture.url.clone()).unwrap();
+            let flow = client.begin_sign_in("owner").await.unwrap();
+            let callback =
+                "https://www.amazon.com/ap/maplanding?openid.oa2.authorization_code=PRIVATE_CODE";
+            let error = client
+                .complete_sign_in("owner", &flow.flow_id, callback)
+                .await
+                .unwrap_err();
+            assert_eq!(
+                (error.stage, error.reason, error.upstream_status),
+                (stage, reason, Some(status))
+            );
+            let diagnostic = format!("{error:?} {error}");
+            assert!(!diagnostic.contains("PRIVATE_"));
+            let state = client.status().await;
+            assert_eq!(state.state, AmazonState::Disconnected);
+            assert!(!state.imports_enabled);
+            assert_eq!(state.last_error_code, Some(error.code()));
+            assert!(!path.exists());
+            let requests = fixture.calls.lock().unwrap().len();
+            let retry = client
+                .complete_sign_in("owner", &flow.flow_id, callback)
+                .await
+                .unwrap_err();
+            assert_eq!(retry.stage, ConnectionStage::Flow);
+            assert_eq!(fixture.calls.lock().unwrap().len(), requests);
+        }
+    }
+
+    #[tokio::test]
+    async fn failed_credential_write_has_an_explicit_local_failure() {
+        use crate::amazon::connection::{ConnectionReason, ConnectionStage};
+        let dir = tempfile::tempdir().unwrap();
+        let fixture = Fixture::normal();
+        let path = dir.path().join("account.json");
+        let client = AmazonClient::for_test(path.clone(), fixture.url.clone()).unwrap();
+        let flow = client.begin_sign_in("owner").await.unwrap();
+        std::fs::create_dir(&path).unwrap();
+        let error = client
+            .complete_sign_in(
+                "owner",
+                &flow.flow_id,
+                "https://www.amazon.com/ap/maplanding?openid.oa2.authorization_code=SYNTHETIC_CODE",
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(
+            (error.stage, error.reason, error.upstream_status),
+            (
+                ConnectionStage::Credentials,
+                ConnectionReason::Persistence,
+                None
+            )
+        );
+        assert_eq!(client.status().await.state, AmazonState::Disconnected);
+        assert!(path.is_dir());
+    }
+    #[tokio::test]
+    async fn a_different_account_never_replaces_saved_credentials_or_import_settings() {
+        use crate::amazon::connection::{ConnectionReason, ConnectionStage};
+        let fixture = Fixture::new(|path| {
+            assert_eq!(path, "/auth/register");
+            (
+                200,
+                REGISTER.replace("SYNTHETIC_CUSTOMER", "OTHER_CUSTOMER"),
+            )
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let client = configured(&dir, &fixture);
+        client.enable_imports().await.unwrap();
+        let path = dir.path().join("amazon-account.json");
+        let original = std::fs::read(&path).unwrap();
+        let flow = client.begin_sign_in("owner").await.unwrap();
+        let error = client
+            .complete_sign_in(
+                "owner",
+                &flow.flow_id,
+                "https://www.amazon.com/ap/maplanding?openid.oa2.authorization_code=SYNTHETIC_CODE",
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(
+            (error.stage, error.reason),
+            (ConnectionStage::Account, ConnectionReason::AccountMismatch)
+        );
+        assert!(
+            std::fs::read(&path).unwrap() == original,
+            "Existing credential file changed"
+        );
+        let status = client.status().await;
+        assert_eq!(status.state, AmazonState::Connected);
+        assert!(status.imports_enabled);
+        assert_eq!(status.last_error_code, None);
+        assert_eq!(fixture.calls.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_superseded_connection_failure_cannot_poison_a_newly_saved_connection() {
+        use crate::amazon::connection::{ConnectionReason, ConnectionStage};
+        let held = Arc::new(AtomicBool::new(false));
+        let entered = held.clone();
+        let (release, wait) = std::sync::mpsc::channel();
+        let wait = Mutex::new(Some(wait));
+        let fixture = Fixture::new(move |path| {
+            if path == "/auth/token"
+                && let Some(wait) = wait.lock().unwrap().take()
+            {
+                entered.store(true, Ordering::Release);
+                wait.recv_timeout(std::time::Duration::from_secs(5))
+                    .unwrap();
+            }
+            match path {
+                "/auth/register" => (200, REGISTER.into()),
+                "/auth/token" => (200, ACCESS.into()),
+                "/ap/exchangetoken/cookies" => (200, COOKIES.into()),
+                "/your-orders/orders" => (200, listing()),
+                _ => (404, String::new()),
+            }
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("account.json");
+        let client = AmazonClient::for_test(path.clone(), fixture.url.clone()).unwrap();
+        let first = client.begin_sign_in("owner").await.unwrap();
+        let a = client.clone();
+        let first = tokio::spawn(complete_fixture_connection(a, first.flow_id));
+        for _ in 0..100 {
+            if held.load(Ordering::Acquire) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        assert!(held.load(Ordering::Acquire));
+        let second = client.begin_sign_in("owner").await.unwrap();
+        let b = client.clone();
+        let second = tokio::spawn(complete_fixture_connection(b, second.flow_id));
+        for _ in 0..100 {
+            if client.state.lock().await.flow.is_none() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        assert!(client.state.lock().await.flow.is_none());
+        release.send(()).unwrap();
+        first.await.unwrap().unwrap();
+        let saved = std::fs::read(&path).unwrap();
+        let error = second.await.unwrap().unwrap_err();
+        assert_eq!(
+            (error.stage, error.reason),
+            (ConnectionStage::Account, ConnectionReason::SessionChanged)
+        );
+        assert!(
+            std::fs::read(&path).unwrap() == saved,
+            "Saved credential file changed"
+        );
+        let status = client.status().await;
+        assert_eq!(status.state, AmazonState::Connected);
+        assert_eq!(status.last_error_code, None);
+    }
+
+    async fn complete_fixture_connection(
+        client: AmazonClient,
+        flow: String,
+    ) -> Result<crate::amazon::AmazonStatus, crate::amazon::connection::ConnectionError> {
+        client
+            .complete_sign_in(
+                "owner",
+                &flow,
+                "https://www.amazon.com/ap/maplanding?openid.oa2.authorization_code=SYNTHETIC_CODE",
+            )
+            .await
     }
 }

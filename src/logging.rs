@@ -140,6 +140,7 @@ fn event_name(message: &str) -> Option<&'static str> {
         "beginning graceful shutdown" => "server_stopping",
         "accept error" => "server_accept_error",
         "provider_request" => "provider_request",
+        "amazon_connection" => "amazon_connection",
         "tracking_verification" => "tracking_verification",
         "tracking_registration" => "tracking_registration",
         "tracking_sync" => "tracking_sync",
@@ -216,6 +217,14 @@ impl slog::Serializer for Fields {
                         "update",
                         "sync",
                         "discovery",
+                        "callback",
+                        "flow",
+                        "registration",
+                        "access_token",
+                        "cookies",
+                        "orders",
+                        "account",
+                        "credentials",
                     ],
                 )
             }
@@ -271,6 +280,18 @@ impl slog::Serializer for Fields {
                         "database_error",
                         "discovery_unavailable",
                         "invalid_input",
+                        "expired_flow",
+                        "account_identity_missing",
+                        "account_mismatch",
+                        "session_changed",
+                        "upstream_rejected",
+                        "unexpected_response",
+                        "timeout",
+                        "connection",
+                        "rate_limited",
+                        "upstream_http",
+                        "persistence",
+                        "configuration",
                     ],
                 )
             }
@@ -346,6 +367,7 @@ fn route_template(uri: &str) -> &'static str {
         "/v1/amazon/enable" => "/v1/amazon/enable",
         "/v1/amazon/refresh" => "/v1/amazon/refresh",
         "/amazon-settings.js" => "/amazon-settings.js",
+        "/api-error.js" => "/api-error.js",
         path => {
             let mut segments = path.split('/');
             match (

@@ -1,4 +1,5 @@
 import { waitForConnection } from "./connection.js";
+import { ApiError } from "./api-error.js";
 import { calendarDate } from "./dates.js";
 import { providerNames, trackingLinks } from "./parcel-links.js";
 import { installAmazonSettings } from "./amazon-settings.js";
@@ -55,13 +56,6 @@ let agentSession = 0;
 let agentTokenGeneration = 0;
 let issuedAgentId = null;
 const amazonSettings = installAmazonSettings(byId("amazon"), api, () => setOwnerAccess(false));
-
-class ApiError extends Error {
-  constructor(message, status) {
-    super(message);
-    this.status = status;
-  }
-}
 
 function editError(error) {
   if (error.status === 412) {
@@ -256,8 +250,9 @@ async function api(path, options = {}) {
   const body = await response.json();
   if (!response.ok) {
     throw new ApiError(
-      body.message || `Request failed (${response.status})`,
+      typeof body?.message === "string" && body.message ? body.message : `Request failed (${response.status})`,
       response.status,
+      body,
     );
   }
   return body;

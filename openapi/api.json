@@ -1535,6 +1535,24 @@
         ]
       }
     },
+    "/api-error.js": {
+      "get": {
+        "operationId": "api_error_script",
+        "responses": {
+          "default": {
+            "content": {
+              "*/*": {
+                "schema": {}
+              }
+            },
+            "description": ""
+          }
+        },
+        "tags": [
+          "web"
+        ]
+      }
+    },
     "/app.js": {
       "get": {
         "operationId": "script",

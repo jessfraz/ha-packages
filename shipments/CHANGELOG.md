@@ -1,5 +1,10 @@
 ## 0.6.15
 
+- Honor Amazon's cookie paths, including omitted and empty paths. Report the exact
+  connection step and a safe error reference when sign-in cannot finish, without
+  exposing credentials or provider responses. Missing account identity stays
+  blocked rather than linking an unverified account.
+
 - Add the existing parcel icon beside the app name, matching FileVault header
   sizing, spacing, alignment and light/dark branding. Preserve shipment cards
   and the rest of the dashboard styling.

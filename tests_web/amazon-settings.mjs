@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { ApiError } from "../web/api-error.js";
 import { amazonSignInUrl, installAmazonSettings } from "../web/amazon-settings.js";
 
 class Node extends EventTarget {
@@ -240,4 +241,93 @@ test("expired authentication removes stale preview and action messages", async (
   assert.equal(ui.node("preview-result").hidden, true);
   assert.equal(ui.node("message").textContent, "");
   assert.equal(ui.node("state").textContent, "Sign-in required");
+});
+
+
+test("missing account identity explains the registration failure without exposing provider text", async () => {
+  const ui = setup();
+  ui.replies.push(signIn);
+  await ui.click("start");
+  const requestId = "fbf22920-3494-4f72-833f-dd34eb2e323b";
+  ui.replies.push(new ApiError(`private upstream response ${landing}`, 400, {
+    error_code: "amazon_connect_registration_account_identity_missing", request_id: requestId,
+  }));
+  ui.node("landing-url").value = landing;
+  await ui.submit();
+  assert.match(ui.node("error").textContent, /device registration/i);
+  assert.match(ui.node("error").textContent, /did not provide a stable account ID/i);
+  assert.match(ui.node("error").textContent, /could not confirm the connection/i);
+  assert.match(ui.node("error").textContent, /Check the app logs before starting another sign-in/);
+  assert.match(ui.node("error").textContent, /Do not reuse the previous final Amazon address/);
+  assert.equal(ui.node("error").textContent.includes("intended Amazon.com account"), false);
+  assert.ok(ui.node("error").textContent.includes(requestId));
+  assert.equal(ui.node("error").textContent.includes("SYNTHETIC_SECRET"), false);
+  assert.equal(ui.node("error").textContent.includes("private upstream"), false);
+  assert.equal(ui.node("landing-url").value, "");
+  assert.equal(ui.node("sign-in-link").href, "");
+  assert.equal(ui.node("enable").hidden, true);
+  await ui.submit();
+  assert.equal(ui.calls.length, 2, "one-use callback is not retried automatically or resubmitted");
+});
+
+async function failSignIn(body, status = 400) {
+  const ui = setup();
+  ui.replies.push(signIn);
+  await ui.click("start");
+  ui.replies.push(new ApiError(`DO_NOT_DISPLAY ${landing}`, status, body));
+  ui.node("landing-url").value = landing;
+  await ui.submit();
+  assert.equal(ui.node("landing-url").value, "");
+  assert.equal(ui.node("sign-in-link").href, "");
+  assert.equal(ui.node("enable").hidden, true);
+  assert.equal(ui.calls.length, 2);
+  assert.equal(ui.node("error").textContent.includes("DO_NOT_DISPLAY"), false);
+  assert.equal(ui.node("error").textContent.includes("SYNTHETIC_SECRET"), false);
+  return ui;
+}
+
+test("known failure stages explain the failing step and a manual recovery action", async () => {
+  for (const [code, stage, recovery] of [
+    ["amazon_connect_callback_invalid_input", /sign-in address/i, /complete final address/],
+    ["amazon_connect_flow_expired_flow", /sign-in attempt/i, /expired or was already used/],
+    ["amazon_connect_flow_invalid_input", /sign-in attempt/i, /new sign-in in this tab/],
+    ["amazon_connect_registration_upstream_rejected", /device registration/i, /new sign-in/],
+    ["amazon_connect_access_token_timeout", /access token/i, /internet connection/],
+    ["amazon_connect_cookies_unexpected_response", /website session/i, /app logs/],
+    ["amazon_connect_orders_connection", /orders page/i, /could not reach Amazon/],
+    ["amazon_connect_orders_rate_limited", /orders page/i, /Wait before/],
+    ["amazon_connect_access_token_upstream_http", /access token/i, /check the connection/],
+    ["amazon_connect_account_account_mismatch", /Verifying the Amazon account/i, /disconnect Amazon in settings first/],
+    ["amazon_connect_account_session_changed", /Verifying the Amazon account/i, /check its current state/],
+    ["amazon_connect_credentials_persistence", /Saving the Amazon connection/i, /data storage and free space/],
+    ["amazon_connect_credentials_configuration", /Saving the Amazon connection/i, /permissions and logs/],
+  ]) {
+    const ui = await failSignIn({ error_code: code, message: `DO_NOT_DISPLAY ${landing}` });
+    assert.match(ui.node("error").textContent, stage, code);
+    assert.match(ui.node("error").textContent, recovery, code);
+    assert.match(ui.node("error").textContent, /Do not reuse the previous final Amazon address/, code);
+    assert.equal(ui.node("error").textContent.includes("Request ID:"), false);
+  }
+});
+
+test("unsupported pairs and arbitrary error payloads retain the safe action fallback", async () => {
+  const requestId = "fbf22920-3494-4f72-833f-dd34eb2e323b";
+  for (const error_code of [
+    "amazon_connect_callback_timeout", "amazon_connect_credentials_upstream_rejected",
+    "amazon_connect_account_account_identity_missing", "amazon_connect_unknown_expired_flow",
+    "amazon_connect_cookies___proto__", "amazon_connect_flow_constructor", "amazon_connect_orders_new_error",
+    "provider_authentication_required", `amazon_connect_registration_account_identity_missing ${landing}`, {},
+  ]) {
+    const ui = await failSignIn({ error_code, request_id: requestId, message: `DO_NOT_DISPLAY ${landing}`, details: { token: "SYNTHETIC_SECRET" } });
+    assert.equal(ui.node("error").textContent, `Could not complete sign-in. Choose Reconnect Amazon to start again. Request ID: ${requestId}.`);
+  }
+});
+
+test("recognized errors reject malicious request IDs while keeping useful fixed guidance", async () => {
+  for (const request_id of [landing, "fbf22920-3494-4f72-833f-dd34eb2e323b\nSYNTHETIC_SECRET", { request_id: "SYNTHETIC_SECRET" }]) {
+    const ui = await failSignIn({ error_code: "amazon_connect_cookies_unexpected_response", request_id, message: landing });
+    assert.match(ui.node("error").textContent, /Opening the Amazon website session/);
+    assert.equal(ui.node("error").textContent.includes("Request ID:"), false);
+    assert.equal(ui.node("error").textContent.includes("https:"), false);
+  }
 });
