@@ -1,6 +1,6 @@
 [package]
 name = "shipments"
-version = "0.6.16"
+version = "0.6.17"
 edition = "2024"
 license = "MIT AND Apache-2.0"
 description = "A local shipment registry for Home Assistant"
@@ -13,7 +13,7 @@ clap = { version = "4", features = ["derive", "env"] }
 dropshot = "0.17"
 getrandom = "0.4"
 http = "1"
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "cookies"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "cookies", "gzip"] }
 scraper = "0.24"
 schemars = { version = "0.8", features = ["uuid1"] }
 semver = "1"

@@ -1,0 +1,1 @@
+These gzip fixtures contain only synthetic values matching the Amazon client unit fixtures. `orders.html.gz` is a mobile order link, `tracking.html.gz` is its USPS page state, and `oversized.html.gz` expands to 4 MiB + 1 byte of `x` to exercise the decoded body limit. Gzip timestamps are zero.
