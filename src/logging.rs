@@ -51,6 +51,8 @@ struct Fields {
     #[serde(skip_serializing_if = "Option::is_none")]
     response_shape: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    page_kind: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     provider_error_code: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     provider_request_id: Option<Uuid>,
@@ -192,6 +194,12 @@ impl slog::Serializer for Fields {
             "deferred_product" => self.deferred_product = bounded_number(&value.to_string(), 500),
             "deferred_tracking" => self.deferred_tracking = bounded_number(&value.to_string(), 500),
             "deferred_limit" => self.deferred_limit = bounded_number(&value.to_string(), 500),
+            "page_kind" => {
+                self.page_kind = allowed(
+                    &value.to_string(),
+                    &["orders_listing", "item_details", "tracking_page"],
+                )
+            }
             "response_shape" => {
                 self.response_shape = allowed(
                     &value.to_string(),
@@ -205,6 +213,7 @@ impl slog::Serializer for Fields {
                         "encoded_deflate",
                         "encoded_other",
                         "invalid_utf8",
+                        "unclassified_error_page",
                     ],
                 )
             }
@@ -331,6 +340,8 @@ impl slog::Serializer for Fields {
                         "configuration",
                         "unsupported_orders_layout",
                         "challenge_page",
+                        "in_progress",
+                        "provider_challenge_required",
                     ],
                 )
             }

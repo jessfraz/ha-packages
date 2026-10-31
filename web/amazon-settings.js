@@ -64,6 +64,8 @@ const connectionSteps = {
   },
 };
 
+const websiteChallenge = "Amazon is showing a website challenge. The saved sign-in is retained. Open Amazon orders in your browser and complete the requested check, then retry Preview shipments.";
+const isChallengeError = code => code === "amazon_preview_orders_challenge_page" || code === "provider_challenge_required";
 const previewRequestFailures = {
   upstream_rejected: "Amazon no longer accepts the saved sign-in. Reconnect Amazon, then retry Preview shipments.",
   unexpected_response: "Amazon returned a response Shipments could not read. The saved sign-in is retained. Check the app logs before retrying Preview shipments.",
@@ -72,6 +74,7 @@ const previewRequestFailures = {
   rate_limited: "Amazon is limiting requests. The saved sign-in is retained. Wait before retrying Preview shipments.",
   upstream_http: "Amazon returned an unsuccessful response. The saved sign-in is retained. Retry Preview shipments later; check the app logs if it keeps failing.",
   configuration: "The app could not prepare this preview request. The saved sign-in is retained. Check the app configuration and logs before retrying Preview shipments.",
+  in_progress: "An Amazon check is already running. Wait for it to finish before requesting another preview.",
 };
 const previewSteps = {
   access_token: { label: connectionSteps.access_token.label, failures: previewRequestFailures },
@@ -81,7 +84,7 @@ const previewSteps = {
     failures: {
       ...previewRequestFailures,
       unsupported_orders_layout: "Your Amazon sign-in is saved. Shipments does not yet support this orders-page layout, so no unverified shipments were imported. Keep the saved sign-in; the parser needs a compatibility update. Check the app logs.",
-      challenge_page: "Amazon is showing a website challenge. The saved sign-in is retained. Open Amazon orders in your browser and complete the requested check, then retry Preview shipments.",
+      challenge_page: websiteChallenge,
     },
   },
   credentials: {
@@ -95,7 +98,7 @@ const previewSteps = {
 };
 
 function amazonError(error, fallback) {
-  let explanation = fallback;
+  let explanation = error?.code === "provider_challenge_required" ? websiteChallenge : fallback;
   if (typeof error?.code === "string") {
     for (const [operation, steps, instruction] of [
       ["connect", connectionSteps, " Do not reuse the previous final Amazon address."],
@@ -117,7 +120,8 @@ function amazonError(error, fallback) {
 
 function validStatus(value) {
   return value && ["disconnected", "connected", "auth_required"].includes(value.state) &&
-    typeof value.imports_enabled === "boolean";
+    typeof value.imports_enabled === "boolean" &&
+    (value.challenge_required === undefined || typeof value.challenge_required === "boolean");
 }
 
 export function installAmazonSettings(root, request, onUnauthorized) {
@@ -153,29 +157,47 @@ export function installAmazonSettings(root, request, onUnauthorized) {
     byId("amazon-preview-result").hidden = true;
   }
 
+  function appendOrdersLink(target) {
+    const orders = root.ownerDocument.createElement("a");
+    orders.href = "https://www.amazon.com/your-orders/orders";
+    orders.target = "_blank";
+    orders.rel = "noopener noreferrer";
+    orders.textContent = " Open Amazon orders ↗";
+    target.append(orders);
+  }
+
   function render() {
     const connected = status?.state === "connected";
+    const challenged = connected && status.challenge_required === true;
     byId("amazon-state").textContent = status?.state === "auth_required"
       ? "Sign-in required"
-      : connected ? status.imports_enabled ? "Connected" : previewed ? "Signed in · preview checked" : "Signed in · preview required" : "Not connected";
+      : challenged ? "Verification required"
+      : connected ? status.imports_enabled ? "Connected" : previewed ? "Signed in · preview checked" : "Signed in · preview required"
+      : "Not connected";
     byId("amazon-description").textContent = status?.state === "auth_required"
       ? "Amazon no longer accepts the saved sign-in. Reconnect to resume shipment updates."
-      : connected ? status.imports_enabled
-        ? "New shipments are imported automatically using the same tracking schedule as your other shipments."
-        : "Your Amazon sign-in is saved. Preview shipments to check page support before enabling automatic imports. The preview leaves saved shipments unchanged."
+      : challenged ? "Your saved sign-in is retained. Open Amazon orders in your browser, complete any requested check, then choose Preview shipments."
+      : connected
+        ? status.imports_enabled
+          ? "New shipments are imported automatically using the same tracking schedule as your other shipments."
+          : "Your Amazon sign-in is saved. Preview shipments to check page support before enabling automatic imports. The preview leaves saved shipments unchanged."
       : "Connect one Amazon.com account to find shipments automatically. Your password and verification stay on Amazon.";
-    byId("amazon-check-note").textContent = connected && status.last_error_code
-      ? status.imports_enabled
-        ? "The last Amazon check failed. Saved shipments remain available, and tracking will retry automatically."
-        : "The last preview check failed. Your sign-in is saved. Retry Preview shipments after resolving the reported issue."
+    byId("amazon-check-note").replaceChildren();
+    byId("amazon-check-note").textContent = challenged
+      ? "Automatic checks are paused. Saved shipments remain available."
+      : connected && status.last_error_code
+        ? status.imports_enabled
+          ? "The last Amazon check failed. Saved shipments remain available, and tracking will retry automatically."
+          : "The last preview check failed. Your sign-in is saved. Retry Preview shipments after resolving the reported issue."
       : "";
+    if (challenged && !byId("amazon-error").textContent) appendOrdersLink(byId("amazon-check-note"));
     byId("amazon-last-success").textContent = status?.last_success_at && Number.isFinite(Date.parse(status.last_success_at))
       ? `Last successful check: ${new Date(status.last_success_at).toLocaleString()}.` : "";
     byId("amazon-start").textContent = status?.state === "disconnected" || !status ? "Connect Amazon" : "Reconnect Amazon";
-    byId("amazon-start").hidden = Boolean(flowId);
+    byId("amazon-start").hidden = Boolean(flowId) || challenged;
     byId("amazon-preview").hidden = !connected;
-    byId("amazon-enable").hidden = !connected || status.imports_enabled || !previewed;
-    byId("amazon-refresh").hidden = !connected || !status.imports_enabled;
+    byId("amazon-enable").hidden = !connected || challenged || status.imports_enabled || !previewed;
+    byId("amazon-refresh").hidden = !connected || challenged || !status.imports_enabled;
     byId("amazon-disconnect").hidden = !status || status.state === "disconnected";
     for (const control of root.querySelectorAll("button, input"))
       control.disabled = !owner || (busy && control.id !== "amazon-cancel");
@@ -192,7 +214,8 @@ export function installAmazonSettings(root, request, onUnauthorized) {
 
   function updateStatus(value) {
     if (!owner || !validStatus(value)) return;
-    if (status?.state !== value.state && value.state !== "connected") {
+    if ((status?.state !== value.state && value.state !== "connected") ||
+        (value.challenge_required === true && status?.challenge_required !== true)) {
       clearPreview();
       if (!busy) message("");
     }
@@ -215,15 +238,10 @@ export function installAmazonSettings(root, request, onUnauthorized) {
         onUnauthorized();
         return;
       }
+      if (isChallengeError(error.code) && status?.state === "connected")
+        updateStatus({ ...status, challenge_required: true });
       message(amazonError(error, failure), true);
-      if (error.code === "amazon_preview_orders_challenge_page") {
-        const orders = root.ownerDocument.createElement("a");
-        orders.href = "https://www.amazon.com/your-orders/orders";
-        orders.target = "_blank";
-        orders.rel = "noopener noreferrer";
-        orders.textContent = " Open Amazon orders ↗";
-        byId("amazon-error").append(orders);
-      }
+      if (isChallengeError(error.code)) appendOrdersLink(byId("amazon-error"));
     } finally {
       if (current === generation) {
         busy = false;
@@ -233,29 +251,32 @@ export function installAmazonSettings(root, request, onUnauthorized) {
     }
   }
 
-  byId("amazon-start").addEventListener("click", () => run(
-    "Preparing Amazon sign-in…", "Could not prepare sign-in. Try Connect Amazon again.",
-    async (signal, current) => {
-      clearFlow();
-      const flow = await request("v1/amazon/sign-in", { method: "POST", body: "{}", signal });
-      if (!current()) return;
-      const url = amazonSignInUrl(flow?.url);
-      if (!url || typeof flow.flow_id !== "string" || !flow.flow_id || flow.flow_id.length > 200)
-        throw new Error("Invalid sign-in response");
-      flowId = flow.flow_id;
-      byId("amazon-sign-in-link").href = url;
-      byId("amazon-sign-in").hidden = false;
-      message("Open the Amazon sign-in link, then return here with the final address.");
-      byId("amazon-sign-in-link").focus();
-      expiryTimer = setTimeout(() => {
-        if (!flowId || current() === false) return;
+  byId("amazon-start").addEventListener("click", () => {
+    if (status?.state === "connected" && status.challenge_required === true) return;
+    return run(
+      "Preparing Amazon sign-in…", "Could not prepare sign-in. Try Connect Amazon again.",
+      async (signal, current) => {
         clearFlow();
-        message("This sign-in link expired. Choose Connect Amazon to start again.", true);
-        render();
-      }, 10 * 60 * 1000);
-      expiryTimer.unref?.();
-    },
-  ));
+        const flow = await request("v1/amazon/sign-in", { method: "POST", body: "{}", signal });
+        if (!current()) return;
+        const url = amazonSignInUrl(flow?.url);
+        if (!url || typeof flow.flow_id !== "string" || !flow.flow_id || flow.flow_id.length > 200)
+          throw new Error("Invalid sign-in response");
+        flowId = flow.flow_id;
+        byId("amazon-sign-in-link").href = url;
+        byId("amazon-sign-in").hidden = false;
+        message("Open the Amazon sign-in link, then return here with the final address.");
+        byId("amazon-sign-in-link").focus();
+        expiryTimer = setTimeout(() => {
+          if (!flowId || current() === false) return;
+          clearFlow();
+          message("This sign-in link expired. Choose Connect Amazon to start again.", true);
+          render();
+        }, 10 * 60 * 1000);
+        expiryTimer.unref?.();
+      },
+    );
+  });
 
   byId("amazon-sign-in-link").addEventListener("click", event => {
     if (!owner || busy || !flowId) event.preventDefault();
@@ -304,6 +325,7 @@ export function installAmazonSettings(root, request, onUnauthorized) {
             typeof item.tracking?.number !== "string" || !item.tracking.number || item.tracking.number.length > 256 ||
             typeof item.tracking?.carrier !== "string" || !item.tracking.carrier || item.tracking.carrier.length > 100 ||
             (item.order_reference != null && (typeof item.order_reference !== "string" || item.order_reference.length > 500)))) throw new Error("Invalid preview response");
+      if (status?.state === "connected") updateStatus({ ...status, challenge_required: false });
       const list = byId("amazon-preview-list");
       for (const shipment of result.shipments) {
         const row = root.ownerDocument.createElement("li");
@@ -327,7 +349,7 @@ export function installAmazonSettings(root, request, onUnauthorized) {
   ));
 
   byId("amazon-enable").addEventListener("click", () => {
-    if (!previewed || status?.state !== "connected" || status.imports_enabled) return;
+    if (!previewed || status?.state !== "connected" || status.challenge_required === true || status.imports_enabled) return;
     return run(
       "Enabling automatic imports…", "Could not confirm automatic imports. Reopen Amazon settings to check before retrying.",
       async (signal, current) => {
@@ -340,13 +362,16 @@ export function installAmazonSettings(root, request, onUnauthorized) {
     );
   });
 
-  byId("amazon-refresh").addEventListener("click", () => run(
-    "Queuing a tracking check…", "Could not queue a check. Reopen Amazon settings to check the connection.",
-    async (signal, current) => {
-      await request("v1/amazon/refresh", { method: "POST", body: "{}", signal });
-      if (current()) message("Tracking check queued. Existing rate limits and retry delays still apply.");
-    },
-  ));
+  byId("amazon-refresh").addEventListener("click", () => {
+    if (status?.state === "connected" && status.challenge_required === true) return;
+    return run(
+      "Queuing a tracking check…", "Could not queue a check. Reopen Amazon settings to check the connection.",
+      async (signal, current) => {
+        await request("v1/amazon/refresh", { method: "POST", body: "{}", signal });
+        if (current()) message("Tracking check queued. Existing rate limits and retry delays still apply.");
+      },
+    );
+  });
 
   byId("amazon-disconnect").addEventListener("click", () => run(
     "Disconnecting Amazon…", "Could not confirm disconnection. Reopen Amazon settings to check before retrying.",
@@ -396,7 +421,7 @@ export function installAmazonSettings(root, request, onUnauthorized) {
       if (!owner) return;
       root.open = true;
       root.scrollIntoView({ block: "start" });
-      byId("amazon-start").focus({ preventScroll: true });
+      byId(status?.state === "connected" && status.challenge_required === true ? "amazon-preview" : "amazon-start").focus({ preventScroll: true });
     },
   };
 }

@@ -878,14 +878,16 @@ fn amazon_connection_error(
         "operation" => error.stage.as_str(), "outcome" => "error",
         "error_code" => error.reason.as_str(), "provider_status" => error.upstream_status,
         "response_shape" => error.response_shape,
+        "page_kind" => error.page_kind.map(crate::amazon::connection::PageKind::as_str),
+        "retry_after_seconds" => error.retry_after(),
         "duration_ms" => u64::try_from(elapsed.as_millis()).unwrap_or(86_400_000));
     let status_code = match error.reason {
         ConnectionReason::InvalidInput
         | ConnectionReason::ExpiredFlow
         | ConnectionReason::UpstreamRejected => ErrorStatusCode::BAD_REQUEST,
-        ConnectionReason::AccountMismatch | ConnectionReason::SessionChanged => {
-            ErrorStatusCode::CONFLICT
-        }
+        ConnectionReason::AccountMismatch
+        | ConnectionReason::SessionChanged
+        | ConnectionReason::InProgress => ErrorStatusCode::CONFLICT,
         ConnectionReason::RateLimited => ErrorStatusCode::TOO_MANY_REQUESTS,
         ConnectionReason::Timeout => ErrorStatusCode::GATEWAY_TIMEOUT,
         ConnectionReason::Configuration

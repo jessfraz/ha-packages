@@ -352,14 +352,14 @@ test("unsupported Amazon orders pages retain the saved sign-in without requestin
   assert.equal(ui.calls.length, 1);
 });
 
-async function failPreview(body) {
+async function failPreview(body, expectedState = "Signed in · preview required") {
   const ui = setup(connected);
   ui.replies.push(new ApiError(`DO_NOT_DISPLAY ${landing}`, 502, body));
   await ui.click("preview");
   assert.equal(ui.node("enable").hidden, true);
   assert.equal(ui.node("preview").hidden, false);
   assert.equal(ui.node("sign-in").hidden, true);
-  assert.equal(ui.node("state").textContent, "Signed in · preview required");
+  assert.equal(ui.node("state").textContent, expectedState);
   assert.equal(ui.node("error").textContent.includes("SYNTHETIC_SECRET"), false);
   assert.equal(ui.node("error").textContent.includes("DO_NOT_DISPLAY"), false);
   assert.equal(ui.calls.length, 1, "preview does not trigger a new sign-in or another request");
@@ -389,7 +389,7 @@ test("a website challenge offers only the fixed Amazon orders link and a manual 
   const ui = await failPreview({
     error_code: "amazon_preview_orders_challenge_page", message: landing,
     url: "https://evil.test/?token=SYNTHETIC_SECRET",
-  });
+  }, "Verification required");
   assert.match(ui.node("error").textContent, /website challenge/);
   assert.match(ui.node("error").textContent, /complete the requested check, then retry Preview shipments/);
   assert.doesNotMatch(ui.node("error").textContent, /new sign-in|reuse|Reconnect Amazon/i);
@@ -453,4 +453,91 @@ test("unsupported preview pairs and unsafe metadata never display provider text 
     assert.equal(ui.node("error").children.length, 0);
     assert.doesNotMatch(ui.node("error").textContent, /new sign-in|reuse|Reconnect Amazon/i);
   }
+});
+
+
+test("a saved website challenge pauses automatic actions and offers manual verification", () => {
+  const ui = setup({ ...connected, imports_enabled: true, challenge_required: true });
+  assert.equal(ui.node("state").textContent, "Verification required");
+  assert.match(ui.node("description").textContent, /saved sign-in/i);
+  assert.match(ui.node("description").textContent, /complete any requested check.*Preview shipments/i);
+  assert.match(ui.node("check-note").textContent, /Automatic checks are paused/);
+  assert.equal(ui.node("check-note").children.length, 1);
+  const link = ui.node("check-note").children[0];
+  assert.equal(link.href, "https://www.amazon.com/your-orders/orders");
+  assert.equal(link.target, "_blank");
+  assert.equal(link.rel, "noopener noreferrer");
+  assert.equal(ui.node("preview").hidden, false);
+  assert.equal(ui.node("preview").disabled, false);
+  assert.equal(ui.node("enable").hidden, true);
+  assert.equal(ui.node("refresh").hidden, true);
+  assert.equal(ui.node("start").hidden, true);
+  ui.settings.open();
+  assert.equal(ui.node("preview").focused, true);
+  ui.settings.updateStatus({ ...connected, challenge_required: "false" });
+  assert.equal(ui.node("state").textContent, "Verification required", "invalid challenge metadata cannot clear the trusted pause");
+  assert.deepEqual(ui.calls, [], "verification guidance does not start sign-in or a request");
+});
+
+test("a challenge invalidates prior preview permission until manual preview succeeds", async () => {
+  const ui = setup(connected);
+  const preview = { shipments: [{ title: "Synthetic parcel", tracking: { carrier: "USPS", number: "SYNTHETIC" } }], deferred: 0 };
+  ui.replies.push(preview);
+  await ui.click("preview");
+  assert.equal(ui.node("enable").hidden, false);
+  ui.settings.updateStatus({ ...connected, challenge_required: true });
+  assert.equal(ui.node("state").textContent, "Verification required");
+  assert.equal(ui.node("preview-list").children.length, 0);
+  assert.equal(ui.node("enable").hidden, true);
+  await ui.click("enable");
+  await ui.click("refresh");
+  await ui.click("start");
+  assert.equal(ui.calls.length, 1, "paused automatic actions cannot submit hidden controls");
+  ui.replies.push(preview);
+  await ui.click("preview");
+  assert.equal(ui.node("state").textContent, "Signed in · preview checked");
+  assert.equal(ui.node("enable").hidden, false);
+  assert.equal(ui.node("start").hidden, false);
+  assert.equal(ui.node("check-note").children.length, 0);
+  assert.deepEqual(ui.calls.map(call => call.path), ["v1/amazon/preview", "v1/amazon/preview"]);
+});
+
+test("manual verification recovery retains already enabled imports", async () => {
+  const ui = setup({ ...connected, imports_enabled: true, challenge_required: true });
+  ui.replies.push({ shipments: [], deferred: 0 });
+  await ui.click("preview");
+  assert.equal(ui.node("state").textContent, "Connected");
+  assert.equal(ui.node("refresh").hidden, false);
+  assert.equal(ui.node("enable").hidden, true);
+  assert.deepEqual(ui.calls.map(call => call.path), ["v1/amazon/preview"]);
+});
+
+test("a challenge rejected during enabling retains sign-in and requires another preview", async () => {
+  const ui = setup(connected);
+  const preview = { shipments: [{ title: "Synthetic parcel", tracking: { carrier: "USPS", number: "SYNTHETIC" } }], deferred: 0 };
+  ui.replies.push(preview);
+  await ui.click("preview");
+  ui.replies.push(new ApiError(`DO_NOT_DISPLAY ${landing}`, 409, { error_code: "provider_challenge_required" }));
+  await ui.click("enable");
+  assert.equal(ui.node("state").textContent, "Verification required");
+  assert.equal(ui.node("enable").hidden, true);
+  assert.equal(ui.node("preview-list").children.length, 0);
+  assert.match(ui.node("error").textContent, /saved sign-in.*retained/i);
+  assert.match(ui.node("error").textContent, /complete the requested check.*retry Preview shipments/i);
+  assert.doesNotMatch(ui.node("error").textContent, /Reconnect|new sign-in|DO_NOT_DISPLAY|SYNTHETIC_SECRET/i);
+  assert.equal(ui.node("error").children[0].href, "https://www.amazon.com/your-orders/orders");
+  await ui.click("enable");
+  assert.equal(ui.calls.length, 2, "the failed enable is not retried automatically");
+  ui.replies.push(preview);
+  await ui.click("preview");
+  assert.equal(ui.node("state").textContent, "Signed in · preview checked");
+  assert.equal(ui.node("enable").hidden, false);
+});
+
+test("an existing account check asks the user to wait without starting another action", async () => {
+  const ui = await failPreview({ error_code: "amazon_preview_orders_in_progress", message: landing });
+  assert.match(ui.node("error").textContent, /check is already running/i);
+  assert.match(ui.node("error").textContent, /Wait for it to finish/);
+  assert.doesNotMatch(ui.node("error").textContent, /Reconnect|new sign-in|SYNTHETIC_SECRET/i);
+  assert.equal(ui.calls.length, 1);
 });

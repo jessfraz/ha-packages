@@ -42,9 +42,10 @@ use crate::{
 };
 
 const MAX_BODY: usize = 4 * 1024 * 1024;
-const MAX_TRACK_LOADS: usize = 10;
+const MAX_TRACK_LOADS: usize = 5;
 const FLOW_LIFETIME: Duration = Duration::from_secs(600);
-const REQUEST_PAUSE: Duration = Duration::from_secs(1);
+const REQUEST_PAUSE: Duration = Duration::from_secs(2);
+const ACCOUNT_OPERATION_TIMEOUT: Duration = Duration::from_secs(120);
 
 pub(crate) fn provider_error(kind: ErrorKind) -> Error {
     Error::new(ProviderId::AmazonAccount, kind)
@@ -65,6 +66,8 @@ pub struct AmazonStatus {
     pub last_success_at: Option<String>,
     pub last_error_code: Option<String>,
     pub imports_enabled: bool,
+    #[serde(default)]
+    pub challenge_required: bool,
 }
 
 #[derive(Serialize, JsonSchema)]
@@ -116,6 +119,8 @@ struct Credential {
     #[serde(default)]
     auth_required: bool,
     #[serde(default)]
+    challenge_required: bool,
+    #[serde(default)]
     last_success_at: Option<String>,
 }
 struct Flow {
@@ -137,6 +142,44 @@ struct State {
 struct RequestSchedule {
     next: Instant,
     cooldown: Option<Instant>,
+    failures: u32,
+}
+
+impl RequestSchedule {
+    fn defer(
+        &mut self,
+        server_delay: Option<i64>,
+        now: Instant,
+        jitter_key: &str,
+    ) -> Result<i64, Error> {
+        self.failures = self.failures.saturating_add(1);
+        // Reuse the shared exponential policy at five times its normal rate.
+        let base = crate::sync::retry_delay(i64::from(self.failures), 0)
+            .saturating_mul(5)
+            .min(crate::sync::MAX_RETRY_SECONDS)
+            .max(server_delay.unwrap_or(0));
+        let delay = if base > crate::sync::MAX_RETRY_SECONDS {
+            base
+        } else {
+            crate::sync::jitter(base, jitter_key).min(crate::sync::MAX_RETRY_SECONDS)
+        };
+        self.cooldown = Some(
+            now.checked_add(Duration::from_secs(delay.unsigned_abs()))
+                .ok_or_else(|| provider_error(ErrorKind::Configuration))?,
+        );
+        Ok(delay)
+    }
+
+    fn failure(&mut self, kind: ErrorKind) -> Error {
+        match self.defer(None, Instant::now(), &Uuid::now_v7().to_string()) {
+            Ok(delay) => {
+                let mut error = provider_error(kind);
+                error.set_retry_after(delay);
+                error
+            }
+            Err(error) => error,
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -146,12 +189,15 @@ pub struct AmazonClient {
     paused: Arc<AtomicBool>,
     epoch: Arc<AtomicU64>,
     request_generation: Option<u64>,
-    session: Arc<Mutex<()>>,
+    // One account operation at a time; cookie refresh has its own short guard.
+    account_work: Arc<Mutex<()>>,
+    session: Arc<Mutex<Option<Instant>>>,
     requests: Arc<Mutex<RequestSchedule>>,
     jar: Arc<RwLock<Arc<Jar>>>,
     http: Client,
     loopback: Option<Url>,
     pause: Duration,
+    operation_timeout: Duration,
 }
 
 /// Keep the account generation stable until the caller's short database commit.
@@ -168,8 +214,8 @@ impl AmazonClient {
         let generation = credential.as_ref().map_or(0, |value| value.generation);
         let paused = credential
             .as_ref()
-            .is_none_or(|c| c.auth_required || !c.imports_enabled);
-        let http = Client::builder().timeout(Duration::from_secs(20)).redirect(reqwest::redirect::Policy::none())
+            .is_none_or(|c| c.auth_required || c.challenge_required || !c.imports_enabled);
+        let http = Client::builder().connect_timeout(Duration::from_secs(10)).timeout(Duration::from_secs(45)).redirect(reqwest::redirect::Policy::none())
             .user_agent("Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1")
             .build().map_err(|_| provider_error(ErrorKind::Configuration))?;
         Ok(Self {
@@ -186,15 +232,18 @@ impl AmazonClient {
             paused: Arc::new(AtomicBool::new(paused)),
             epoch: Arc::new(AtomicU64::new(generation)),
             request_generation: None,
-            session: Arc::new(Mutex::new(())),
+            account_work: Arc::new(Mutex::new(())),
+            session: Arc::new(Mutex::new(None)),
             requests: Arc::new(Mutex::new(RequestSchedule {
                 next: Instant::now(),
                 cooldown: None,
+                failures: 0,
             })),
             jar: Arc::new(RwLock::new(Arc::new(Jar::default()))),
             http,
             loopback: None,
             pause: REQUEST_PAUSE,
+            operation_timeout: ACCOUNT_OPERATION_TIMEOUT,
         })
     }
 
@@ -235,6 +284,7 @@ impl AmazonClient {
                 last_success_at: c.last_success_at.clone(),
                 last_error_code: state.last_error.clone(),
                 imports_enabled: c.imports_enabled,
+                challenge_required: c.challenge_required,
             },
         }
     }
@@ -255,7 +305,7 @@ impl AmazonClient {
             || state
                 .credential
                 .as_ref()
-                .is_none_or(|c| c.auth_required || !c.imports_enabled)
+                .is_none_or(|c| c.auth_required || c.challenge_required || !c.imports_enabled)
         {
             return Err(provider_error(ErrorKind::AuthenticationRequired));
         }
@@ -315,6 +365,14 @@ impl AmazonClient {
         flow_id: &str,
         landing_url: &str,
     ) -> Result<AmazonStatus, ConnectionError> {
+        let _work = self.account_work.try_lock().map_err(|_| {
+            let mut error = ConnectionError::new(
+                ConnectionStage::Flow,
+                provider_error(ErrorKind::Throttled { retry_after: 5 }),
+            );
+            error.reason = ConnectionReason::InProgress;
+            error
+        })?;
         let code = auth::code(landing_url).map_err(|_| {
             ConnectionError::failure(ConnectionStage::Callback, ConnectionReason::InvalidInput)
         })?;
@@ -334,7 +392,7 @@ impl AmazonClient {
             })?;
             (flow, state.generation)
         };
-        let _session = self.session.lock().await;
+        let mut session = self.session.lock().await;
         let registration = auth::register(self, &flow.serial, &flow.verifier, &code).await?;
         {
             let state = self.state.lock().await;
@@ -374,6 +432,7 @@ impl AmazonClient {
             generation: generation.saturating_add(1),
             imports_enabled,
             auth_required: false,
+            challenge_required: false,
             last_success_at: Some(
                 now().map_err(|e| ConnectionError::new(ConnectionStage::Credentials, e))?,
             ),
@@ -387,13 +446,16 @@ impl AmazonClient {
         state.last_error = None;
         state.cursor = 0;
         state.observed.clear();
+        *session = None;
+        self.clear_cookies()
+            .map_err(|e| ConnectionError::new(ConnectionStage::Cookies, e))?;
         self.paused.store(!imports_enabled, Ordering::Release);
         drop(state);
         Ok(self.status().await)
     }
 
     pub async fn disconnect(&self) -> Result<AmazonStatus, Error> {
-        let _session = self.session.lock().await;
+        let mut session = self.session.lock().await;
         let mut state = self.state.lock().await;
         match std::fs::remove_file(&*self.path) {
             Ok(()) => {}
@@ -407,6 +469,7 @@ impl AmazonClient {
         state.last_error = None;
         state.imported.clear();
         state.observed.clear();
+        *session = None;
         self.clear_cookies()?;
         self.paused.store(true, Ordering::Release);
         Ok(AmazonStatus::default())
@@ -420,6 +483,12 @@ impl AmazonClient {
             .filter(|c| !c.auth_required)
             .cloned()
             .ok_or_else(|| provider_error(ErrorKind::AuthenticationRequired))?;
+        if credential.challenge_required {
+            return Err(provider_error(ErrorKind::ProviderChallenge {
+                status: None,
+                retry_after: None,
+            }));
+        }
         credential.imports_enabled = true;
         save(&self.path, &credential)?;
         state.credential = Some(credential);
@@ -430,12 +499,52 @@ impl AmazonClient {
     }
 
     pub async fn discover(&self) -> Result<Discovery, Error> {
-        self.preview().await.map_err(ConnectionError::into_provider)
+        self.check_account(AccountCheck::Discovery)
+            .await
+            .map_err(ConnectionError::into_provider)
     }
 
     pub async fn preview(&self) -> Result<Discovery, ConnectionError> {
+        self.check_account(AccountCheck::Preview).await
+    }
+
+    async fn check_account(&self, check: AccountCheck) -> Result<Discovery, ConnectionError> {
+        let _work = self.account_work.try_lock().map_err(|_| {
+            let mut error = ConnectionError::new(
+                ConnectionStage::Orders,
+                provider_error(ErrorKind::Throttled { retry_after: 5 }),
+            );
+            error.reason = ConnectionReason::InProgress;
+            error
+        })?;
+        // Recovery is an explicit owner action. A background worker can have
+        // passed its pause check before another request records a challenge.
+        if matches!(check, AccountCheck::Discovery)
+            && self
+                .state
+                .lock()
+                .await
+                .credential
+                .as_ref()
+                .is_some_and(|c| c.challenge_required)
+        {
+            return Err(ConnectionError::new(
+                ConnectionStage::Orders,
+                provider_error(ErrorKind::ProviderChallenge {
+                    status: None,
+                    retry_after: None,
+                }),
+            ));
+        }
         let generation = self.generation().await;
-        let result = self.discover_inner().await;
+        let result = match tokio::time::timeout(self.operation_timeout, self.discover_inner()).await
+        {
+            Ok(result) => result,
+            Err(_) => {
+                let error = self.requests.lock().await.failure(ErrorKind::Timeout);
+                Err(ConnectionError::new(ConnectionStage::Orders, error))
+            }
+        };
         if let Err(error) = &result {
             self.record_error(generation, error.provider_error())
                 .await
@@ -461,8 +570,8 @@ impl AmazonClient {
         // Validate the saved refresh token once for the account's discovery
         // cycle, including when no parcels exist. Per-parcel reads share cookies.
         {
-            let _session = self.session.lock().await;
-            self.authenticate_saved(generation).await?;
+            let mut session = self.session.lock().await;
+            self.ensure_session(&mut session, generation).await?;
         }
         let listing = self.order_listing().await?;
         let mut parcels = Vec::new();
@@ -544,10 +653,17 @@ impl AmazonClient {
         if let Some(c) = &mut state.credential {
             c.last_success_at =
                 Some(now().map_err(|e| ConnectionError::new(ConnectionStage::Credentials, e))?);
+            c.challenge_required = false;
             save(&self.path, c)
                 .map_err(|e| ConnectionError::new(ConnectionStage::Credentials, e))?;
+            self.paused.store(!c.imports_enabled, Ordering::Release);
         }
         state.last_error = None;
+        drop(state);
+        let mut requests = self.requests.lock().await;
+        requests.failures = 0;
+        requests.cooldown = None;
+        drop(requests);
         Ok(Discovery {
             generation,
             parcels,
@@ -611,15 +727,18 @@ impl AmazonClient {
         }
         tokio::time::sleep_until(slot.next).await;
         slot.next = Instant::now() + self.pause;
-        let mut response = request.send().await.map_err(|e| {
-            provider_error(if e.is_timeout() {
-                ErrorKind::Timeout
-            } else {
-                ErrorKind::Connection
-            })
-        })?;
+        let mut response = match request.send().await {
+            Ok(response) => response,
+            Err(error) => {
+                return Err(slot.failure(if error.is_timeout() {
+                    ErrorKind::Timeout
+                } else {
+                    ErrorKind::Connection
+                }));
+            }
+        };
         let status = response.status().as_u16();
-        let headers = response.headers().clone();
+        let mut headers = response.headers().clone();
         // Website responses may rotate their own session cookies. Never accept
         // cookies from an arbitrary redirect target or from the test transport.
         if response.url().scheme() == "https" && response.url().host_str() == Some("www.amazon.com")
@@ -641,19 +760,33 @@ impl AmazonClient {
             return Err(provider_error(ErrorKind::ResponseTooLarge));
         }
         let mut bytes = Vec::new();
-        while let Some(chunk) = response
-            .chunk()
-            .await
-            .map_err(|_| provider_error(ErrorKind::Connection))?
-        {
+        loop {
+            let chunk = match response.chunk().await {
+                Ok(Some(chunk)) => chunk,
+                Ok(None) => break,
+                Err(error) => {
+                    return Err(slot.failure(if error.is_timeout() {
+                        ErrorKind::Timeout
+                    } else {
+                        ErrorKind::Connection
+                    }));
+                }
+            };
             if chunk.len() > MAX_BODY.saturating_sub(bytes.len()) {
                 return Err(provider_error(ErrorKind::ResponseTooLarge));
             }
             bytes.extend_from_slice(&chunk);
         }
         if matches!(status, 429 | 503) {
-            slot.cooldown = Some(
-                Instant::now() + Duration::from_secs(retry_after(&headers).unwrap_or(60) as u64),
+            let delay = slot.defer(
+                retry_after(&headers),
+                Instant::now(),
+                &Uuid::now_v7().to_string(),
+            )?;
+            headers.insert(
+                reqwest::header::RETRY_AFTER,
+                reqwest::header::HeaderValue::from_str(&delay.to_string())
+                    .map_err(|_| provider_error(ErrorKind::Configuration))?,
             );
         }
         Ok((status, headers, bytes))
@@ -693,20 +826,35 @@ impl AmazonClient {
         let stage = ConnectionStage::Orders;
         let mut path = pages::allowed_path(path).map_err(|e| ConnectionError::new(stage, e))?;
         for _ in 0..3 {
+            let kind = pages::page_kind(&path);
             let request = self
                 .request(Method::GET, &format!("{}{path}", pages::ORIGIN))
                 .map_err(|e| ConnectionError::new(stage, e))?;
             let (status, headers, body) = self
                 .response(request)
                 .await
-                .map_err(|e| ConnectionError::new(stage, e))?;
+                .map_err(|e| ConnectionError::new(stage, e).with_page_kind(kind))?;
             let invalid = || {
                 ConnectionError::with_status(
                     stage,
                     provider_error(ErrorKind::InvalidResponse),
                     status,
                 )
+                .with_page_kind(kind)
             };
+            if std::str::from_utf8(&body).is_ok_and(|page| pages::orders_shape(page) == "challenge")
+            {
+                return Err(ConnectionError::with_status(
+                    stage,
+                    provider_error(ErrorKind::ProviderChallenge {
+                        status: Some(status),
+                        retry_after: retry_after(&headers),
+                    }),
+                    status,
+                )
+                .with_page_kind(kind)
+                .with_shape("challenge"));
+            }
             if (300..400).contains(&status) {
                 let location = headers
                     .get(reqwest::header::LOCATION)
@@ -740,11 +888,11 @@ impl AmazonClient {
                         retry_after: retry_after(&headers),
                     }
                 };
-                return Err(ConnectionError::with_status(
-                    stage,
-                    provider_error(kind),
-                    status,
-                ));
+                return Err(
+                    ConnectionError::with_status(stage, provider_error(kind), status)
+                        .with_page_kind(pages::page_kind(&path))
+                        .with_shape("unclassified_error_page"),
+                );
             }
             let page = String::from_utf8(body).map_err(|_| {
                 let shape = match headers
@@ -863,47 +1011,49 @@ impl AmazonClient {
         Err(last)
     }
 
+    async fn ensure_session(
+        &self,
+        session: &mut Option<Instant>,
+        generation: u64,
+    ) -> Result<(), ConnectionError> {
+        let lifetime =
+            Duration::from_secs(crate::sync::discovery_delay("amazon_account").unsigned_abs());
+        if session.is_none_or(|at| Instant::now().saturating_duration_since(at) >= lifetime) {
+            self.authenticate_saved(generation).await?;
+            *session = Some(Instant::now());
+        }
+        Ok(())
+    }
+
     async fn fetch_page(&self, path: &str) -> Result<String, Error> {
         self.fetch_page_detailed(path)
             .await
             .map_err(ConnectionError::into_provider)
     }
     async fn fetch_page_detailed(&self, path: &str) -> Result<String, ConnectionError> {
-        let _session = self.session.lock().await;
+        let path = pages::allowed_path(path)
+            .map_err(|e| ConnectionError::new(ConnectionStage::Orders, e))?;
+        let mut session = self.session.lock().await;
         let generation = self.generation().await;
-        let origin = Url::parse(pages::ORIGIN).map_err(|_| {
-            ConnectionError::new(
-                ConnectionStage::Cookies,
-                provider_error(ErrorKind::Configuration),
-            )
-        })?;
-        let empty = self
-            .jar
-            .read()
-            .map_err(|_| {
-                ConnectionError::new(
-                    ConnectionStage::Cookies,
-                    provider_error(ErrorKind::Configuration),
-                )
-            })?
-            .cookies(&origin)
-            .is_none();
-        if empty {
-            self.authenticate_saved(generation).await?;
-        }
-        match self.page_once(path).await? {
+        self.ensure_session(&mut session, generation).await?;
+        match self.page_once(&path).await? {
             Page::Body(page) => Ok(page),
             Page::SignedOut(_) => {
                 self.clear_cookies()
                     .map_err(|e| ConnectionError::new(ConnectionStage::Cookies, e))?;
-                self.authenticate_saved(generation).await?;
-                match self.page_once(path).await? {
+                *session = None;
+                self.ensure_session(&mut session, generation).await?;
+                match self.page_once(&path).await? {
                     Page::Body(page) => Ok(page),
-                    Page::SignedOut(status) => Err(ConnectionError::failure(
+                    Page::SignedOut(status) => Err(ConnectionError::with_status(
                         ConnectionStage::Orders,
-                        ConnectionReason::ChallengePage,
+                        provider_error(ErrorKind::ProviderChallenge {
+                            status: Some(status),
+                            retry_after: None,
+                        }),
+                        status,
                     )
-                    .with_upstream_status(status)
+                    .with_page_kind(pages::page_kind(&path))
                     .with_shape("sign_in")),
                 }
             }
@@ -913,10 +1063,25 @@ impl AmazonClient {
         let mut state = self.state.lock().await;
         if state.generation == generation {
             state.last_error = Some(error.error_code().into());
-            if matches!(error.kind, ErrorKind::AuthenticationRequired) {
+            if matches!(error.kind, ErrorKind::ProviderChallenge { .. }) {
+                if let Some(mut credential) = state.credential.clone()
+                    && !credential.challenge_required
+                {
+                    credential.challenge_required = true;
+                    credential.generation = state.generation.saturating_add(1);
+                    save(&self.path, &credential)?;
+                    state.generation = credential.generation;
+                    self.epoch.store(credential.generation, Ordering::Release);
+                    state.credential = Some(credential);
+                    state.observed.clear();
+                    state.imported.clear();
+                }
+                self.paused.store(true, Ordering::Release);
+            } else if matches!(error.kind, ErrorKind::AuthenticationRequired) {
                 self.paused.store(true, Ordering::Release);
                 if let Some(c) = &mut state.credential {
                     c.auth_required = true;
+                    c.challenge_required = false;
                     save(&self.path, c)?;
                 }
             }
@@ -924,8 +1089,18 @@ impl AmazonClient {
         Ok(())
     }
     async fn retrieve_page(&self, path: &str, number: &str) -> Result<Tracker, Error> {
+        let _work = self
+            .account_work
+            .try_lock()
+            .map_err(|_| provider_error(ErrorKind::Throttled { retry_after: 5 }))?;
         let generation = self.request_generation.unwrap_or(self.generation().await);
-        let result = self.retrieve_inner(path, number).await;
+        let result =
+            match tokio::time::timeout(self.operation_timeout, self.retrieve_inner(path, number))
+                .await
+            {
+                Ok(result) => result,
+                Err(_) => Err(self.requests.lock().await.failure(ErrorKind::Timeout)),
+            };
         if let Err(error) = &result {
             self.record_error(generation, error).await?;
         }
@@ -939,6 +1114,12 @@ impl AmazonClient {
                 .as_ref()
                 .filter(|c| !c.auth_required)
                 .ok_or_else(|| provider_error(ErrorKind::AuthenticationRequired))?;
+            if credential.challenge_required {
+                return Err(provider_error(ErrorKind::ProviderChallenge {
+                    status: None,
+                    retry_after: None,
+                }));
+            }
             (state.generation, credential.customer_id.clone())
         };
         if self
@@ -970,17 +1151,30 @@ impl AmazonClient {
     }
 }
 
+#[derive(Clone, Copy)]
+enum AccountCheck {
+    Preview,
+    Discovery,
+}
+
 enum Page {
     Body(String),
     SignedOut(u16),
 }
 
 fn retry_after(headers: &HeaderMap) -> Option<i64> {
-    headers
-        .get(reqwest::header::RETRY_AFTER)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.parse::<i64>().ok())
-        .map(|v| v.clamp(1, 21600))
+    let value = headers.get(reqwest::header::RETRY_AFTER)?.to_str().ok()?;
+    if let Ok(seconds) = value.parse::<i64>() {
+        return (seconds >= 0).then_some(seconds);
+    }
+    let date =
+        time::OffsetDateTime::parse(value, &time::format_description::well_known::Rfc2822).ok()?;
+    let remaining = date - time::OffsetDateTime::now_utc();
+    Some(if remaining.is_positive() {
+        remaining.whole_seconds().saturating_add(1)
+    } else {
+        0
+    })
 }
 fn now() -> Result<String, Error> {
     time::OffsetDateTime::now_utc()
@@ -1103,6 +1297,10 @@ fn save(path: &std::path::Path, credential: &Credential) -> Result<(), Error> {
 }
 
 impl ShippingApi for AmazonClient {
+    fn operation_budget(&self) -> Option<Duration> {
+        Some(self.operation_timeout)
+    }
+
     fn id(&self) -> ProviderId {
         ProviderId::AmazonAccount
     }
@@ -1370,6 +1568,7 @@ mod tests {
                 generation: 1,
                 imports_enabled: false,
                 auth_required: false,
+                challenge_required: false,
                 last_success_at: None,
             },
         )
@@ -1566,6 +1765,253 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn captcha_on_a_service_error_is_reported_as_a_challenge() {
+        let fixture = Fixture::new(|path| {
+            match path {
+            "/auth/token"=>(200,ACCESS.into()),
+            "/ap/exchangetoken/cookies"=>(200,COOKIES.into()),
+            _=>(503,"<form action=\"/errors/validateCaptcha\"><input name=\"captchacharacters\"></form>".into()),
+        }
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let client = configured(&dir, &fixture);
+        let error = client
+            .preview()
+            .await
+            .err()
+            .expect("Challenge must fail preview");
+        assert_eq!(
+            error.reason,
+            crate::amazon::connection::ConnectionReason::ChallengePage
+        );
+        assert_eq!(error.upstream_status, Some(503));
+        assert_eq!(client.status().await.state, AmazonState::Connected);
+        assert!(!client.status().await.imports_enabled);
+    }
+
+    #[tokio::test]
+    async fn tracking_challenge_is_not_reported_as_an_empty_successful_preview() {
+        let fixture = Fixture::new(|path| match path {
+            "/auth/token" => (200, ACCESS.into()),
+            "/ap/exchangetoken/cookies" => (200, COOKIES.into()),
+            "/your-orders/orders" => (200, listing()),
+            _ => (200, "<input name=\"captchacharacters\">".into()),
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let client = configured(&dir, &fixture);
+        let error = client
+            .preview()
+            .await
+            .err()
+            .expect("Tracking challenge must not look like no verified parcels");
+        assert_eq!(
+            error.reason,
+            crate::amazon::connection::ConnectionReason::ChallengePage
+        );
+        assert_eq!(client.status().await.state, AmazonState::Connected);
+    }
+
+    #[test]
+    fn gentle_backoff_reuses_shared_jitter_and_honors_server_delays() {
+        let now = tokio::time::Instant::now();
+        let mut schedule = crate::amazon::RequestSchedule {
+            next: now,
+            cooldown: None,
+            failures: 0,
+        };
+        let first = schedule.defer(None, now, "local-jitter-a").unwrap();
+        assert!((300..=330).contains(&first));
+        let second = schedule.defer(None, now, "local-jitter-b").unwrap();
+        assert!((600..=660).contains(&second));
+        let server = schedule.defer(Some(86400), now, "local-jitter-c").unwrap();
+        assert_eq!(server, 86400);
+        assert!(schedule.cooldown.unwrap().duration_since(now).as_secs() >= 86400);
+        let mut headers = reqwest::header::HeaderMap::new();
+        let date = (time::OffsetDateTime::now_utc() + time::Duration::hours(2))
+            .format(&time::format_description::well_known::Rfc2822)
+            .unwrap()
+            .replace("+0000", "GMT");
+        headers.insert(reqwest::header::RETRY_AFTER, date.parse().unwrap());
+        assert!((7199..=7201).contains(&crate::amazon::retry_after(&headers).unwrap()));
+    }
+
+    #[tokio::test]
+    async fn recent_website_sessions_are_reused_and_expired_sessions_refresh_once() {
+        let fixture = Fixture::normal();
+        let dir = tempfile::tempdir().unwrap();
+        let client = configured(&dir, &fixture);
+        client.preview().await.unwrap();
+        client.preview().await.unwrap();
+        assert_eq!(
+            fixture
+                .calls
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|p| p.as_str() == "/auth/token")
+                .count(),
+            1
+        );
+        tokio::time::pause();
+        tokio::time::advance(std::time::Duration::from_secs(
+            crate::sync::discovery_delay("amazon_account").unsigned_abs() + 1,
+        ))
+        .await;
+        tokio::time::resume();
+        client.preview().await.unwrap();
+        assert_eq!(
+            fixture
+                .calls
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|p| p.as_str() == "/auth/token")
+                .count(),
+            2
+        );
+    }
+
+    #[tokio::test]
+    async fn challenge_pause_survives_restart_and_only_verified_preview_resumes() {
+        let challenged = Arc::new(AtomicBool::new(true));
+        let response = challenged.clone();
+        let fixture = Fixture::new(move |path| match path {
+            "/auth/token" => (200, ACCESS.into()),
+            "/ap/exchangetoken/cookies" => (200, COOKIES.into()),
+            "/your-orders/orders" if response.load(Ordering::Acquire) => {
+                (503, "<input name=\"captchacharacters\">".into())
+            }
+            "/your-orders/orders" => (200, listing()),
+            _ => (200, tracking()),
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let client = configured(&dir, &fixture);
+        client.enable_imports().await.unwrap();
+        let old = client.generation().await;
+        let error = client.preview().await.err().unwrap();
+        assert_eq!(
+            error.page_kind,
+            Some(crate::amazon::connection::PageKind::Orders)
+        );
+        let delay = error.retry_after().unwrap();
+        assert!((300..=330).contains(&delay));
+        assert!(client.status().await.challenge_required);
+        assert!(client.blocked());
+        assert!(client.commit_guard(old).await.is_err());
+        let restored = AmazonClient::new(dir.path().join("amazon-account.json")).unwrap();
+        assert!(restored.status().await.challenge_required);
+        assert!(restored.status().await.imports_enabled);
+        assert!(restored.blocked());
+        assert!(client.enable_imports().await.is_err());
+        challenged.store(false, Ordering::Release);
+        tokio::time::pause();
+        tokio::time::advance(std::time::Duration::from_secs(delay as u64 + 1)).await;
+        tokio::time::resume();
+        let calls = fixture.calls.lock().unwrap().len();
+        assert!(matches!(
+            client.discover().await.err().unwrap().kind,
+            ErrorKind::ProviderChallenge { .. }
+        ));
+        assert_eq!(fixture.calls.lock().unwrap().len(), calls);
+        assert!(client.status().await.challenge_required);
+        let preview = client.preview().await.unwrap();
+        assert_eq!(preview.parcels.len(), 1);
+        assert!(!client.status().await.challenge_required);
+        assert!(!client.blocked());
+        assert!(client.commit_guard(old).await.is_err());
+        assert!(client.commit_guard(preview.generation).await.is_ok());
+        assert!(
+            !AmazonClient::new(dir.path().join("amazon-account.json"))
+                .unwrap()
+                .status()
+                .await
+                .challenge_required
+        );
+    }
+
+    #[tokio::test]
+    async fn overlapping_account_previews_do_not_duplicate_network_requests() {
+        let (entered, waiting) = std::sync::mpsc::channel();
+        let (release, released) = std::sync::mpsc::channel();
+        let fixture = Fixture::new(move |path| match path {
+            "/auth/token" => (200, ACCESS.into()),
+            "/ap/exchangetoken/cookies" => (200, COOKIES.into()),
+            "/your-orders/orders" => {
+                entered.send(()).unwrap();
+                released
+                    .recv_timeout(std::time::Duration::from_secs(5))
+                    .unwrap();
+                (200, listing())
+            }
+            _ => (200, tracking()),
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let client = configured(&dir, &fixture);
+        let first = client.clone();
+        let task = tokio::spawn(async move { first.preview().await });
+        tokio::task::spawn_blocking(move || {
+            waiting
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .unwrap()
+        })
+        .await
+        .unwrap();
+        let count = fixture.calls.lock().unwrap().len();
+        let second = client.preview().await.err().unwrap();
+        assert_eq!(
+            second.reason,
+            crate::amazon::connection::ConnectionReason::InProgress
+        );
+        assert_eq!(fixture.calls.lock().unwrap().len(), count);
+        release.send(()).unwrap();
+        assert_eq!(task.await.unwrap().unwrap().parcels.len(), 1);
+        assert_eq!(client.status().await.last_error_code, None);
+    }
+
+    #[tokio::test]
+    async fn timeout_backoff_stops_further_network_and_retains_sign_in() {
+        let fixture = Fixture::new(|_| {
+            thread::sleep(std::time::Duration::from_millis(100));
+            (200, ACCESS.into())
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let mut client = configured(&dir, &fixture);
+        client.http = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_millis(20))
+            .build()
+            .unwrap();
+        let first = client.preview().await.err().unwrap();
+        assert!(matches!(first.provider_error().kind, ErrorKind::Timeout));
+        assert!((300..=330).contains(&first.retry_after().unwrap()));
+        let calls = fixture.calls.lock().unwrap().len();
+        let second = client.preview().await.err().unwrap();
+        assert_eq!(
+            second.reason,
+            crate::amazon::connection::ConnectionReason::RateLimited
+        );
+        assert_eq!(fixture.calls.lock().unwrap().len(), calls);
+        assert_eq!(client.status().await.state, AmazonState::Connected);
+    }
+
+    #[tokio::test]
+    async fn whole_account_deadline_retains_grant_and_applies_backoff() {
+        let fixture = Fixture::new(|_| {
+            thread::sleep(std::time::Duration::from_millis(100));
+            (200, ACCESS.into())
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let mut client = configured(&dir, &fixture);
+        client.operation_timeout = std::time::Duration::from_millis(20);
+        let error = client.preview().await.err().unwrap();
+        assert!(matches!(error.provider_error().kind, ErrorKind::Timeout));
+        assert!((300..=330).contains(&error.retry_after().unwrap()));
+        assert_eq!(client.status().await.state, AmazonState::Connected);
+        let count = fixture.calls.lock().unwrap().len();
+        assert!(client.preview().await.is_err());
+        assert_eq!(fixture.calls.lock().unwrap().len(), count);
+    }
+
+    #[tokio::test]
     async fn sign_in_is_private_owner_bound_and_one_use() {
         use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
@@ -1715,7 +2161,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn discovery_checks_revocation_even_while_website_cookies_still_work() {
+    async fn discovery_checks_revocation_when_cached_session_ages_out() {
         let refreshes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let count = refreshes.clone();
         let fixture = Fixture::new(move |path| match path {
@@ -1728,6 +2174,13 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let client = configured(&dir, &fixture);
         assert_eq!(client.discover().await.unwrap().parcels.len(), 1);
+        // A reused website session validates its grant again at normal discovery cadence.
+        tokio::time::pause();
+        tokio::time::advance(std::time::Duration::from_secs(
+            crate::sync::discovery_delay("amazon_account").unsigned_abs() + 1,
+        ))
+        .await;
+        tokio::time::resume();
         let error = match client.discover().await {
             Ok(_) => panic!("revoked token was accepted"),
             Err(error) => error,
@@ -1813,15 +2266,15 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let client = configured(&dir, &fixture);
         let first = client.discover().await.unwrap();
-        assert_eq!(first.parcels.len(), 10);
-        assert_eq!(first.deferred, 5);
+        assert_eq!(first.parcels.len(), 5);
+        assert_eq!(first.deferred, 10);
         let first_keys = first
             .parcels
             .iter()
             .map(|p| p.source_key.clone())
             .collect::<std::collections::BTreeSet<_>>();
         let second = client.discover().await.unwrap();
-        assert_eq!(second.parcels.len(), 10);
+        assert_eq!(second.parcels.len(), 5);
         assert!(
             second
                 .parcels
@@ -1895,6 +2348,71 @@ mod tests {
                 .unwrap(),
             1
         );
+        store.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn amazon_sync_budget_keeps_a_slow_verified_observation_owned() {
+        use crate::{amazon_sync::AmazonDiscoveryWorker, store::Store, sync::SyncWorker};
+        let (entered, waiting) = std::sync::mpsc::channel();
+        let (release, released) = std::sync::mpsc::channel();
+        let tracking_read = AtomicBool::new(false);
+        let fixture = Fixture::new(move |path| match path {
+            "/auth/token" => (200, ACCESS.into()),
+            "/ap/exchangetoken/cookies" => (200, COOKIES.into()),
+            "/your-orders/orders" => (200, listing()),
+            _ if tracking_read.swap(true, Ordering::AcqRel) => {
+                entered.send(()).unwrap();
+                released
+                    .recv_timeout(std::time::Duration::from_secs(5))
+                    .unwrap();
+                (200, tracking().replace("IN_TRANSIT", "OUT_FOR_DELIVERY"))
+            }
+            _ => (200, tracking()),
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let client = Arc::new(configured(&dir, &fixture));
+        client.enable_imports().await.unwrap();
+        let store = Store::open(&dir.path().join("shipments.sqlite3"))
+            .await
+            .unwrap();
+        assert!(
+            AmazonDiscoveryWorker::new(store.clone(), client.clone())
+                .tick()
+                .await
+                .unwrap()
+        );
+        sqlx::query("UPDATE shipments SET next_attempt_at=unixepoch()")
+            .execute(store.pool())
+            .await
+            .unwrap();
+        let worker = SyncWorker::new(store.pool().clone(), client);
+        let task = tokio::spawn(async move { worker.tick().await });
+        tokio::task::spawn_blocking(move || {
+            waiting
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .unwrap()
+        })
+        .await
+        .unwrap();
+        let remaining: i64 = sqlx::query_scalar("SELECT lease_until-unixepoch() FROM shipments")
+            .fetch_one(store.pool())
+            .await
+            .unwrap();
+        // Simulate a response later than the ordinary 60-second lease, without
+        // slowing the test or replacing the real SQLite ownership fence.
+        sqlx::query("UPDATE shipments SET lease_until=lease_until-61")
+            .execute(store.pool())
+            .await
+            .unwrap();
+        release.send(()).unwrap();
+        assert!(task.await.unwrap().unwrap());
+        assert!((145..=150).contains(&remaining), "lease: {remaining}");
+        let status: String = sqlx::query_scalar("SELECT carrier_status FROM shipments")
+            .fetch_one(store.pool())
+            .await
+            .unwrap();
+        assert_eq!(status, "\"out_for_delivery\"");
         store.close().await.unwrap();
     }
 
@@ -2221,20 +2739,24 @@ mod tests {
         let second = client.begin_sign_in("owner").await.unwrap();
         let b = client.clone();
         let second = tokio::spawn(complete_fixture_connection(b, second.flow_id));
-        for _ in 0..100 {
-            if client.state.lock().await.flow.is_none() {
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-        }
-        assert!(client.state.lock().await.flow.is_none());
-        release.send(()).unwrap();
-        first.await.unwrap().unwrap();
-        let saved = std::fs::read(&path).unwrap();
         let error = second.await.unwrap().unwrap_err();
         assert_eq!(
             (error.stage, error.reason),
-            (ConnectionStage::Account, ConnectionReason::SessionChanged)
+            (ConnectionStage::Flow, ConnectionReason::InProgress)
+        );
+        assert!(client.state.lock().await.flow.is_some());
+        release.send(()).unwrap();
+        first.await.unwrap().unwrap();
+        let saved = std::fs::read(&path).unwrap();
+        assert_eq!(
+            fixture
+                .calls
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|p| p.as_str() == "/auth/register")
+                .count(),
+            1
         );
         assert!(
             std::fs::read(&path).unwrap() == saved,

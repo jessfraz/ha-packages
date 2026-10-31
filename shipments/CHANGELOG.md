@@ -1,3 +1,13 @@
+## 0.6.19
+
+- Reuse Amazon website sessions and serialize account checks. Apply longer
+  exponential backoff with jitter, honor Retry-After, and bound request timeouts.
+- Distinguish confirmed website challenges from upstream service errors using
+  fixed, non-sensitive diagnostics. Retain saved sign-in and persistently pause
+  automatic checks until an explicit successful Preview.
+- Show verification guidance in settings and one Home Assistant notification.
+  Keep slow Amazon observations inside their bounded worker lease.
+
 ## 0.6.18
 
 - Resolve Amazon item-pop links to uniquely verified indexed tracking pages,
