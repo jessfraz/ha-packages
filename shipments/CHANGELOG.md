@@ -7,7 +7,7 @@
   and resolving relative dates in the provider's timezone. Preserve date-only
   precision without inventing delivery times.
 - Restore the `Amazon: ` prefix for new discoveries and untouched generated
-  titles. Enrich existing saved parcels without replacing IDs or history.
+  titles. Bound generated display titles without dropping verified parcels. Enrich existing saved parcels without replacing IDs or history.
 - Distinguish incomplete previews from genuinely empty accounts.
 
 ## 0.6.23

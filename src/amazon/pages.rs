@@ -412,9 +412,9 @@ pub(crate) fn listing(page: &str) -> Result<Listing, Error> {
             .attr("aria-label")
             .and_then(|label| label.split_once(", Order placed "))
             .map(|(title, _)| title.trim())
-            .filter(|title| {
-                !title.is_empty() && title.len() <= 500 && !title.chars().any(char::is_control)
-            })
+            // The response and anchor limits already bound source names.
+            // Generated shipment labels have a separate display byte limit.
+            .filter(|title| !title.is_empty() && !title.chars().any(char::is_control))
         else {
             reasons.missing_product += 1;
             continue;

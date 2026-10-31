@@ -144,7 +144,9 @@ shared status-based cadence. Account listing is not repeated for each saved parc
 Imports start disabled. The owner-only preview endpoint performs reads without
 writing shipment data. Enabling imports schedules discovery. Real parcel identity
 and product mapping are required; missing tracking numbers never become synthetic
-barcodes. Verified source identity and shipment updates commit atomically. Global
+barcodes. Generated titles are bounded display text; their length does not
+invalidate verified parcel identity. Verified source identity and shipment
+updates commit atomically. Global
 tracking-number uniqueness deduplicates an existing parcel, including archived
 records, without replacing user metadata or an existing last-mile provider.
 Different tracking numbers are not merged without explicit parcel evidence.

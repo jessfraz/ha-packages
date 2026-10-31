@@ -900,15 +900,20 @@ impl AmazonClient {
                 Ok(mut tracker) => {
                     tracker.id = format!("{}:{}", account_key(&customer), tracker.id);
                     let title = candidate.titles.join("; ");
-                    let title = if title.starts_with("Amazon: ") {
+                    let mut title = if title.starts_with("Amazon: ") {
                         title
                     } else {
                         format!("Amazon: {title}")
                     };
+                    // Only the generated display label is bounded. Product
+                    // grouping and verified tracking identity remain intact.
                     if title.len() > 500 {
-                        scan.deferred.missing_product += 1;
-                        deferred += 1;
-                        continue;
+                        let mut end = 500 - '…'.len_utf8();
+                        while !title.is_char_boundary(end) {
+                            end -= 1;
+                        }
+                        title.truncate(end);
+                        title.push('…');
                     }
                     parcels.push(AmazonParcel {
                         title,
@@ -3282,41 +3287,172 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn discovery_titles_keep_one_prefix_and_enforce_the_final_title_limit() {
+    async fn discovery_generated_titles_are_bounded_without_losing_verified_parcels() {
         let prefixed_limit = format!("Amazon: {}", "x".repeat(492));
         for (title, expected) in [
-            (prefixed_limit.clone(), Some(prefixed_limit)),
-            ("x".repeat(493), None),
+            (prefixed_limit.clone(), prefixed_limit),
+            ("x".repeat(493), format!("Amazon: {}…", "x".repeat(489))),
+            ("x".repeat(492), format!("Amazon: {}", "x".repeat(492))),
+            ("x".repeat(500), format!("Amazon: {}…", "x".repeat(489))),
+            ("😀".repeat(125), format!("Amazon: {}…", "😀".repeat(122))),
             (
-                "x".repeat(492),
-                Some(format!("Amazon: {}", "x".repeat(492))),
+                format!("Amazon: {}", "😀".repeat(123)),
+                format!("Amazon: {}", "😀".repeat(123)),
             ),
         ] {
-            let fixture = Fixture::new(move |path| match path {
-                "/auth/token" => (200, ACCESS.into()),
-                "/ap/exchangetoken/cookies" => (200, COOKIES.into()),
-                "/your-orders/orders" | "/your-orders/orders?timeFilter=months-3" => (
-                    200,
-                    format!(
-                        r#"<a class="item-card__link" href="{PATH}" aria-label="{title}, Order placed 1 October 2026, Shipped"></a>"#,
-                    ),
-                ),
-                _ => (200, tracking()),
-            });
-            let dir = tempfile::tempdir().unwrap();
-            let client = configured(&dir, &fixture);
-            let preview = client.preview().await.unwrap();
-            if let Some(expected) = expected {
-                assert_eq!(preview.parcels.len(), 1);
-                assert_eq!(preview.parcels[0].title, expected);
-                assert_eq!(preview.deferred, 0);
-            } else {
-                assert!(preview.parcels.is_empty());
-                assert_eq!(preview.deferred, 1);
-                assert_eq!(preview.deferred_reasons.missing_product, 1);
-            }
-            assert!(!client.status().await.imports_enabled);
+            assert_discovered_generated_title(title, expected).await;
         }
+    }
+
+    async fn assert_discovered_generated_title(title: String, expected: String) {
+        let fixture = Fixture::new(move |path| match path {
+            "/auth/token" => (200, ACCESS.into()),
+            "/ap/exchangetoken/cookies" => (200, COOKIES.into()),
+            "/your-orders/orders" | "/your-orders/orders?timeFilter=months-3" => (
+                200,
+                format!(
+                    r#"<a class="item-card__link" href="{PATH}" aria-label="{title}, Order placed 1 October 2026, Shipped"></a>"#,
+                ),
+            ),
+            _ => (200, tracking()),
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let client = configured(&dir, &fixture);
+        let preview = client.preview().await.unwrap();
+        assert_eq!(preview.parcels.len(), 1);
+        assert_eq!(preview.parcels[0].title, expected);
+        assert!(preview.parcels[0].title.len() <= 500);
+        assert_eq!(preview.parcels[0].tracker.tracking_code, NUMBER);
+        assert!(preview.parcels[0].tracker.id.ends_with(PATH));
+        assert_eq!(preview.deferred, 0);
+        assert!(!client.status().await.imports_enabled);
+    }
+
+    #[tokio::test]
+    async fn discovery_generated_titles_accept_oversized_source_product_names() {
+        assert_discovered_generated_title("é".repeat(300), format!("Amazon: {}…", "é".repeat(244)))
+            .await;
+    }
+
+    #[tokio::test]
+    async fn discovery_generated_titles_import_multi_product_parcels_without_changing_identity() {
+        use crate::{amazon_sync::AmazonDiscoveryWorker, models::UpdateShipment, store::Store};
+        let titles = [
+            format!("Product one {}", "x".repeat(160)),
+            format!("Product two {}", "y".repeat(160)),
+            format!("Product three {}", "z".repeat(160)),
+        ];
+        assert!(titles.iter().all(|title| title.len() <= 500));
+        assert!(titles.join("; ").len() + "Amazon: ".len() > 500);
+        let page: String = titles.iter().map(|title| format!(
+            r#"<a class="item-card__link" href="{PATH}" aria-label="{title}, Order placed 1 October 2026, Shipped"></a>"#,
+        )).collect();
+        let second = PATH.replace("packageId=1", "packageId=2");
+        let page = page
+            + &format!(
+                r#"<a class="item-card__link" href="{second}" aria-label="Separate parcel, Order placed 1 October 2026, Shipped"></a>"#
+            );
+        let fixture = Fixture::new(move |path| match path {
+            "/auth/token" => (200, ACCESS.into()),
+            "/ap/exchangetoken/cookies" => (200, COOKIES.into()),
+            "/your-orders/orders?timeFilter=months-3" => (200, page.clone()),
+            PATH => (200, tracking()),
+            value if value == second => (200, tracking().replace(NUMBER, "9400111122223333444466")),
+            _ => (404, "Unexpected request".into()),
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let client = Arc::new(configured(&dir, &fixture));
+        let preview = client.preview().await.unwrap();
+        assert_eq!(preview.deferred, 0);
+        assert_eq!(
+            preview.parcels.len(),
+            2,
+            "display title length must not drop a verified parcel"
+        );
+        let long = &preview.parcels[0];
+        let separate = &preview.parcels[1];
+        assert!(long.title.starts_with(&format!(
+            "Amazon: {}; {}; Product three ",
+            titles[0], titles[1]
+        )));
+        assert!(long.title.ends_with('…'));
+        assert_eq!(long.title.len(), 500);
+        assert_eq!(long.tracker.tracking_code, NUMBER);
+        assert!(long.tracker.id.ends_with(PATH));
+        assert_eq!(separate.title, "Amazon: Separate parcel");
+        assert_eq!(separate.tracker.tracking_code, "9400111122223333444466");
+        assert_ne!(long.source_key, separate.source_key);
+        client.enable_imports().await.unwrap();
+        let store = Store::open(&dir.path().join("shipments.sqlite3"))
+            .await
+            .unwrap();
+        assert!(
+            AmazonDiscoveryWorker::new(store.clone(), client)
+                .tick()
+                .await
+                .unwrap()
+        );
+        let mut imported = Vec::new();
+        for parcel in &preview.parcels {
+            let id: String = sqlx::query_scalar("SELECT id FROM shipments WHERE tracking_number=?")
+                .bind(&parcel.tracker.tracking_code)
+                .fetch_one(store.pool())
+                .await
+                .unwrap();
+            let row = store
+                .get(uuid::Uuid::parse_str(&id).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(row.title, parcel.title);
+            assert_eq!(row.tracking.number, parcel.tracker.tracking_code);
+            assert_eq!(
+                row.sync.tracker_id.as_deref(),
+                Some(parcel.tracker.id.as_str())
+            );
+            assert_eq!(
+                row.order_reference.as_deref(),
+                Some(parcel.order_reference.as_str())
+            );
+            assert!(
+                row.sources
+                    .iter()
+                    .any(|source| source.key == parcel.source_key)
+            );
+            imported.push(row);
+        }
+        assert_ne!(imported[0].id, imported[1].id);
+        let custom = store
+            .update(
+                imported[0].id,
+                imported[0].revision,
+                UpdateShipment {
+                    title: Some("Owner's custom parcel title".into()),
+                    ..Default::default()
+                },
+                "owner",
+                None,
+            )
+            .await
+            .unwrap();
+        let history =
+            serde_json::to_string(&store.events(custom.id, 0, 100).await.unwrap()).unwrap();
+        let replayed = store.import_amazon(long, None).await.unwrap();
+        assert_eq!(replayed.id, custom.id);
+        assert_eq!(replayed.title, custom.title);
+        assert_eq!(replayed.sources, custom.sources);
+        assert_eq!(replayed.carrier_tracking, custom.carrier_tracking);
+        assert_eq!(
+            serde_json::to_string(&store.events(custom.id, 0, 100).await.unwrap()).unwrap(),
+            history
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM shipments")
+                .fetch_one(store.pool())
+                .await
+                .unwrap(),
+            2
+        );
+        store.close().await.unwrap();
     }
 
     #[tokio::test]
