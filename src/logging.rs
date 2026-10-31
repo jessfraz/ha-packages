@@ -58,6 +58,18 @@ struct Fields {
     retry_after_seconds: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     duration_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    verified_parcels: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    deferred_link: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    deferred_identity: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    deferred_product: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    deferred_tracking: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    deferred_limit: Option<u64>,
 }
 
 #[derive(Serialize)]
@@ -143,6 +155,7 @@ fn event_name(message: &str) -> Option<&'static str> {
         "accept error" => "server_accept_error",
         "provider_request" => "provider_request",
         "amazon_connection" => "amazon_connection",
+        "amazon_preview" => "amazon_preview",
         "tracking_verification" => "tracking_verification",
         "tracking_registration" => "tracking_registration",
         "tracking_sync" => "tracking_sync",
@@ -173,6 +186,12 @@ impl slog::Serializer for Fields {
             "uri" => self.route = Some(route_template(&value.to_string())),
             "response_code" => self.response_code = http_status(&value.to_string()),
             "provider_status" => self.provider_status = http_status(&value.to_string()),
+            "verified_parcels" => self.verified_parcels = bounded_number(&value.to_string(), 500),
+            "deferred_link" => self.deferred_link = bounded_number(&value.to_string(), 500),
+            "deferred_identity" => self.deferred_identity = bounded_number(&value.to_string(), 500),
+            "deferred_product" => self.deferred_product = bounded_number(&value.to_string(), 500),
+            "deferred_tracking" => self.deferred_tracking = bounded_number(&value.to_string(), 500),
+            "deferred_limit" => self.deferred_limit = bounded_number(&value.to_string(), 500),
             "response_shape" => {
                 self.response_shape = allowed(
                     &value.to_string(),

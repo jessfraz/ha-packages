@@ -79,10 +79,29 @@ pub struct AmazonParcel {
     pub source_key: String,
     pub tracker: Tracker,
 }
+#[derive(Clone, Debug, Default, Serialize, JsonSchema, PartialEq, Eq)]
+pub struct DeferredCounts {
+    pub unsupported_link: usize,
+    pub missing_identity: usize,
+    pub missing_product: usize,
+    pub unverified_tracking: usize,
+    pub request_limit: usize,
+}
+impl DeferredCounts {
+    fn total(&self) -> usize {
+        self.unsupported_link
+            + self.missing_identity
+            + self.missing_product
+            + self.unverified_tracking
+            + self.request_limit
+    }
+}
+
 pub struct Discovery {
     pub generation: u64,
     pub parcels: Vec<AmazonParcel>,
     pub deferred: usize,
+    pub deferred_reasons: DeferredCounts,
 }
 
 // Deliberately no Debug: serde is only used for the owner-only credential file.
@@ -448,6 +467,7 @@ impl AmazonClient {
         let listing = self.order_listing().await?;
         let mut parcels = Vec::new();
         let mut deferred = listing.deferred;
+        let mut deferred_reasons = listing.deferred_reasons;
         let (start, imported) = {
             let state = self.state.lock().await;
             (state.cursor, state.imported.clone())
@@ -463,6 +483,7 @@ impl AmazonClient {
             }
             if reads >= MAX_TRACK_LOADS {
                 deferred += 1;
+                deferred_reasons.request_limit += 1;
                 continue;
             }
             reads += 1;
@@ -475,7 +496,7 @@ impl AmazonClient {
                         .map_err(|e| ConnectionError::new(ConnectionStage::Orders, e))?;
                     page = self.fetch_page_detailed(&path).await?;
                 }
-                pages::tracking(&page, &path, None)
+                pages::tracking_parcel(&page, &path, parcel)
                     .map_err(|e| ConnectionError::new(ConnectionStage::Orders, e))
             }
             .await;
@@ -485,6 +506,7 @@ impl AmazonClient {
                     let title = parcel.titles.join("; ");
                     if title.len() > 500 {
                         deferred += 1;
+                        deferred_reasons.missing_product += 1;
                         continue;
                     }
                     parcels.push(AmazonParcel {
@@ -499,6 +521,7 @@ impl AmazonClient {
                         && matches!(error.provider_error().kind, ErrorKind::InvalidResponse) =>
                 {
                     deferred += 1;
+                    deferred_reasons.unverified_tracking += 1;
                 }
                 Err(error) => return Err(error),
             }
@@ -529,6 +552,7 @@ impl AmazonClient {
             generation,
             parcels,
             deferred,
+            deferred_reasons,
         })
     }
 
@@ -1416,6 +1440,129 @@ mod tests {
         assert!(!client.status().await.imports_enabled);
         let restored = AmazonClient::new(dir.path().join("amazon-account.json")).unwrap();
         assert_eq!(restored.status().await.state, AmazonState::Connected);
+    }
+
+    #[tokio::test]
+    async fn retail_pop_links_resolve_to_indexed_tracking_without_synthetic_identity() {
+        const POP: &str = "/your-orders/pop?orderId=111-1234567-1234567&shipmentId=SHIP1&packageId=1&lineItemId=ITEM1";
+        const TRACK: &str = "/gp/your-account/ship-track?orderId=111-1234567-1234567&shipmentId=SHIP1&packageIndex=0&itemId=ITEM1";
+        let fixture = Fixture::new(|path| match path {
+            "/auth/token" => (200, ACCESS.into()),
+            "/ap/exchangetoken/cookies" => (200, COOKIES.into()),
+            "/your-orders/orders" => (
+                200,
+                format!(
+                    r#"<a class="item-card__link" href="{POP}" aria-label="Widget, Order placed 1 October 2026, Shipped"></a>"#
+                ),
+            ),
+            POP => (200, format!(r#"<a href="{TRACK}">Track package</a>"#)),
+            TRACK => (200, tracking()),
+            _ => (404, String::new()),
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let client = configured(&dir, &fixture);
+        let preview = client.preview().await.unwrap();
+        assert_eq!(preview.parcels.len(), 1);
+        assert_eq!(preview.deferred, 0);
+        assert_eq!(preview.parcels[0].title, "Widget");
+        assert_eq!(preview.parcels[0].tracker.tracking_code, NUMBER);
+        assert!(!client.status().await.imports_enabled);
+    }
+
+    #[tokio::test]
+    async fn split_pop_parcels_keep_verified_numbers_and_products_separate() {
+        let fixture = Fixture::new(|path| {
+            if path == "/auth/token" {
+                return (200, ACCESS.into());
+            }
+            if path == "/ap/exchangetoken/cookies" {
+                return (200, COOKIES.into());
+            }
+            let pop = |package: usize| {
+                format!(
+                    "/your-orders/pop?orderId=111-1234567-1234567&shipmentId=SHIP1&packageId={package}&lineItemId=ITEM{package}"
+                )
+            };
+            let track = |package: usize| {
+                format!(
+                    "/gp/your-account/ship-track?orderId=111-1234567-1234567&shipmentId=SHIP1&packageIndex={}&itemId=ITEM{package}",
+                    package - 1
+                )
+            };
+            if path == "/your-orders/orders" {
+                return (200,[1,2].into_iter().map(|package|format!(r#"<a class="item-card__link" href="{}" aria-label="Product {package}, Order placed 1 October 2026, Shipped"></a>"#,pop(package))).collect());
+            }
+            for package in [1, 2] {
+                if path == pop(package) {
+                    return (200, format!(r#"<a href="{}">Track</a>"#, track(package)));
+                }
+                if path == track(package) {
+                    return (
+                        200,
+                        tracking()
+                            .replace(NUMBER, &format!("TBA00000000010{package}"))
+                            .replace("USPS", "Amazon")
+                            .replace(
+                                "\"trackingId\":",
+                                &format!("\"packageId\":\"{package}\",\"trackingId\":"),
+                            ),
+                    );
+                }
+            }
+            (404, String::new())
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let client = configured(&dir, &fixture);
+        let preview = client.preview().await.unwrap();
+        assert_eq!(preview.deferred, 0);
+        assert_eq!(preview.parcels.len(), 2);
+        assert_eq!(preview.parcels[0].title, "Product 1");
+        assert_eq!(preview.parcels[0].tracker.tracking_code, "TBA000000000101");
+        assert_eq!(preview.parcels[1].title, "Product 2");
+        assert_eq!(preview.parcels[1].tracker.tracking_code, "TBA000000000102");
+        assert_ne!(preview.parcels[0].source_key, preview.parcels[1].source_key);
+    }
+
+    #[tokio::test]
+    async fn redirect_cannot_erase_package_identity_then_switch_to_another_box() {
+        const FIRST: &str = "/gp/your-account/ship-track?orderId=111-1234567-1234567&shipmentId=SHIP1&packageId=1&packageIndex=0";
+        const BARE: &str =
+            "/gp/your-account/ship-track?orderId=111-1234567-1234567&shipmentId=SHIP1";
+        const OTHER: &str = "/gp/your-account/ship-track?orderId=111-1234567-1234567&shipmentId=SHIP1&packageId=2&packageIndex=1";
+        let fixture = Fixture::with_location(|path| match path {
+            "/auth/token" => (200, None, ACCESS.into()),
+            "/ap/exchangetoken/cookies" => (200, None, COOKIES.into()),
+            "/your-orders/orders" => (
+                200,
+                None,
+                format!(
+                    r#"<a class="item-card__link" href="{FIRST}" aria-label="Product one, Order placed 1 October 2026, Shipped"></a>"#
+                ),
+            ),
+            FIRST => (302, Some(BARE.into()), String::new()),
+            BARE => (302, Some(OTHER.into()), String::new()),
+            OTHER => (
+                200,
+                None,
+                tracking().replace(NUMBER, "9400000000000000000002"),
+            ),
+            _ => (404, None, String::new()),
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let client = configured(&dir, &fixture);
+        let preview = client.preview().await.unwrap();
+        assert!(preview.parcels.is_empty());
+        assert_eq!(preview.deferred, 1);
+        assert_eq!(preview.deferred_reasons.unverified_tracking, 1);
+        assert!(
+            !fixture
+                .calls
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|path| path == BARE || path == OTHER)
+        );
+        assert_eq!(client.status().await.state, AmazonState::Connected);
     }
 
     #[tokio::test]
