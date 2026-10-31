@@ -58,6 +58,12 @@ Administrators can connect one Amazon.com retail account from the dashboard's
 **Amazon** settings. Open the generated Amazon sign-in link, complete any
 verification on Amazon, and paste the final landing address back into Shipments.
 The flow uses Amazon's device sign-in, so Amazon may show an Alexa sign-in page.
+
+If connecting fails, the error names the failed step and includes a request ID.
+The matching `amazon_connection` app log records a fixed error category, upstream
+HTTP status when known, and elapsed time. Share that request ID rather than the
+landing address, authorization code, tokens, or Amazon page contents. A submitted
+sign-in attempt cannot be retried with the previous final address.
 Shipments never receives your password or verification code.
 
 Use **Preview shipments** to inspect the result before choosing **Enable imports**.

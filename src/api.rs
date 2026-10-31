@@ -866,6 +866,52 @@ fn amazon_error(error: crate::shipping_api::error::Error) -> HttpError {
     response
 }
 
+fn amazon_connection_error(
+    request: &RequestContext<Arc<Context>>,
+    error: crate::amazon::connection::ConnectionError,
+    elapsed: std::time::Duration,
+) -> HttpError {
+    use crate::amazon::connection::ConnectionReason;
+    use dropshot::ErrorStatusCode;
+    slog::warn!(request.log, "amazon_connection";
+        "request_id" => request.request_id.clone(), "provider" => "amazon_account",
+        "operation" => error.stage.as_str(), "outcome" => "error",
+        "error_code" => error.reason.as_str(), "provider_status" => error.upstream_status,
+        "duration_ms" => u64::try_from(elapsed.as_millis()).unwrap_or(86_400_000));
+    let status_code = match error.reason {
+        ConnectionReason::InvalidInput
+        | ConnectionReason::ExpiredFlow
+        | ConnectionReason::UpstreamRejected => ErrorStatusCode::BAD_REQUEST,
+        ConnectionReason::AccountMismatch | ConnectionReason::SessionChanged => {
+            ErrorStatusCode::CONFLICT
+        }
+        ConnectionReason::RateLimited => ErrorStatusCode::TOO_MANY_REQUESTS,
+        ConnectionReason::Timeout => ErrorStatusCode::GATEWAY_TIMEOUT,
+        ConnectionReason::Configuration
+        | ConnectionReason::Persistence
+        | ConnectionReason::Connection => ErrorStatusCode::SERVICE_UNAVAILABLE,
+        _ => ErrorStatusCode::BAD_GATEWAY,
+    };
+    let mut headers = http::HeaderMap::new();
+    headers.insert(
+        http::header::CACHE_CONTROL,
+        HeaderValue::from_static("no-store"),
+    );
+    if let Some(seconds) = error.retry_after()
+        && let Ok(value) = HeaderValue::from_str(&seconds.max(1).to_string())
+    {
+        headers.insert(http::header::RETRY_AFTER, value);
+    }
+    let message = error.to_string();
+    HttpError {
+        status_code,
+        error_code: Some(error.code()),
+        external_message: message.clone(),
+        internal_message: message,
+        headers: Some(Box::new(headers)),
+    }
+}
+
 #[endpoint {method=GET,path="/v1/amazon",tags=["amazon"]}]
 async fn amazon_status(
     request: RequestContext<Arc<Context>>,
@@ -922,10 +968,11 @@ async fn amazon_complete(
     let owner = authenticate(&request, false).await?.actor;
     let input = body.into_inner();
     let client = amazon_client(&request)?;
+    let started = std::time::Instant::now();
     let result = client
         .complete_sign_in(&owner, &input.flow_id, &input.landing_url)
         .await
-        .map_err(amazon_error)?;
+        .map_err(|error| amazon_connection_error(&request, error, started.elapsed()))?;
     if result.imports_enabled {
         if let Some(scope) = client.tracking_scope().await {
             request.context().store.resume_amazon(&scope).await?;
@@ -1249,6 +1296,16 @@ async fn amazon_settings_script(
         "text/javascript; charset=utf-8",
     )
 }
+#[endpoint {method=GET,path="/api-error.js",tags=["web"]}]
+async fn api_error_script(
+    request: RequestContext<Arc<Context>>,
+) -> Result<Response<Body>, HttpError> {
+    ingress_access(&request)?;
+    static_response(
+        include_str!("../web/api-error.js"),
+        "text/javascript; charset=utf-8",
+    )
+}
 #[endpoint {method=GET,path="/style.css",tags=["web"]}]
 async fn style(request: RequestContext<Arc<Context>>) -> Result<Response<Body>, HttpError> {
     ingress_access(&request)?;
@@ -1257,7 +1314,7 @@ async fn style(request: RequestContext<Arc<Context>>) -> Result<Response<Body>, 
 
 pub fn description() -> Result<ApiDescription<Arc<Context>>> {
     let mut api = ApiDescription::new();
-    let endpoints: [dropshot::ApiEndpoint<Arc<Context>>; 37] = [
+    let endpoints: [dropshot::ApiEndpoint<Arc<Context>>; 38] = [
         shipments_list.into(),
         carriers_list.into(),
         shipments_create.into(),
@@ -1282,6 +1339,7 @@ pub fn description() -> Result<ApiDescription<Arc<Context>>> {
         amazon_refresh.into(),
         amazon_disconnect.into(),
         amazon_settings_script.into(),
+        api_error_script.into(),
         installation.into(),
         installation_check.into(),
         integration_presence.into(),

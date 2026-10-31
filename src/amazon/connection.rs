@@ -1,0 +1,150 @@
+//! Fixed-vocabulary connection diagnostics. Provider bodies and credentials
+//! never enter this type, the API error response, or operational logs.
+
+use std::fmt;
+
+use crate::{
+    amazon::provider_error,
+    shipping_api::error::{Error, ErrorKind},
+};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ConnectionStage {
+    Callback,
+    Flow,
+    Registration,
+    AccessToken,
+    Cookies,
+    Orders,
+    Account,
+    Credentials,
+}
+
+impl ConnectionStage {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Callback => "callback",
+            Self::Flow => "flow",
+            Self::Registration => "registration",
+            Self::AccessToken => "access_token",
+            Self::Cookies => "cookies",
+            Self::Orders => "orders",
+            Self::Account => "account",
+            Self::Credentials => "credentials",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ConnectionReason {
+    InvalidInput,
+    ExpiredFlow,
+    AccountIdentityMissing,
+    AccountMismatch,
+    SessionChanged,
+    UpstreamRejected,
+    UnexpectedResponse,
+    Timeout,
+    Connection,
+    RateLimited,
+    UpstreamHttp,
+    Persistence,
+    Configuration,
+}
+impl ConnectionReason {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::InvalidInput => "invalid_input",
+            Self::ExpiredFlow => "expired_flow",
+            Self::AccountIdentityMissing => "account_identity_missing",
+            Self::AccountMismatch => "account_mismatch",
+            Self::SessionChanged => "session_changed",
+            Self::UpstreamRejected => "upstream_rejected",
+            Self::UnexpectedResponse => "unexpected_response",
+            Self::Timeout => "timeout",
+            Self::Connection => "connection",
+            Self::RateLimited => "rate_limited",
+            Self::UpstreamHttp => "upstream_http",
+            Self::Persistence => "persistence",
+            Self::Configuration => "configuration",
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct ConnectionError {
+    pub stage: ConnectionStage,
+    pub reason: ConnectionReason,
+    pub upstream_status: Option<u16>,
+    source: Error,
+}
+impl ConnectionError {
+    pub(crate) fn new(stage: ConnectionStage, source: Error) -> Self {
+        let reason = match source.kind {
+            ErrorKind::AuthenticationRequired => ConnectionReason::UpstreamRejected,
+            ErrorKind::Timeout => ConnectionReason::Timeout,
+            ErrorKind::Connection => ConnectionReason::Connection,
+            ErrorKind::Throttled { .. } | ErrorKind::Http { status: 429, .. } => {
+                ConnectionReason::RateLimited
+            }
+            ErrorKind::Http { .. } => ConnectionReason::UpstreamHttp,
+            ErrorKind::Configuration => ConnectionReason::Configuration,
+            _ => ConnectionReason::UnexpectedResponse,
+        };
+        let upstream_status = source.provider_status();
+        Self {
+            stage,
+            reason,
+            upstream_status,
+            source,
+        }
+    }
+    pub(crate) fn with_status(stage: ConnectionStage, source: Error, status: u16) -> Self {
+        Self::new(stage, source).with_upstream_status(status)
+    }
+    pub(crate) fn failure(stage: ConnectionStage, reason: ConnectionReason) -> Self {
+        Self {
+            stage,
+            reason,
+            upstream_status: None,
+            source: provider_error(ErrorKind::InvalidResponse),
+        }
+    }
+    pub(crate) fn with_upstream_status(mut self, status: u16) -> Self {
+        self.upstream_status = (100..=599).contains(&status).then_some(status);
+        self
+    }
+    pub fn code(&self) -> String {
+        format!(
+            "amazon_connect_{}_{}",
+            self.stage.as_str(),
+            self.reason.as_str()
+        )
+    }
+    pub fn retry_after(&self) -> Option<i64> {
+        self.source.retry_after()
+    }
+    pub fn into_provider(self) -> Error {
+        self.source
+    }
+}
+impl From<ConnectionError> for Error {
+    fn from(error: ConnectionError) -> Self {
+        error.into_provider()
+    }
+}
+impl fmt::Display for ConnectionError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "Amazon connection failed during {} ({})",
+            self.stage.as_str(),
+            self.reason.as_str()
+        )?;
+        if let Some(status) = self.upstream_status {
+            write!(f, "; upstream HTTP {status}")?;
+        }
+        Ok(())
+    }
+}
+impl std::error::Error for ConnectionError {}

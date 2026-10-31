@@ -871,6 +871,15 @@ async fn ingress_checks_real_peer_and_browser_request_header() {
             .status(),
         StatusCode::FORBIDDEN
     );
+    assert_eq!(
+        forbidden
+            .request(Method::GET, "/api-error.js")
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::FORBIDDEN
+    );
     forbidden.close().await;
     let app = App::new(Some("127.0.0.1".parse().unwrap())).await;
     assert_eq!(
@@ -965,6 +974,18 @@ async fn browser_authentication_mode_comes_only_from_the_listener() {
         "text/javascript; charset=utf-8"
     );
     assert!(!tracking.bytes().await.unwrap().is_empty());
+    let errors = standalone
+        .request(Method::GET, "/api-error.js")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(errors.status(), StatusCode::OK);
+    assert_eq!(errors.headers()["cache-control"], "no-store");
+    assert_eq!(
+        errors.headers()["content-type"],
+        "text/javascript; charset=utf-8"
+    );
+    assert!(!errors.bytes().await.unwrap().is_empty());
     standalone.close().await;
 
     let ingress = App::new(Some("127.0.0.1".parse().unwrap())).await;

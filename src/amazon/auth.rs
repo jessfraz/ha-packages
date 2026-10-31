@@ -10,7 +10,11 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::{
-    amazon::{AmazonClient, provider_error},
+    amazon::{
+        AmazonClient,
+        connection::{ConnectionError, ConnectionReason, ConnectionStage},
+        provider_error,
+    },
     shipping_api::error::{Error, ErrorKind},
 };
 
@@ -159,7 +163,7 @@ struct RegisterResponse {
 #[derive(Deserialize)]
 struct RegisterSuccess {
     tokens: RegisterTokens,
-    extensions: RegisterExtensions,
+    extensions: Option<RegisterExtensions>,
 }
 #[derive(Deserialize)]
 struct RegisterTokens {
@@ -171,11 +175,11 @@ struct Bearer {
 }
 #[derive(Deserialize)]
 struct RegisterExtensions {
-    customer_info: Customer,
+    customer_info: Option<Customer>,
 }
 #[derive(Deserialize)]
 struct Customer {
-    user_id: String,
+    user_id: Option<String>,
 }
 
 pub(crate) struct Registration {
@@ -188,9 +192,14 @@ pub(crate) async fn register(
     serial: &str,
     verifier: &str,
     code: &str,
-) -> Result<Registration, Error> {
+) -> Result<Registration, ConnectionError> {
     let mut bytes = [0; 313];
-    getrandom::fill(&mut bytes).map_err(|_| provider_error(ErrorKind::Configuration))?;
+    getrandom::fill(&mut bytes).map_err(|_| {
+        ConnectionError::new(
+            ConnectionStage::Registration,
+            provider_error(ErrorKind::Configuration),
+        )
+    })?;
     let body = Register {
         requested_extensions: ["device_info", "customer_info"],
         cookies: CookieRequest {
@@ -222,23 +231,42 @@ pub(crate) async fn register(
     };
     let response: RegisterBody = client
         .json(
+            ConnectionStage::Registration,
             client
-                .request(Method::POST, "https://api.amazon.com/auth/register")?
+                .request(Method::POST, "https://api.amazon.com/auth/register")
+                .map_err(|error| ConnectionError::new(ConnectionStage::Registration, error))?
                 .json(&body),
         )
         .await?;
-    let registration = Registration {
-        token: response.response.success.tokens.bearer.refresh_token,
-        customer: response.response.success.extensions.customer_info.user_id,
-    };
-    if registration.token.is_empty()
-        || registration.token.len() > 8192
-        || registration.customer.is_empty()
-        || registration.customer.len() > 256
-    {
-        return Err(provider_error(ErrorKind::InvalidResponse));
+    registration(response)
+}
+
+fn registration(response: RegisterBody) -> Result<Registration, ConnectionError> {
+    let success = response.response.success;
+    let token = success.tokens.bearer.refresh_token;
+    if token.is_empty() || token.len() > 8192 {
+        return Err(ConnectionError::with_status(
+            ConnectionStage::Registration,
+            provider_error(ErrorKind::InvalidResponse),
+            200,
+        ));
     }
-    Ok(registration)
+    // Amazon's response extension is optional. A valid bearer response without
+    // a stable account ID must be diagnosed separately; it cannot safely bind
+    // parcel identity or prove that a reconnect belongs to the same account.
+    let customer = success
+        .extensions
+        .and_then(|extensions| extensions.customer_info)
+        .and_then(|customer| customer.user_id)
+        .filter(|id| !id.is_empty() && id.len() <= 256 && !id.chars().any(char::is_control))
+        .ok_or_else(|| {
+            ConnectionError::failure(
+                ConnectionStage::Registration,
+                ConnectionReason::AccountIdentityMissing,
+            )
+            .with_upstream_status(200)
+        })?;
+    Ok(Registration { token, customer })
 }
 
 #[derive(Serialize)]
@@ -308,29 +336,44 @@ struct WebsiteCookie {
     path: Option<String>,
 }
 
-pub(crate) async fn authenticate(client: &AmazonClient, token: &str) -> Result<(), Error> {
+pub(crate) async fn authenticate(
+    client: &AmazonClient,
+    token: &str,
+) -> Result<(), ConnectionError> {
     let access: Access = client
         .json(
+            ConnectionStage::AccessToken,
             client
-                .request(Method::POST, "https://api.amazon.com/auth/token")?
+                .request(Method::POST, "https://api.amazon.com/auth/token")
+                .map_err(|error| ConnectionError::new(ConnectionStage::AccessToken, error))?
                 .form(&Token::new(token, "access_token", None)),
         )
         .await?;
     if access.access_token.is_empty() {
-        return Err(provider_error(ErrorKind::InvalidResponse));
+        return Err(ConnectionError::with_status(
+            ConnectionStage::AccessToken,
+            provider_error(ErrorKind::InvalidResponse),
+            200,
+        ));
     }
     let response: CookieBody = client
         .json(
+            ConnectionStage::Cookies,
             client
                 .request(
                     Method::POST,
                     "https://www.amazon.com/ap/exchangetoken/cookies",
-                )?
+                )
+                .map_err(|error| ConnectionError::new(ConnectionStage::Cookies, error))?
                 .form(&Token::new(token, "auth_cookies", Some(".amazon.com"))),
         )
         .await?;
-    let origin = Url::parse(crate::amazon::pages::ORIGIN)
-        .map_err(|_| provider_error(ErrorKind::Configuration))?;
+    let origin = Url::parse(crate::amazon::pages::ORIGIN).map_err(|_| {
+        ConnectionError::new(
+            ConnectionStage::Cookies,
+            provider_error(ErrorKind::Configuration),
+        )
+    })?;
     let jar = reqwest::cookie::Jar::default();
     let mut count = 0;
     for (domain, cookies) in response.response.tokens.cookies {
@@ -356,13 +399,17 @@ pub(crate) async fn authenticate(client: &AmazonClient, token: &str) -> Result<(
                 || value
                     .bytes()
                     .any(|b| b.is_ascii_control() || matches!(b, b';' | b','))
-                || cookie.path.as_deref().is_some_and(|p| p != "/")
             {
-                return Err(provider_error(ErrorKind::InvalidResponse));
+                return Err(ConnectionError::with_status(
+                    ConnectionStage::Cookies,
+                    provider_error(ErrorKind::InvalidResponse),
+                    200,
+                ));
             }
+            let path = cookie_path(cookie.path.as_deref())?;
             jar.add_cookie_str(
                 &format!(
-                    "{}={value}; Domain={domain}; Path=/; Secure; HttpOnly",
+                    "{}={value}; Domain={domain}; Path={path}; Secure; HttpOnly",
                     cookie.name
                 ),
                 &origin,
@@ -371,10 +418,31 @@ pub(crate) async fn authenticate(client: &AmazonClient, token: &str) -> Result<(
         }
     }
     if count == 0 {
-        return Err(provider_error(ErrorKind::InvalidResponse));
+        return Err(ConnectionError::with_status(
+            ConnectionStage::Cookies,
+            provider_error(ErrorKind::InvalidResponse),
+            200,
+        ));
     }
-    client.replace_cookies(jar)?;
+    client
+        .replace_cookies(jar)
+        .map_err(|error| ConnectionError::new(ConnectionStage::Cookies, error))?;
     Ok(())
+}
+
+fn cookie_path(path: Option<&str>) -> Result<&str, ConnectionError> {
+    let path = path.filter(|path| !path.is_empty()).unwrap_or("/");
+    if path.len() > 2048
+        || !path.starts_with('/')
+        || path.chars().any(|c| c.is_control() || c == ';')
+    {
+        return Err(ConnectionError::with_status(
+            ConnectionStage::Cookies,
+            provider_error(ErrorKind::InvalidResponse),
+            200,
+        ));
+    }
+    Ok(path)
 }
 
 #[cfg(test)]
@@ -414,5 +482,69 @@ mod tests {
             values["openid.return_to"],
             "https://www.amazon.com/ap/maplanding"
         );
+    }
+    #[test]
+    fn optional_registration_metadata_is_distinct_from_a_malformed_bearer_response() {
+        use crate::amazon::connection::{ConnectionReason, ConnectionStage};
+        // Same successful bearer shape used by the reference integration's
+        // REGISTERED fixture. A session/device identifier is not an account ID.
+        for extension in [
+            "",
+            r#", "extensions": {}"#,
+            r#", "extensions": {"customer_info": {}}"#,
+        ] {
+            let body = format!(
+                r#"{{"response":{{"success":{{"tokens":{{"bearer":{{"refresh_token":"SYNTHETIC_REFRESH","access_token":"SYNTHETIC_ACCESS","expires_in":"3600"}}}}{extension}}}}}}}"#
+            );
+            let body: crate::amazon::auth::RegisterBody = serde_json::from_str(&body).unwrap();
+            let error = match auth::registration(body) {
+                Err(error) => error,
+                Ok(_) => panic!("missing account identity was accepted"),
+            };
+            assert_eq!(error.stage, ConnectionStage::Registration);
+            assert_eq!(error.reason, ConnectionReason::AccountIdentityMissing);
+            assert_eq!(error.upstream_status, Some(200));
+        }
+        let body: crate::amazon::auth::RegisterBody = serde_json::from_str(r#"{"response":{"success":{"tokens":{"bearer":{"refresh_token":"SYNTHETIC_REFRESH"}},"extensions":{"customer_info":{"user_id":"SYNTHETIC_CUSTOMER"}}}}}"#).unwrap();
+        let registration = auth::registration(body).unwrap();
+        assert_eq!(registration.customer, "SYNTHETIC_CUSTOMER");
+        assert_eq!(registration.token, "SYNTHETIC_REFRESH");
+    }
+
+    #[test]
+    fn cookie_paths_default_only_when_absent_and_preserve_real_scope() {
+        use reqwest::cookie::CookieStore as _;
+        for path in [None, Some("")] {
+            assert_eq!(auth::cookie_path(path).unwrap(), "/");
+        }
+        let path = auth::cookie_path(Some("/ap")).unwrap();
+        assert_eq!(path, "/ap");
+        let jar = reqwest::cookie::Jar::default();
+        let origin = reqwest::Url::parse("https://www.amazon.com/").unwrap();
+        jar.add_cookie_str(
+            &format!(
+                "session-id=SYNTHETIC_COOKIE; Domain=.amazon.com; Path={path}; Secure; HttpOnly"
+            ),
+            &origin,
+        );
+        assert!(jar.cookies(&origin.join("ap/signin").unwrap()).is_some());
+        assert!(
+            jar.cookies(&origin.join("your-orders/orders").unwrap())
+                .is_none()
+        );
+        for value in [
+            "relative",
+            "/; Domain=evil.example",
+            "/\r\nSet-Cookie: x=y",
+            "/\0",
+        ] {
+            let error = auth::cookie_path(Some(value)).unwrap_err();
+            assert_eq!(
+                error.stage,
+                crate::amazon::connection::ConnectionStage::Cookies
+            );
+            assert_eq!(error.upstream_status, Some(200));
+        }
+        assert!(auth::cookie_path(Some(&format!("/{}", "a".repeat(2048)))).is_err());
     }
 }
