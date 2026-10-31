@@ -709,6 +709,7 @@ impl Store {
     ) -> Result<Shipment, Error> {
         if parcel.tracker.provider != ProviderId::AmazonAccount
             || parcel.tracker.status == Status::Unknown
+            || parcel.tracker.carrier == Carrier::AmazonMcf
         {
             return Err(Error::Invalid("Amazon observation is not verified".into()));
         }
@@ -788,8 +789,12 @@ impl Store {
                     ));
                 }
             }
+            let correct_account_carrier = current.tracking.carrier == Carrier::AmazonMcf
+                && parcel.tracker.carrier == Carrier::AmazonAccount
+                && current.sync.provider == ProviderId::AfterShip
+                && current.order_reference.as_deref() == Some(&parcel.order_reference);
             if current.direction != Direction::Inbound
-                || current.tracking.carrier != parcel.tracker.carrier
+                || (current.tracking.carrier != parcel.tracker.carrier && !correct_account_carrier)
             {
                 return Err(Error::Conflict(
                     "Existing shipment does not match the verified Amazon parcel".into(),
@@ -805,8 +810,8 @@ impl Store {
                 let mut history = current.carrier_tracking.clone();
                 history.merge(&tracker.carrier_tracking);
                 tracker.carrier_tracking = history;
-                sqlx::query("UPDATE shipments SET tracking_generation=tracking_generation+1,lease_token=NULL,lease_until=NULL WHERE id=?")
-                    .bind(id.to_string()).execute(&mut *tx).await?;
+                sqlx::query("UPDATE shipments SET tracking_carrier=?,tracking_generation=tracking_generation+1,lease_token=NULL,lease_until=NULL WHERE id=?")
+                    .bind(tracker.carrier.as_db_key()).bind(id.to_string()).execute(&mut *tx).await?;
                 Self::save_verification(&mut tx, id, &tracker).await?;
             }
             if add_source || adopt {

@@ -124,8 +124,10 @@ agent access and revocations at the time of the backup.
 `src/amazon` owns the Amazon.com retail device sign-in, private credential file,
 cookie session and bounded website adapters. `AmazonClient` implements the same
 `ShippingApi` contract as other tracking providers. An account-scoped opaque
-tracker ID binds the saved package page to the authenticated account; the carrier
-remains USPS, UPS, Amazon Logistics, or the actual carrier named by the page.
+tracker ID binds the saved package page to the authenticated consumer account.
+Amazon-handled deliveries use the distinct **Amazon Account** tracking product;
+USPS, UPS, and other named couriers retain their own carrier identities. Amazon
+Account is not Amazon MCF or Amazon Shipping and never uses their provider routes.
 
 `AmazonDiscoveryWorker` runs in the existing provider-worker lifecycle and uses
 the shared base polling interval, jitter and retry calculation. It reads the order
@@ -140,6 +142,10 @@ barcodes. Verified source identity and shipment updates commit atomically. Globa
 tracking-number uniqueness deduplicates an existing parcel, including archived
 records, without replacing user metadata or an existing last-mile provider.
 Different tracking numbers are not merged without explicit parcel evidence.
+
+Successful discovery is scheduled every 30 minutes with up to three minutes of
+stable jitter. Discovery continues when all saved parcels are delivered; terminal
+parcels themselves stop polling. Failures honor the shared retry/backoff policy.
 
 Account replacement invalidates in-flight work. Discovery holds the account
 generation through each short database commit; normal sync uses the provider's

@@ -543,7 +543,7 @@ fn header_carriers(html: &Html) -> Result<Vec<Carrier>, Error> {
 
 fn carrier(value: &str) -> Option<Carrier> {
     match value.trim().to_ascii_uppercase().as_str() {
-        "AMAZON" | "AMZN_US" | "AMZL_US" | "AMAZON LOGISTICS" => Some(Carrier::AmazonMcf),
+        "AMAZON" | "AMZN_US" | "AMZL_US" | "AMAZON LOGISTICS" => Some(Carrier::AmazonAccount),
         "USPS" | "US_POSTAL_SERVICE" => Some(Carrier::Usps),
         "UPS" => Some(Carrier::Ups),
         "FEDEX" | "FED_EX" => Some(Carrier::FedExDefault),
@@ -556,7 +556,7 @@ fn carrier(value: &str) -> Option<Carrier> {
 pub(crate) fn supports_carrier(value: Carrier) -> bool {
     matches!(
         value,
-        Carrier::AmazonMcf
+        Carrier::AmazonAccount
             | Carrier::AmazonShipping
             | Carrier::Usps
             | Carrier::Ups
@@ -969,7 +969,11 @@ mod tests {
             "/progress-tracker/package?orderId=111-1234567-1234567&shipmentId=SHIP1&packageIndex=0";
         let html = r#"<h3 class="a-spacing-small">Delivery facilitated by Amazon</h3><div class="a-row tracking-event-carrier-header"><h2>Delivery facilitated by Amazon</h2></div><script id="page-state">{"trackingId":"TBA000000000020","orderId":"111-1234567-1234567","shipmentId":"SHIP1","packageIndex":"0","shortStatus":"DELIVERED","progressTracker":{"lastReachedMilestone":"DELIVERED"}}</script>"#;
         let tracker = pages::tracking(html, path, Some("TBA000000000020")).unwrap();
-        assert_eq!(tracker.carrier, Carrier::AmazonMcf);
+        assert_eq!(tracker.carrier.as_str(), "AmazonAccount");
+        assert_eq!(
+            crate::shipping_api::types::ProviderId::for_carrier(Some(tracker.carrier)).as_str(),
+            "amazon_account"
+        );
         assert_eq!(tracker.status, Status::Delivered);
         assert_eq!(tracker.tracking_code, "TBA000000000020");
     }

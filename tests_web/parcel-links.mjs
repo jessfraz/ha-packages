@@ -14,13 +14,29 @@ test("Amazon MCF has official carrier tracking even without an AfterShip public 
   ]);
 });
 
-test("Amazon Logistics numbers use the recipient route instead of Swiship", () => {
+test("Amazon Account carrier uses its recipient fallback without relabeling MCF", () => {
   for (const number of ["TBA_SYNTHETIC123", "tba_synthetic123"]) {
-    const links = trackingLinks({ tracking: { carrier: "AmazonMcf", number }, sync: { provider: "aftership" } });
+    const links = trackingLinks({ tracking: { carrier: "AmazonAccount", number }, sync: { provider: "amazon_account" } });
     assert.deepEqual(links.map(([label, url]) => [label, url.href]), [
       ["Carrier tracking", `https://track.amazon.com/tracking/${number}`],
     ]);
+    assert.equal(carrierTrackingUrl({ carrier: "AmazonMcf", number }).href,
+      `https://www.swiship.com/track?id=${number}`);
   }
+  assert.equal(carrierTrackingUrl({ carrier: "AmazonAccount", number }), null);
+});
+
+test("carrier labels distinguish Amazon Account from genuine MCF in all presentation contexts", async () => {
+  const { carrierLabel, carrierOptionLabel, providerNames } = await import("../web/parcel-links.js");
+  assert.equal(carrierLabel("AmazonAccount"), "Amazon Account");
+  assert.equal(carrierOptionLabel("AmazonAccount"), "Amazon Account");
+  assert.equal(providerNames.amazon_account, "Amazon Account");
+  assert.equal(carrierLabel("AmazonMcf"), "Amazon MCF");
+  assert.equal(carrierOptionLabel("AmazonMcf"), "Amazon MCF (AfterShip)");
+  assert.equal(carrierLabel(null), "Carrier not identified");
+  assert.equal(carrierLabel(null, "Auto-detect carrier"), "Auto-detect carrier");
+  assert.equal(carrierLabel("FutureCarrier"), "FutureCarrier");
+  assert.equal(carrierOptionLabel("FedExDefault"), "FedEx Default (EasyPost account)");
 });
 
 test("supported carrier families and their account aliases retain direct tracking", () => {
@@ -106,12 +122,12 @@ test("path identifiers cannot traverse or crash the detail view", () => {
       assert.equal(carrierTrackingUrl({ carrier, number }), null);
 });
 
-test("Amazon account tracking keeps the actual carrier and its validated account link", () => {
+test("Amazon Account links prefer the actual account page while retaining the real carrier", () => {
   const url = "https://www.amazon.com/gp/your-account/ship-track?orderId=SYNTHETIC&shipmentId=PACKAGE&packageId=1";
   const links = trackingLinks(shipment("USPS", "amazon_account", url));
-  assert.deepEqual(links.map(([label]) => label), ["Carrier tracking", "Amazon tracking"]);
-  assert.equal(links[0][1].hostname, "tools.usps.com");
-  assert.equal(links[1][1].href, url);
+  assert.deepEqual(links.map(([label]) => label), ["Amazon Account tracking", "Carrier tracking"]);
+  assert.equal(links[0][1].href, url);
+  assert.equal(links[1][1].hostname, "tools.usps.com");
   for (const value of [
     "https://www.amazon.com/ap/maplanding?openid.oa2.authorization_code=SECRET",
     "https://www.amazon.com/gp/your-account/ship-track?orderId=ONE&orderId=TWO",
@@ -121,4 +137,34 @@ test("Amazon account tracking keeps the actual carrier and its validated account
     "https://user:secret@www.amazon.com/gp/your-account/ship-track?orderId=ONE",
     "https://www.amazon.com.evil.test/gp/your-account/ship-track?orderId=ONE",
   ]) assert.equal(providerTrackingUrl("amazon_account", value), null);
+});
+
+test("Amazon Account links retain indexed package and item identity without invented private URLs", () => {
+  const query = "orderId=SYNTHETIC&shipmentId=PACKAGE&packageIndex=0&lineItemId=LINE&itemId=ITEM&trackingId=TBASYNTHETIC123";
+  for (const path of [
+    "/gp/your-account/ship-track", "/progress-tracker/package",
+    "/-/en/gp/your-account/ship-track", "/-/en/progress-tracker/package",
+  ]) {
+    const url = `https://www.amazon.com${path}?${query}`;
+    assert.equal(providerTrackingUrl("amazon_account", url)?.href, url);
+    const value = shipment("AmazonAccount", "amazon_account", url);
+    value.tracking.number = "TBASYNTHETIC123";
+    assert.deepEqual(trackingLinks(value).map(([label, link]) => [label, link.href]), [
+      ["Amazon Account tracking", url],
+    ]);
+    for (const suffix of [
+      "&packageIndex=1", "&lineItemId=OTHER", "&token=PRIVATE", "&orderId=OTHER",
+      "&itemId=ITEM%2FPATH", "#fragment",
+    ]) assert.equal(providerTrackingUrl("amazon_account", url + suffix), null);
+  }
+  for (const url of [
+    "http://www.amazon.com/progress-tracker/package?orderId=ONE",
+    "https://www.amazon.com:444/progress-tracker/package?orderId=ONE",
+    "https://www.amazon.com.evil.test/progress-tracker/package?orderId=ONE",
+    "https://user:private@www.amazon.com/progress-tracker/package?orderId=ONE",
+    "https://www.amazon.com/progress-tracker/package/delivery-information?orderId=ONE",
+    "https://www.amazon.com/progress-tracker/package?orderId=ONE&lineItemId=LINE%2FOTHER",
+    "https://www.amazon.com/progress-tracker/package?orderId=ONE&lineItemId=" + "x".repeat(129),
+  ]) assert.equal(providerTrackingUrl("amazon_account", url), null);
+  assert.equal(trackingLinks(shipment("AmazonAccount", "amazon_account")).length, 0);
 });
