@@ -937,3 +937,36 @@ dialog::backdrop {
   .direction-inbound { background: #153e38; color: #9ddfce; }
   .direction-outbound { background: #502439; color: #efb2d1; }
 }
+
+.amazon-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+#amazon-sign-in,
+#amazon-preview-result {
+  border-top: 1px solid var(--line);
+  margin-top: 18px;
+  padding-top: 12px;
+}
+#amazon-sign-in {
+  max-width: 680px;
+}
+#amazon-preview-list {
+  padding-left: 22px;
+}
+#amazon-preview-list li {
+  margin: 14px 0;
+  overflow-wrap: anywhere;
+}
+#amazon-preview-list strong {
+  font-size: 14px;
+}
+#amazon-preview-list p {
+  margin: 5px 0;
+}
+#amazon-message,
+#amazon-error {
+  font-size: 13px;
+  line-height: 1.6;
+}

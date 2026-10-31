@@ -1,4 +1,4 @@
-export const providerNames = { easypost: "EasyPost", aftership: "AfterShip", doordash: "DoorDash" };
+export const providerNames = { easypost: "EasyPost", aftership: "AfterShip", doordash: "DoorDash", amazon_account: "Amazon" };
 
 // Only documented public tracking routes belong here. Carrier aliases share
 // one route; the API provider (EasyPost/AfterShip) does not identify the carrier.
@@ -56,6 +56,20 @@ export function recipientTrackingUrl(value) {
 export function providerTrackingUrl(provider, value) {
   if (typeof value !== "string" || !value || value.length > 2048 || /[\u0000-\u001f\u007f]/.test(value)) return null;
   if (provider === "doordash") return recipientTrackingUrl(value);
+  if (provider === "amazon_account") {
+    try {
+      const url = new URL(value);
+      const parameters = new Set(["orderId", "shipmentId", "packageId", "itemId", "trackingId"]);
+      if (url.protocol === "https:" && url.host === "www.amazon.com" &&
+          ["/gp/your-account/ship-track", "/progress-tracker/package"].includes(url.pathname) &&
+          !url.username && !url.password && !url.hash && !value.includes("\\") &&
+          [...url.searchParams].every(([key, value]) => parameters.has(key) && value && value.length <= 256 && url.searchParams.getAll(key).length === 1) &&
+          url.searchParams.has("orderId")) return url;
+    } catch {
+      // Only the account's actual, validated tracking page may be rendered.
+    }
+    return null;
+  }
   const hosts = provider === "easypost" ? ["track.easypost.com"]
     : provider === "aftership" ? ["www.aftership.com", "track.aftership.com"] : [];
   try {

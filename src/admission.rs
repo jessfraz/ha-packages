@@ -272,7 +272,7 @@ pub async fn verify(
         .map_err(crate::error::Error::from)?;
     let cached = cached.filter(|tracker| {
         tracker.provider == provider.id()
-            && ProviderId::for_carrier(Some(tracker.carrier)) == provider.id()
+            && provider.supports_carrier(tracker.carrier)
             && tracker.tracking_code == tracking.number
             && attempt.requested_recipient_url == tracking.recipient_url
             && tracking
@@ -338,7 +338,7 @@ pub async fn verify(
         }
     }.await.and_then(|tracker| {
         if tracker.provider != provider.id()
-            || ProviderId::for_carrier(Some(tracker.carrier)) != provider.id()
+            || !provider.supports_carrier(tracker.carrier)
             || tracker.tracking_code != tracking.number
             || tracking.carrier.is_some_and(|carrier| carrier != tracker.carrier)
             || tracking.recipient_url.as_ref().is_some_and(|url| tracker.public_url.as_ref() != Some(url))

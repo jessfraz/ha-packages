@@ -1,0 +1,57 @@
+Amazon account support in src/amazon is adapted from ha-amazon
+(https://github.com/ha-parcel-integrations/ha-amazon), revision
+ef60a21cc87d1118b3d0fac29c1c81c027fc6247.
+
+MIT License
+
+Copyright (c) 2026 ha-amazon contributors
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+
+Amazon (ha-amazon)
+
+The Amazon sign-in module, custom_components/amazon_orders/account/auth.py,
+contains code adapted from alexapy:
+
+    alexapy
+    Copyright Keaton Taylor and Alan Tse
+    Licensed under the Apache License, Version 2.0
+    https://gitlab.com/keatontaylor/alexapy
+
+alexapy is the library behind Alexa Media Player
+(https://github.com/alandtse/alexa_media_player). The adapted parts are the
+sign-in URL, the device registration, the access-token refresh and the
+token-to-cookie exchange from alexapy/alexalogin.py. They have been rewritten
+to run on aiohttp alone and to fit this integration; alexapy itself is not a
+dependency.
+
+A copy of the Apache License, Version 2.0 is included as
+LICENSE-Apache-2.0 and is available at
+http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+License for the specific language governing permissions and limitations under
+the License.
+
+alexapy ships no NOTICE file of its own; this file is the attribution record
+for the adapted code. The rest of this repository is licensed under the MIT
+License (see LICENSE).

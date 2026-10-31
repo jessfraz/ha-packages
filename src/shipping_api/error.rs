@@ -12,6 +12,7 @@ pub struct Error {
 
 #[derive(Debug)]
 pub enum ErrorKind {
+    AuthenticationRequired,
     Configuration,
     Timeout,
     LocalQueueTimeout,
@@ -76,6 +77,7 @@ impl Error {
             | ErrorKind::ProviderStateRejected { rejection, .. } => rejection.error_code(),
             ErrorKind::RegistrationAmbiguous => "registration_ambiguous",
             ErrorKind::RegistrationExpired => "registration_expired",
+            ErrorKind::AuthenticationRequired => "provider_authentication_required",
             ErrorKind::Configuration => "provider_configuration",
             ErrorKind::Timeout => "provider_timeout",
             ErrorKind::LocalQueueTimeout => "local_provider_queue_timeout",
@@ -171,7 +173,8 @@ impl Error {
 pub fn configuration_error_code(code: &str) -> bool {
     matches!(
         code,
-        "tracking_provider_credentials"
+        "provider_authentication_required"
+            | "tracking_provider_credentials"
             | "tracking_carrier_account_required"
             | "tracking_carrier_credentials_required"
             | "tracking_test_key"
@@ -207,6 +210,7 @@ impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let provider = self.provider.name();
         match &self.kind {
+            ErrorKind::AuthenticationRequired => write!(f, "{provider} requires sign-in again"),
             ErrorKind::Configuration => write!(f, "invalid {provider} client configuration"),
             ErrorKind::Timeout => write!(f, "{provider} request timed out"),
             ErrorKind::LocalQueueTimeout => write!(f, "Local {provider} request queue deadline expired before sending"),

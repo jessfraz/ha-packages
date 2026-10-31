@@ -1,5 +1,7 @@
 use anyhow::{Context as _, Result};
 use shipments::{
+    amazon::AmazonClient,
+    amazon_sync::AmazonDiscoveryWorker,
     api,
     config::Config,
     shipping_api::{
@@ -24,8 +26,12 @@ async fn main() -> Result<()> {
         .api_token
         .as_deref()
         .context("missing owner credential")?;
+    let amazon = Arc::new(AmazonClient::new(
+        config.database.with_file_name("amazon-account.json"),
+    )?);
     let mut context = api::Context::new(store.clone(), token, None, None)
-        .with_provider(Arc::new(DoorDashClient::new()?.with_logger(log.clone())));
+        .with_provider(Arc::new(DoorDashClient::new()?.with_logger(log.clone())))
+        .with_amazon(amazon.clone());
     if let Some(key) = config.easypost_api_key {
         context =
             context.with_provider(Arc::new(EasyPostClient::new(key)?.with_logger(log.clone())));
@@ -73,6 +79,8 @@ async fn main() -> Result<()> {
         None
     };
     let workers: Vec<_> = providers.into_iter().map(|provider| {
+        let discovery = (provider.id() == shipments::shipping_api::types::ProviderId::AmazonAccount)
+            .then(|| AmazonDiscoveryWorker::new(store.clone(), amazon.clone()));
         let worker = SyncWorker::new(store.pool().clone(), provider);
         let log = log.clone();
         let mut worker_stop = stop_rx.clone();
@@ -80,7 +88,10 @@ async fn main() -> Result<()> {
             loop {
                 tokio::select! {
                     _ = worker_stop.changed() => break,
-                    result = worker.tick() => {
+                    result = async {
+                        let discovered = if let Some(discovery) = &discovery { discovery.tick().await? } else { false };
+                        worker.tick().await.map(|updated| updated || discovered)
+                    } => {
                         let delay = match result {
                             Ok(true) => std::time::Duration::from_millis(100),
                             Ok(false) => std::time::Duration::from_secs(5),

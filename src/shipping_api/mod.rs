@@ -11,9 +11,21 @@ use std::sync::Arc;
 
 use crate::shipping_api::types::{ApiFuture, ProviderId, Registration, Tracker};
 
+/// Keeps a provider account identity stable through the worker's short commit.
+pub trait ObservationGuard: Send {}
+impl ObservationGuard for () {}
+
 pub trait ShippingApi: Send + Sync {
+    fn observation_guard(&self) -> ApiFuture<'_, Box<dyn ObservationGuard + '_>> {
+        Box::pin(async { Ok(Box::new(()) as Box<dyn ObservationGuard>) })
+    }
+
     fn id(&self) -> ProviderId;
     fn blocked(&self) -> bool;
+    /// A selected provider must independently verify this carrier and parcel identity.
+    fn supports_carrier(&self, carrier: crate::carrier::Carrier) -> bool {
+        ProviderId::for_carrier(Some(carrier)) == self.id()
+    }
     /// Scope correlation fields while retaining the same shared pacing state.
     fn for_request(&self, request_id: &str, shipment_id: Option<&str>) -> Arc<dyn ShippingApi>;
     fn check_connection(&self) -> ApiFuture<'_, ()>;

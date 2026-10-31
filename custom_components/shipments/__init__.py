@@ -3,7 +3,7 @@
 from pathlib import Path
 from urllib.parse import urlencode
 
-from homeassistant.components import frontend
+from homeassistant.components import frontend, persistent_notification
 from homeassistant.components.http import StaticPathConfig
 from homeassistant.config_entries import ConfigEntry, ConfigEntryState
 from homeassistant.const import Platform
@@ -15,7 +15,11 @@ from homeassistant.loader import async_get_integration
 from .assist_sentences import async_register_sentences
 from .client import ShipmentsClient
 from .const import CONF_ADDON_SLUG, CONF_BACKEND_URL, CONF_TOKEN, DOMAIN
-from .coordinator import EventCheckpoint, ShipmentsCoordinator
+from .coordinator import (
+    EventCheckpoint,
+    ShipmentsCoordinator,
+    amazon_notification_id,
+)
 from .http import ShipmentsView
 from .services import async_register_services
 
@@ -95,6 +99,7 @@ async def async_remove_entry(hass: HomeAssistant, entry: ShipmentsConfigEntry) -
     await Store[EventCheckpoint](
         hass, 1, f"{DOMAIN}.{entry.entry_id}.events"
     ).async_remove()
+    persistent_notification.async_dismiss(hass, amazon_notification_id(entry.entry_id))
     for issue in (
         "version_mismatch",
         "event_stream_unavailable",

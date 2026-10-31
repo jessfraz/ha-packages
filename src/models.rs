@@ -612,6 +612,8 @@ pub struct Summary {
 
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
 pub struct System {
+    #[serde(default)]
+    pub amazon: crate::amazon::AmazonStatus,
     pub version: String,
     pub provider_enabled: bool,
     #[serde(default)]

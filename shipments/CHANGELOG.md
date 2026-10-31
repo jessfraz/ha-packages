@@ -1,3 +1,14 @@
+## 0.6.14
+
+- Connect one Amazon.com account from Shipments settings, preview verified parcels
+  without changing shipments, and explicitly enable automatic imports.
+- Share normal tracking cadence and preserve carrier identity, existing records,
+  history and manual corrections when Amazon provides an existing tracking number.
+- Notify Home Assistant when Amazon needs sign-in again, with a direct reconnect
+  path. Keep credentials private and imports disabled until explicitly enabled.
+- Amazon.com payload compatibility still needs a user-connected live preview;
+  ambiguous parcels and unverified delivery times are left unset.
+
 ## 0.6.13
 
 - Rename the carrier-link module to `parcel-links.js` to avoid a content-filter

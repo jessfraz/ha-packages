@@ -154,7 +154,10 @@ impl slog::Serializer for Fields {
         // secrets, addresses, body fragments, or provider error responses.
         match key.as_str() {
             "provider" => {
-                self.provider = allowed(&value.to_string(), &["easypost", "aftership", "doordash"])
+                self.provider = allowed(
+                    &value.to_string(),
+                    &["easypost", "aftership", "doordash", "amazon_account"],
+                )
             }
             "req_id" | "request_id" => self.request_id = Uuid::parse_str(&value.to_string()).ok(),
             "shipment_id" => self.shipment_id = Uuid::parse_str(&value.to_string()).ok(),
@@ -262,6 +265,7 @@ impl slog::Serializer for Fields {
                         "provider_invalid_response",
                         "provider_response_too_large",
                         "provider_configuration",
+                        "provider_authentication_required",
                         "provider_throttled",
                         "provider_rate_limited",
                         "database_error",
@@ -335,6 +339,13 @@ fn route_template(uri: &str) -> &'static str {
         "/v1/installation/check" => "/v1/installation/check",
         "/v1/integration/presence" => "/v1/integration/presence",
         "/v1/agents" => "/v1/agents",
+        "/v1/amazon" => "/v1/amazon",
+        "/v1/amazon/sign-in" => "/v1/amazon/sign-in",
+        "/v1/amazon/complete" => "/v1/amazon/complete",
+        "/v1/amazon/preview" => "/v1/amazon/preview",
+        "/v1/amazon/enable" => "/v1/amazon/enable",
+        "/v1/amazon/refresh" => "/v1/amazon/refresh",
+        "/amazon-settings.js" => "/amazon-settings.js",
         path => {
             let mut segments = path.split('/');
             match (

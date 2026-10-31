@@ -49,6 +49,34 @@ tracked before its first scan.
 | AfterShip | Amazon MCF / Logistics, SpeedX, Sway / Returnmates, and Veho. |
 | DoorDash | Parcels with an original DoorDash Drive recipient tracking link. No API key required. |
 
+### Amazon account imports
+
+Amazon account support is under development and has not yet been validated
+against a live Amazon.com account. Existing Amazon MCF tracking remains separate.
+
+Administrators can connect one Amazon.com retail account from the dashboard's
+**Amazon** settings. Open the generated Amazon sign-in link, complete any
+verification on Amazon, and paste the final landing address back into Shipments.
+The flow uses Amazon's device sign-in, so Amazon may show an Alexa sign-in page.
+Shipments never receives your password or verification code.
+
+Use **Preview shipments** to inspect the result before choosing **Enable imports**.
+Preview does not change shipment records. Only parcels with verified item mapping,
+a supported carrier and a real tracking number are imported. Split parcels stay
+separate; a number already in Shipments links to its existing record.
+
+Amazon parcels use the same tracking schedule as other shipments. Discovery keeps
+checking for new parcels even when none are active. If Amazon rejects the saved
+sign-in, Home Assistant shows a notification linking directly to **Reconnect
+Amazon**. Network failures and changed pages retain saved data and retry separately.
+Disconnect stops account access and retains shipment records and history.
+
+The saved refresh token can create an Amazon website session; it is not scoped
+only to shipments. It stays in an owner-only `amazon-account.json` file beside the
+database, and is included in app backups. It is not encrypted separately at rest.
+Cookies stay in memory. To revoke the Amazon device itself, use Amazon's device
+management; local disconnect removes the app's saved credential.
+
 Carrier access depends on your provider account. Some carriers require their
 own credentials, and registering a tracker can incur provider fees. See
 [carrier configuration](shipments/DOCS.md#add-or-edit-a-shipment) before adding
@@ -151,3 +179,7 @@ and the [changelog](shipments/CHANGELOG.md) for release history.
 ## License
 
 [MIT](LICENSE).
+
+Amazon account authentication includes Apache-2.0-derived portions from alexapy;
+see [NOTICE](NOTICE) and [LICENSE-Apache-2.0](LICENSE-Apache-2.0). The remaining
+project source retains its MIT license.

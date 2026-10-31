@@ -19,6 +19,9 @@ pub type ApiFuture<'a, T> =
 #[serde(rename_all = "snake_case")]
 #[sqlx(rename_all = "lowercase")]
 pub enum ProviderId {
+    #[serde(rename = "amazon_account")]
+    #[sqlx(rename = "amazon_account")]
+    AmazonAccount,
     #[default]
     #[serde(rename = "easypost")]
     EasyPost,
@@ -40,6 +43,7 @@ impl ProviderId {
     }
     pub const fn as_str(self) -> &'static str {
         match self {
+            Self::AmazonAccount => "amazon_account",
             Self::EasyPost => "easypost",
             Self::DoorDash => "doordash",
             Self::AfterShip => "aftership",
@@ -48,6 +52,7 @@ impl ProviderId {
 
     pub const fn name(self) -> &'static str {
         match self {
+            Self::AmazonAccount => "Amazon",
             Self::EasyPost => "EasyPost",
             Self::DoorDash => "DoorDash",
             Self::AfterShip => "AfterShip",

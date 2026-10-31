@@ -105,3 +105,20 @@ test("path identifiers cannot traverse or crash the detail view", () => {
     for (const number of [".", "..", "\ud800"])
       assert.equal(carrierTrackingUrl({ carrier, number }), null);
 });
+
+test("Amazon account tracking keeps the actual carrier and its validated account link", () => {
+  const url = "https://www.amazon.com/gp/your-account/ship-track?orderId=SYNTHETIC&shipmentId=PACKAGE&packageId=1";
+  const links = trackingLinks(shipment("USPS", "amazon_account", url));
+  assert.deepEqual(links.map(([label]) => label), ["Carrier tracking", "Amazon tracking"]);
+  assert.equal(links[0][1].hostname, "tools.usps.com");
+  assert.equal(links[1][1].href, url);
+  for (const value of [
+    "https://www.amazon.com/ap/maplanding?openid.oa2.authorization_code=SECRET",
+    "https://www.amazon.com/gp/your-account/ship-track?orderId=ONE&orderId=TWO",
+    "https://www.amazon.com/gp/your-account/ship-track?orderId=ONE&token=SECRET",
+    "https://www.amazon.com/gp/your-account/ship-track?shipmentId=PACKAGE",
+    "https://www.amazon.com/gp/your-account/ship-track?orderId=ONE#secret",
+    "https://user:secret@www.amazon.com/gp/your-account/ship-track?orderId=ONE",
+    "https://www.amazon.com.evil.test/gp/your-account/ship-track?orderId=ONE",
+  ]) assert.equal(providerTrackingUrl("amazon_account", value), null);
+});
