@@ -27,7 +27,8 @@ typed observations and no JavaScript execution. Its HTML hydration parser is
 a website adapter, not a stable public API contract; changed or ambiguous data
 must fail closed. Each provider shares pacing across its own scoped clients.
 Additional carriers require verified coverage before routing them to a
-provider. Amazon Logistics coverage remains unconfirmed.
+provider. Consumer-account Amazon parcels use Amazon Account rather than the
+MCF provider route.
 
 ## Storage and upgrades
 
@@ -130,21 +131,28 @@ USPS, UPS, and other named couriers retain their own carrier identities. Amazon
 Account is not Amazon MCF or Amazon Shipping and never uses their provider routes.
 
 `AmazonDiscoveryWorker` runs in the existing provider-worker lifecycle and uses
-the shared base polling interval, jitter and retry calculation. It reads the order
-listing once and follows at most ten unresolved parcel groups per cycle, rotating
-bounded work. The normal `SyncWorker` fetches a known parcel's saved page at the
+the shared base polling interval, jitter and retry calculation. Each batch reads
+at most three listing pages and five unresolved parcel groups, retaining an
+account-scoped bounded sweep of recent orders. Mobile `chunkState` continuation
+uses only its validated numeric start index, never a continuation token. Pending
+batches continue no sooner than one minute later; a completed sweep returns to
+the normal discovery interval. Verified progress survives a later transient
+parcel failure, and failed leaves rotate behind unvisited work after backoff.
+The normal `SyncWorker` fetches a known parcel's saved page at the
 shared status-based cadence. Account listing is not repeated for each saved parcel.
 
 Imports start disabled. The owner-only preview endpoint performs reads without
 writing shipment data. Enabling imports schedules discovery. Real parcel identity
 and product mapping are required; missing tracking numbers never become synthetic
-barcodes. Verified source identity and shipment updates commit atomically. Global
+barcodes. Generated titles are bounded display text; their length does not
+invalidate verified parcel identity. Verified source identity and shipment
+updates commit atomically. Global
 tracking-number uniqueness deduplicates an existing parcel, including archived
 records, without replacing user metadata or an existing last-mile provider.
 Different tracking numbers are not merged without explicit parcel evidence.
 
-Successful discovery is scheduled every 30 minutes with up to three minutes of
-stable jitter. Discovery continues when all saved parcels are delivered; terminal
+Completed discovery sweeps are scheduled every 30 minutes with up to three minutes
+of stable jitter. Discovery continues when all saved parcels are delivered; terminal
 parcels themselves stop polling. Failures honor the shared retry/backoff policy.
 
 Account replacement invalidates in-flight work. Discovery holds the account
@@ -159,5 +167,13 @@ or explicit disconnect. Amazon expiry does not invalidate Home Assistant pairing
 The notification deep link opens settings without carrying codes or credentials.
 
 The adapter follows pinned ha-amazon/alexapy source with MIT and Apache-2.0
-attribution in NOTICE. The US website contract still needs a later, explicitly
-authorized non-writing live preview. Fixtures do not establish live compatibility.
+attribution in NOTICE. Website layouts are deliberately narrow; unsupported or
+changed pages are deferred rather than guessed into shipment identities.
+
+Amazon promise wording is parsed at ingestion into typed civil dates and a typed
+observation timestamp. A delivered month/day uses the most recent plausible
+year; estimates choose the nearest plausible year, including overdue dates and
+December/January boundaries. Relative dates use the provider's IANA timezone.
+Explicit ranges remain ranges. Calendar dates do not imply midnight delivery
+scans, and unknown wording does not become a fabricated date. The dashboard
+formats these backend dates without interpreting provider prose.

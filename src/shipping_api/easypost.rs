@@ -148,6 +148,7 @@ impl From<ProviderTracker> for Tracker {
             ),
             estimated_delivery_window: None,
             delivered_at: None,
+            delivery_date: None,
             events_truncated: false,
         };
         let incoming = std::mem::take(&mut carrier_tracking);

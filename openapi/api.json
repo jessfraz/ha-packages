@@ -65,6 +65,9 @@
       },
       "AmazonPreview": {
         "properties": {
+          "complete": {
+            "type": "boolean"
+          },
           "deferred": {
             "format": "uint",
             "minimum": 0,
@@ -72,6 +75,9 @@
           },
           "deferred_reasons": {
             "$ref": "#/components/schemas/DeferredCounts"
+          },
+          "has_more": {
+            "type": "boolean"
           },
           "shipments": {
             "items": {
@@ -81,8 +87,10 @@
           }
         },
         "required": [
+          "complete",
           "deferred",
           "deferred_reasons",
+          "has_more",
           "shipments"
         ],
         "type": "object"
@@ -325,6 +333,15 @@
             "description": "Actual delivery scan time, independent of an estimated delivery date.",
             "nullable": true,
             "type": "string"
+          },
+          "delivery_date": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/ProviderDeliveryDate"
+              }
+            ],
+            "description": "Provider-reported civil delivery date, distinct from an actual scan instant. Yearless wording is resolved at observation in its IANA zone. Omit absent metadata so historical snapshots retain their wire shape.",
+            "nullable": true
           },
           "estimated_delivery_at": {
             "default": null,
@@ -577,6 +594,15 @@
             "description": "Verified actual carrier delivery date/time, never an ETA or override time.",
             "nullable": true,
             "type": "string"
+          },
+          "delivery_date": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/ProviderDeliveryDate"
+              }
+            ],
+            "description": "Provider civil date without an invented delivery instant.",
+            "nullable": true
           },
           "direction": {
             "$ref": "#/components/schemas/Direction"
@@ -851,6 +877,89 @@
         "required": [
           "backup",
           "version"
+        ],
+        "type": "object"
+      },
+      "ProviderDeliveryDate": {
+        "description": "A provider civil date never implies a time of day or an actual scan instant.",
+        "oneOf": [
+          {
+            "properties": {
+              "date": {
+                "format": "date",
+                "type": "string"
+              },
+              "kind": {
+                "enum": [
+                  "delivered"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "date",
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "date": {
+                "format": "date",
+                "type": "string"
+              },
+              "kind": {
+                "enum": [
+                  "estimated"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "date",
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "end": {
+                "format": "date",
+                "type": "string"
+              },
+              "kind": {
+                "enum": [
+                  "estimated_range"
+                ],
+                "type": "string"
+              },
+              "start": {
+                "format": "date",
+                "type": "string"
+              }
+            },
+            "required": [
+              "end",
+              "kind",
+              "start"
+            ],
+            "type": "object"
+          }
+        ],
+        "properties": {
+          "observed_at": {
+            "description": "Observation metadata, never the actual delivery instant.",
+            "format": "date-time",
+            "type": "string"
+          },
+          "timezone": {
+            "description": "Validated provider IANA timezone used to resolve relative/yearless dates.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "observed_at",
+          "timezone"
         ],
         "type": "object"
       },
@@ -1542,7 +1651,7 @@
   "info": {
     "description": "Persistent local shipment records, manual corrections, and carrier synchronization. Use a Bearer owner or ingestion token. Creates require Idempotency-Key; writes to an existing shipment require its quoted revision in If-Match.",
     "title": "Shipments API",
-    "version": "0.6.23"
+    "version": "0.6.24"
   },
   "openapi": "3.0.3",
   "paths": {
@@ -2328,6 +2437,15 @@
             }
           },
           {
+            "description": "ISO civil day for providers without a scan instant. Requires both UTC bounds so timestamp-backed shipments retain the caller's local-day window.",
+            "in": "query",
+            "name": "delivered_on",
+            "schema": {
+              "nullable": true,
+              "type": "string"
+            }
+          },
+          {
             "in": "query",
             "name": "direction",
             "schema": {
@@ -3018,6 +3136,14 @@
               "format": "int64",
               "nullable": true,
               "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "delivered_on",
+            "schema": {
+              "nullable": true,
+              "type": "string"
             }
           },
           {

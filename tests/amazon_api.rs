@@ -673,7 +673,7 @@ async fn every_downstream_connection_boundary_has_a_safe_correlated_error_and_lo
             local_failure: false,
         },
         Case {
-            failed_path: "/your-orders/orders",
+            failed_path: "/your-orders/orders?timeFilter=months-3",
             upstream_status: 200,
             body: "<html>PRIVATE_ORDER_SENTINEL</html>",
             stage: "orders",
@@ -691,7 +691,7 @@ async fn every_downstream_connection_boundary_has_a_safe_correlated_error_and_lo
             local_failure: true,
         },
         Case {
-            failed_path: "/your-orders/orders",
+            failed_path: "/your-orders/orders?timeFilter=months-3",
             upstream_status: 200,
             body: r#"<a class="item-card__link" aria-label="Fixture item, Order placed 1 October 2026, Shipped" href="/gp/your-account/ship-track?orderId=111-1234567-1234567&amp;shipmentId=SHIP1&amp;packageId=1"></a>"#,
             stage: "credentials",
@@ -737,7 +737,8 @@ async fn every_downstream_connection_boundary_has_a_safe_correlated_error_and_lo
                     }
                 };
                 let (status, body) = if path == case.failed_path
-                    || (case.stage == "orders" && path == "/gp/css/order-history")
+                    || (case.stage == "orders"
+                        && path == "/gp/css/order-history?timeFilter=months-3")
                 {
                     (case.upstream_status, case.body)
                 } else {
@@ -759,7 +760,8 @@ async fn every_downstream_connection_boundary_has_a_safe_correlated_error_and_lo
                 );
                 stream.write_all(reply.as_bytes()).await.unwrap();
                 if (path == case.failed_path && case.stage != "orders")
-                    || (case.stage == "orders" && path == "/gp/css/order-history")
+                    || (case.stage == "orders"
+                        && path == "/gp/css/order-history?timeFilter=months-3")
                     || (case.stage == "credentials" && path == "/auth/token")
                 {
                     break;

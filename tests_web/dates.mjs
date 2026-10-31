@@ -32,3 +32,54 @@ test('HA timezone overrides the remote browser and rejects missing/invalid dates
   assert.equal(calendarDate(null, now), 'date not reported');
   assert.equal(calendarDate('2026-10-28T00:00:00', now), 'date not reported');
 });
+
+test('backend calendar dates render without interpreting Amazon wording', async () => {
+  const { deliveryDescription } = await import('../web/dates.js');
+  const now = new Date('2026-10-31T20:00:00Z');
+  const shipment = { status: 'delivered', carrier_tracking: { delivery_date: {
+    kind: 'delivered', date: '2026-10-25', observed_at: '2026-10-31T19:00:00Z', timezone: 'America/Los_Angeles',
+  } } };
+  const actual = deliveryDescription(shipment, now, 'America/Los_Angeles');
+  assert.equal(actual.label, 'Delivered');
+  assert.match(actual.value, /Oct.*25/);
+  assert.equal(shipment.carrier_tracking.delivered_at, undefined);
+  shipment.status = 'in_transit';
+  shipment.carrier_tracking.delivery_date = { kind: 'estimated', date: '2026-11-01' };
+  assert.equal(deliveryDescription(shipment, now, 'America/Los_Angeles').summary, 'Expected tomorrow');
+  assert.equal(deliveryDescription(shipment, new Date('2026-11-01T20:00:00Z'), 'America/Los_Angeles').summary, 'Expected today');
+  shipment.carrier_tracking.delivery_date = { kind: 'estimated_range', start: '2026-11-01', end: '2026-11-02' };
+  assert.match(deliveryDescription(shipment, now, 'America/Los_Angeles').summary, /^Expected tomorrow – /);
+  shipment.carrier_tracking.delivery_date.end = '2026-10-30';
+  assert.equal(deliveryDescription(shipment, now, 'America/Los_Angeles').summary, 'Delivery date not reported yet');
+  shipment.carrier_tracking.delivery_date = { kind: 'delivered', date: '2026-11-01' };
+  assert.equal(deliveryDescription(shipment, now, 'America/Los_Angeles').summary, 'Delivery date not reported yet');
+});
+
+test('actual carrier dates precede manual completion, which remains the final fallback', async () => {
+  const { deliveryDescription } = await import('../web/dates.js');
+  const now = new Date('2026-10-31T20:00:00Z');
+  const shipment = { status: 'delivered', carrier_tracking: {
+    delivered_at: '2026-10-31T01:00:00Z',
+    delivery_date: { kind: 'delivered', date: '2026-10-25' },
+  } };
+  assert.equal(deliveryDescription(shipment, now, 'America/Los_Angeles').summary, 'Delivered yesterday');
+  shipment.carrier_tracking.delivered_at = null;
+  shipment.status_override = { status: 'delivered', set_at: '2026-10-31T19:00:00Z' };
+  assert.match(deliveryDescription(shipment, now, 'America/Los_Angeles').summary, /Oct.*25/);
+  shipment.carrier_tracking.delivery_date = null;
+  assert.equal(deliveryDescription(shipment, now, 'America/Los_Angeles').summary, 'Delivered today');
+  shipment.status = 'return_to_sender';
+  shipment.status_override = null;
+  shipment.carrier_tracking.delivered_at = '2026-10-31T01:00:00Z';
+  assert.equal(deliveryDescription(shipment, now, 'America/Los_Angeles', true).summary, 'Delivered yesterday');
+});
+
+test('explicit estimated windows show their reported date bounds', async () => {
+  const { deliveryDescription } = await import('../web/dates.js');
+  const now = new Date('2026-10-31T20:00:00Z');
+  const shipment = { status: 'in_transit', carrier_tracking: { estimated_delivery_window: { start: '2026-11-01', end: '2026-11-02' } } };
+  const label = deliveryDescription(shipment, now, 'America/Los_Angeles');
+  assert.match(label.summary, /^Expected tomorrow – /);
+  shipment.carrier_tracking.estimated_delivery_window.end = '2026-10-30';
+  assert.equal(deliveryDescription(shipment, now, 'America/Los_Angeles').summary, 'Delivery date not reported yet');
+});

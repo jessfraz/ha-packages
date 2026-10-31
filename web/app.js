@@ -1,6 +1,6 @@
 import { waitForConnection } from "./connection.js";
 import { ApiError } from "./api-error.js";
-import { calendarDate } from "./dates.js";
+import { calendarDate, deliveryDescription } from "./dates.js";
 import { carrierLabel, carrierOptionLabel, providerNames, trackingLinks } from "./parcel-links.js";
 import { installAmazonSettings } from "./amazon-settings.js";
 
@@ -124,11 +124,6 @@ function shipmentBadges(shipment, className) {
   if (shipment.signature_required === true || shipment.carrier_tracking?.signed_by)
     badges.append(element("span", signatureLabel(shipment), "badge signature-badge"));
   return badges;
-}
-
-function deliveredDate(shipment) {
-  return shipment.carrier_tracking?.delivered_at ||
-    (shipment.status_override?.status === "delivered" ? shipment.status_override.set_at : null);
 }
 
 // Fragments keep ingress paths intact and contain no credentials. Back/forward
@@ -445,12 +440,13 @@ async function load(append = false) {
     // A remote browser must not substitute a different local calendar day.
     const deliveryDay = view === "delivered_today" ? (await systemRequest).delivery_day : null;
     if (controller.signal.aborted || generation !== listGeneration) return;
-    const deliveryWindow = deliveryDay ? `${deliveryDay.delivered_after}:${deliveryDay.delivered_before}` : null;
+    const deliveryWindow = deliveryDay ? `${deliveryDay.date}:${deliveryDay.delivered_after}:${deliveryDay.delivered_before}` : null;
     if (append && view === "delivered_today" && deliveryWindow !== shownDeliveryWindow)
       return load();
     if (deliveryDay && !append) {
       query.set("delivered_after", deliveryDay.delivered_after);
       query.set("delivered_before", deliveryDay.delivered_before);
+      query.set("delivered_on", deliveryDay.date);
     }
     const [summary, page, system] = await Promise.all([
       api(activeDirection === "all" ? "v1/summary" : `v1/summary?direction=${activeDirection}`, { signal: controller.signal }),
@@ -519,13 +515,7 @@ async function load(append = false) {
       copy.append(element("h2", shipment.title));
       if (description) copy.append(element("p", description));
       copy.append(element("p", `${carrierLabel(shipment.tracking.carrier)} · ${shipment.tracking.number}`, "shipment-tracking"));
-      const delivered = shipment.status === "delivered" || view === "delivered_today";
-      const deliveryDate = delivered
-        ? deliveredDate(shipment)
-        : shipment.carrier_tracking?.estimated_delivery_at;
-      copy.append(element("p", deliveryDate
-        ? `${delivered ? "Delivered" : "Expected"} ${calendarDate(deliveryDate, new Date(), deliveryTimeZone)}`
-        : delivered ? "Delivery date not reported" : "Delivery date not reported yet", "shipment-date"));
+      copy.append(element("p", deliveryDescription(shipment, new Date(), deliveryTimeZone, view === "delivered_today").summary, "shipment-date"));
       const badges = shipmentBadges(shipment, "shipment-badges");
       row.append(copy, badges);
       row.addEventListener(
@@ -1088,9 +1078,8 @@ async function show(id, preserveView = false, section = route().get("section")) 
     card.append(element("span", label), element("strong", value));
     overview.append(card);
   };
-  if (shipment.status === "delivered") fact("Delivered", dateLabel(deliveredDate(shipment)));
-  else fact("Expected delivery", shipment.carrier_tracking?.estimated_delivery_at
-    ? calendarDate(shipment.carrier_tracking.estimated_delivery_at, new Date(), deliveryTimeZone) : "Not reported yet");
+  const delivery = deliveryDescription(shipment, new Date(), deliveryTimeZone);
+  fact(delivery.label, delivery.value);
   fact("Signature", signatureLabel(shipment));
   if (shipment.carrier_tracking?.signed_by) fact("Signed by", shipment.carrier_tracking.signed_by);
   if (shipment.merchant) fact("Merchant", shipment.merchant);

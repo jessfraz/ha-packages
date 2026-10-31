@@ -19,7 +19,15 @@ from homeassistant.util import dt as dt_util
 from .client import ResponseTooLarge
 from .const import DOMAIN
 from .coordinator import ShipmentsCoordinator
-from .models import DeliveryDay, Direction, ShipmentStatus, parse_delivery_estimate
+from .models import (
+    DeliveryDay,
+    DeliveryWindow,
+    Direction,
+    ShipmentStatus,
+    carrier_estimated_delivery,
+    parse_delivery_window,
+    parse_provider_delivery_date,
+)
 
 _PAGE_LIMIT = 200
 _SPOKEN_LIMIT = 5
@@ -116,8 +124,9 @@ class _Shipment:
     carrier: str
     direction: Direction
     status: ShipmentStatus
-    delivered_at: datetime | None
+    delivered_at: date | datetime | None
     estimated_delivery: date | datetime | None
+    estimated_window: DeliveryWindow | None
     tracking_issue: bool
     archived: bool
 
@@ -153,6 +162,25 @@ class _Shipment:
             delivered_at = dt_util.parse_datetime(delivered)
             if delivered_at is None or delivered_at.tzinfo is None:
                 raise ValueError("Invalid delivery timestamp")
+        if delivered_at is None:
+            reported = parse_provider_delivery_date(
+                carrier_tracking.get("delivery_date"), delivered=True
+            )
+            if isinstance(reported, date):
+                delivered_at = reported
+        estimated = carrier_estimated_delivery(carrier_tracking)
+        window = None
+        # Assist previously used only point ETAs. Add civil ranges without
+        # reinterpreting the calendar's legacy aware-time window semantics.
+        canonical_window = parse_delivery_window(
+            carrier_tracking.get("estimated_delivery_window")
+        )
+        if estimated is None and canonical_window is None:
+            reported = parse_provider_delivery_date(
+                carrier_tracking.get("delivery_date"), delivered=False
+            )
+            if isinstance(reported, DeliveryWindow):
+                window = reported
         error = sync.get("last_error")
         if error is not None and not isinstance(error, str):
             raise ValueError("Invalid tracking state")
@@ -163,7 +191,8 @@ class _Shipment:
             Direction(direction),
             ShipmentStatus(status),
             delivered_at,
-            parse_delivery_estimate(carrier_tracking.get("estimated_delivery_at")),
+            estimated,
+            window,
             error is not None,
             archived,
         )
@@ -267,22 +296,32 @@ async def _page(
     return items, cursor is not None
 
 
-def _estimate_day(item: _Shipment, zone: ZoneInfo) -> date | None:
-    estimate = item.estimated_delivery
-    if isinstance(estimate, datetime):
-        return estimate.astimezone(zone).date()
-    return estimate
+def _civil_day(value: date | datetime, zone: ZoneInfo) -> date:
+    return value.astimezone(zone).date() if isinstance(value, datetime) else value
 
 
-def _estimate_sort(item: _Shipment, zone: ZoneInfo) -> tuple[float, str, str]:
+def _due_on(item: _Shipment, target: date, zone: ZoneInfo) -> bool:
+    if item.estimated_delivery is not None:
+        return _civil_day(item.estimated_delivery, zone) == target
+    window = item.estimated_window
+    return window is not None and (
+        _civil_day(window.start, zone) <= target <= _civil_day(window.end, zone)
+    )
+
+
+def _date_sort(value: date | datetime | None, zone: ZoneInfo) -> tuple[date, float]:
+    if isinstance(value, datetime):
+        return value.astimezone(zone).date(), value.timestamp()
+    # A date has no observed clock time. Sort it deterministically without
+    # manufacturing a midnight delivery timestamp.
+    return (value, float("-inf")) if value is not None else (date.max, float("inf"))
+
+
+def _estimate_sort(item: _Shipment, zone: ZoneInfo) -> tuple[date, float, str, str]:
     estimate = item.estimated_delivery
-    if estimate is None:
-        timestamp = float("inf")
-    elif isinstance(estimate, datetime):
-        timestamp = estimate.timestamp()
-    else:
-        timestamp = datetime.combine(estimate, datetime.min.time(), zone).timestamp()
-    return timestamp, item.title.casefold(), str(item.id)
+    if estimate is None and item.estimated_window is not None:
+        estimate = item.estimated_window.start
+    return *_date_sort(estimate, zone), item.title.casefold(), str(item.id)
 
 
 def _detail(item: _Shipment, request: VoiceRequest, zone: ZoneInfo) -> str:
@@ -291,12 +330,15 @@ def _detail(item: _Shipment, request: VoiceRequest, zone: ZoneInfo) -> str:
         request.query is ShipmentQuery.DELIVERED
         or item.status is ShipmentStatus.DELIVERED
     ):
-        local = item.delivered_at.astimezone(zone)
-        stamp = (
-            local.strftime("at %-I:%M %p")
-            if request.query is ShipmentQuery.DELIVERED
-            else local.strftime("on %B %-d at %-I:%M %p")
-        )
+        if isinstance(item.delivered_at, datetime):
+            local = item.delivered_at.astimezone(zone)
+            stamp = (
+                local.strftime("at %-I:%M %p")
+                if request.query is ShipmentQuery.DELIVERED
+                else local.strftime("on %B %-d at %-I:%M %p")
+            )
+        else:
+            stamp = item.delivered_at.strftime("on %B %-d")
         detail = f"{item.title} via {item.carrier}, delivered {stamp}"
     elif item.estimated_delivery is not None:
         estimate = item.estimated_delivery
@@ -305,6 +347,12 @@ def _detail(item: _Shipment, request: VoiceRequest, zone: ZoneInfo) -> str:
         else:
             text = estimate.strftime("%B %-d")
         detail += f", estimated {text}"
+    elif item.estimated_window is not None:
+        window = item.estimated_window
+        detail += (
+            f", estimated {_civil_day(window.start, zone).strftime('%B %-d')}"
+            f" to {_civil_day(window.end, zone).strftime('%B %-d')}"
+        )
     elif request.query in {ShipmentQuery.ARRIVING, ShipmentQuery.STATUS}:
         detail += ", delivery estimate unavailable"
     if item.tracking_issue:
@@ -397,7 +445,7 @@ async def async_query(
             for item in items
             if item.status not in _TERMINAL
             and (
-                _estimate_day(item, zone) == target
+                _due_on(item, target, zone)
                 or (target == today and item.status is ShipmentStatus.OUT_FOR_DELIVERY)
             )
         ]
@@ -410,7 +458,7 @@ async def async_query(
             item
             for item in items
             if item.delivered_at is not None
-            and item.delivered_at.astimezone(zone).date() == target
+            and _civil_day(item.delivered_at, zone) == target
         ]
     elif request.query is ShipmentQuery.ISSUES:
         items = [
@@ -431,7 +479,7 @@ async def async_query(
             )
     if request.query is ShipmentQuery.DELIVERED:
         items.sort(
-            key=lambda item: item.delivered_at or datetime.min.replace(tzinfo=zone),
+            key=lambda item: _date_sort(item.delivered_at, zone),
             reverse=True,
         )
     else:

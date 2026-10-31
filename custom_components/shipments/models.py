@@ -7,7 +7,7 @@ from enum import StrEnum
 from typing import TypedDict
 from urllib.parse import quote
 from uuid import UUID
-from zoneinfo import ZoneInfo
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from homeassistant.components.calendar import CalendarEvent
 from homeassistant.util import dt as dt_util
@@ -133,6 +133,7 @@ class DeliveryDay:
         return {
             "delivered_after": str(self.delivered_after),
             "delivered_before": str(self.delivered_before),
+            "delivered_on": self.date.isoformat(),
         }
 
     def presence(self) -> DeliveryDayReport:
@@ -169,7 +170,7 @@ class ShipmentItem:
     title: str
     carrier: str
     status: ShipmentStatus
-    delivered_at: datetime | None
+    delivered_at: date | datetime | None
     estimated_delivery: date | datetime | None
 
     @classmethod
@@ -201,12 +202,21 @@ class ShipmentItem:
             delivered = dt_util.parse_datetime(delivered_value)
             if delivered is None or delivered.tzinfo is None:
                 raise ValueError("Invalid carrier delivery timestamp")
+        if delivered is None:
+            reported = parse_provider_delivery_date(
+                carrier_tracking.get("delivery_date"), delivered=True
+            )
+            if isinstance(reported, date):
+                delivered = reported
         parsed_status = ShipmentStatus(status)
         if day is not None:
             # A later manual status correction does not erase a carrier scan.
-            if delivered is None or not (
+            matches_day = (
                 day.delivered_after <= delivered.timestamp() < day.delivered_before
-            ):
+                if isinstance(delivered, datetime)
+                else delivered == day.date
+            )
+            if not matches_day:
                 raise ValueError("Shipment is outside the local delivery day")
         elif parsed_status is not ShipmentStatus.OUT_FOR_DELIVERY:
             raise ValueError("Shipment is not out for delivery")
@@ -216,7 +226,7 @@ class ShipmentItem:
             tracking["carrier"],
             parsed_status,
             delivered,
-            parse_delivery_estimate(carrier_tracking.get("estimated_delivery_at")),
+            carrier_estimated_delivery(carrier_tracking),
         )
 
     def attributes(self) -> ShipmentItemAttributes:
@@ -260,6 +270,57 @@ class DeliveryWindow:
     end: date | datetime
     raw_start: str
     raw_end: str
+
+
+def parse_provider_delivery_date(
+    value: object, *, delivered: bool
+) -> date | DeliveryWindow | None:
+    """Read the backend's typed civil date, never interpret merchant wording."""
+    if not isinstance(value, dict):
+        return None
+    observed, timezone = value.get("observed_at"), value.get("timezone")
+    if (
+        not isinstance(observed, str)
+        or not isinstance(timezone, str)
+        or len(timezone) > 128
+    ):
+        return None
+    try:
+        timestamp = dt_util.parse_datetime(observed)
+        ZoneInfo(timezone)
+    except ValueError, ZoneInfoNotFoundError:
+        return None
+    if timestamp is None or timestamp.tzinfo is None:
+        return None
+    kind = value.get("kind")
+    if not delivered and kind == "estimated_range":
+        start, end = value.get("start"), value.get("end")
+        if not isinstance(start, str) or not isinstance(end, str):
+            return None
+        if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", start) or not re.fullmatch(
+            r"\d{4}-\d{2}-\d{2}", end
+        ):
+            return None
+        return parse_delivery_window({"start": start, "end": end})
+    if kind != ("delivered" if delivered else "estimated"):
+        return None
+    raw = value.get("date")
+    if not isinstance(raw, str) or not re.fullmatch(r"\d{4}-\d{2}-\d{2}", raw):
+        return None
+    return dt_util.parse_date(raw)
+
+
+def carrier_estimated_delivery(record: dict[str, object]) -> date | datetime | None:
+    """Keep canonical ETA precision, falling back only to a typed point date."""
+    estimated = parse_delivery_estimate(record.get("estimated_delivery_at"))
+    if estimated is not None:
+        return estimated
+    if parse_delivery_window(record.get("estimated_delivery_window")) is not None:
+        return None
+    reported = parse_provider_delivery_date(
+        record.get("delivery_date"), delivered=False
+    )
+    return reported if isinstance(reported, date) else None
 
 
 @dataclass(frozen=True, slots=True)
@@ -379,6 +440,14 @@ def delivery_estimate(record: object) -> tuple[UUID, DeliveryEstimate | None]:
         if delivered
         else parse_delivery_window(record.get("estimated_delivery_window"))
     )
+    if estimated is None and window is None:
+        reported = parse_provider_delivery_date(
+            record.get("delivery_date"), delivered=delivered
+        )
+        if isinstance(reported, DeliveryWindow):
+            window = reported
+        else:
+            estimated = reported
     return identity, (
         DeliveryEstimate(
             identity,

@@ -776,7 +776,7 @@ async fn summary(
         request
             .context()
             .store
-            .summary_in_window(query.direction, window)
+            .summary_in_day(query.direction, window, query.delivered_on.as_deref())
             .await?,
     ))
 }
@@ -786,6 +786,7 @@ struct SummaryFilter {
     direction: Option<Direction>,
     delivered_after: Option<i64>,
     delivered_before: Option<i64>,
+    delivered_on: Option<String>,
 }
 
 #[endpoint {method=GET,path="/v1/system",tags=["system"]}]
@@ -994,6 +995,8 @@ struct AmazonPreview {
     shipments: Vec<AmazonPreviewParcel>,
     deferred: usize,
     deferred_reasons: crate::amazon::DeferredCounts,
+    complete: bool,
+    has_more: bool,
 }
 #[derive(Serialize, JsonSchema)]
 struct AmazonPreviewParcel {
@@ -1041,6 +1044,8 @@ async fn amazon_preview(
             shipments,
             deferred: result.deferred,
             deferred_reasons: result.deferred_reasons,
+            complete: result.complete,
+            has_more: result.has_more,
         }),
         private_headers(),
     ))

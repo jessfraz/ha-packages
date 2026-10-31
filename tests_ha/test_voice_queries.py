@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import TypedDict, Unpack
 from uuid import UUID
+from zoneinfo import ZoneInfo
 
 import pytest
 from aiohttp import web
@@ -102,6 +103,25 @@ class ShipmentFields(TypedDict, total=False):
 
 def shipment(index: int = 0, **fields: Unpack[ShipmentFields]) -> VoiceShipment:
     return VoiceShipment(id=str(UUID(int=UUID(SHIPMENT_ID).int + index)), **fields)
+
+
+def dated_record(
+    index: int,
+    title: str,
+    status: str,
+    delivery_date: dict[str, object],
+    **canonical: object,
+) -> dict[str, object]:
+    record = shipment(index, title=title, status=status).record()
+    record["carrier_tracking"] = {
+        "delivery_date": {
+            "observed_at": "2026-10-15T17:00:00Z",
+            "timezone": "America/Los_Angeles",
+            **delivery_date,
+        },
+        **canonical,
+    }
+    return record
 
 
 @pytest.fixture
@@ -327,6 +347,10 @@ async def test_delivered_today_uses_actual_carrier_scan_and_dst_boundaries(
     )
     assert request.query["delivered_after"] == str(int(start.timestamp()))
     assert request.query["delivered_before"] == str(int(end.timestamp()))
+    assert (
+        request.query["delivered_on"]
+        == start.astimezone(ZoneInfo("America/Los_Angeles")).date().isoformat()
+    )
 
 
 async def test_status_title_lookup_needs_unambiguous_match(
@@ -528,3 +552,98 @@ async def test_exposure_revoked_while_query_in_flight_discards_answer(
     answer = await task
     assert answer.error == "not_exposed"
     assert "Should not be disclosed" not in json.dumps(answer.as_dict())
+
+
+async def test_delivered_civil_dates_are_spoken_without_a_fabricated_clock_time(
+    hass: HomeAssistant, voice_entry, voice_backend: VoiceBackend
+) -> None:
+    rows = [
+        dated_record(
+            0,
+            "Civil delivered",
+            "delivered",
+            {"kind": "delivered", "date": "2026-10-15"},
+        ),
+        dated_record(
+            1, "Yesterday", "delivered", {"kind": "delivered", "date": "2026-10-14"}
+        ),
+        dated_record(
+            2,
+            "Actual scan",
+            "delivered",
+            {"kind": "delivered", "date": "2026-10-14"},
+            delivered_at="2026-10-15T16:30:00Z",
+        ),
+        dated_record(
+            3,
+            "Not an actual delivery",
+            "delivered",
+            {"kind": "estimated", "date": "2026-10-15"},
+        ),
+    ]
+    voice_backend.responses[("GET", "/v1/shipments")] = (
+        200,
+        json.dumps({"items": rows, "next_page": None}).encode(),
+        {},
+    )
+    answer = await ask(hass, ShipmentQuery.DELIVERED)
+    assert answer.error is None
+    assert answer.count == 2
+    items = answer.as_dict()["items"]
+    assert [item["title"] for item in items] == ["Actual scan", "Civil delivered"]
+    assert items[1]["delivered_at"] == "2026-10-15"
+    assert "Civil delivered via USPS, delivered on October 15." in answer.speech
+    assert "Actual scan via USPS, delivered at 9:30 AM." in answer.speech
+    assert "12:00 AM" not in answer.speech
+    assert voice_backend.requests[-1].query["delivered_on"] == "2026-10-15"
+
+
+async def test_arriving_civil_estimates_and_ranges_keep_their_real_day_precision(
+    hass: HomeAssistant, voice_entry, voice_backend: VoiceBackend
+) -> None:
+    rows = [
+        dated_record(
+            0, "Tomorrow", "in_transit", {"kind": "estimated", "date": "2026-10-16"}
+        ),
+        dated_record(
+            1,
+            "Within range",
+            "in_transit",
+            {"kind": "estimated_range", "start": "2026-10-15", "end": "2026-10-17"},
+        ),
+        dated_record(
+            2, "Yesterday", "in_transit", {"kind": "estimated", "date": "2026-10-14"}
+        ),
+        dated_record(
+            3,
+            "Canonical today",
+            "in_transit",
+            {"kind": "estimated", "date": "2026-10-16"},
+            estimated_delivery_at="2026-10-15T21:00:00Z",
+        ),
+        dated_record(
+            4,
+            "Legacy timed window remains separate",
+            "in_transit",
+            {"kind": "estimated_range", "start": "2026-10-15", "end": "2026-10-17"},
+            estimated_delivery_window={
+                "start": "2026-10-15T22:00:00-07:00",
+                "end": "2026-10-16T00:00:00-07:00",
+            },
+        ),
+    ]
+    voice_backend.responses[("GET", "/v1/shipments")] = (
+        200,
+        json.dumps({"items": rows, "next_page": None}).encode(),
+        {},
+    )
+    answer = await ask(hass, ShipmentQuery.ARRIVING, day=ShipmentDay.TOMORROW)
+    assert answer.error is None
+    assert answer.count == 2
+    assert {item["title"] for item in answer.as_dict()["items"]} == {
+        "Tomorrow",
+        "Within range",
+    }
+    assert "Tomorrow via USPS, in transit, estimated October 16." in answer.speech
+    assert "estimated October 15 to October 17." in answer.speech
+    assert "12:00 AM" not in answer.speech

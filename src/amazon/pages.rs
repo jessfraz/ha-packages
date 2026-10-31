@@ -10,7 +10,10 @@ use serde::Deserialize;
 use crate::{
     amazon::{DeferredCounts, provider_error},
     carrier::Carrier,
-    models::{CarrierTracking, Status, Tracking},
+    models::{
+        CarrierTracking, DeliveryDateValue, ProviderDeliveryDate, Status, Tracking,
+        provider_optional,
+    },
     shipping_api::{
         error::{Error, ErrorKind},
         types::{ProviderId, Tracker},
@@ -53,6 +56,7 @@ pub(crate) struct ParcelPage {
 
 pub(crate) struct Listing {
     pub parcels: Vec<ParcelPage>,
+    pub next_page: Option<String>,
     pub deferred: usize,
     pub deferred_reasons: DeferredCounts,
 }
@@ -161,9 +165,44 @@ pub(crate) fn allowed_path(input: &str) -> Result<String, Error> {
     }
     let mut canonical = Url::parse(ORIGIN).map_err(|_| provider_error(ErrorKind::Configuration))?;
     canonical.set_path(path.split("/ref=").next().unwrap_or(path));
+    let listing = ["/your-orders/orders", "/gp/css/order-history"].contains(&retail);
     let order_details = retail.split("/ref=").next() == Some("/your-orders/order-details");
     let mut seen = BTreeSet::new();
     for (name, value) in url.query_pairs() {
+        if listing {
+            let (key, value) = match name.to_ascii_lowercase().as_str() {
+                "page" => {
+                    if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+                        return Err(provider_error(ErrorKind::InvalidResponse));
+                    }
+                    let page = value
+                        .parse::<u8>()
+                        .ok()
+                        .filter(|page| *page <= 100)
+                        .ok_or_else(|| provider_error(ErrorKind::InvalidResponse))?;
+                    ("page", page.to_string())
+                }
+                "startindex" => {
+                    if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+                        return Err(provider_error(ErrorKind::InvalidResponse));
+                    }
+                    let start = value
+                        .parse::<u16>()
+                        .ok()
+                        .filter(|start| *start <= 1000 && *start % 10 == 0)
+                        .ok_or_else(|| provider_error(ErrorKind::InvalidResponse))?;
+                    ("startIndex", start.to_string())
+                }
+                "timefilter" if value == "months-3" => ("timeFilter", value.into_owned()),
+                "timefilter" => return Err(provider_error(ErrorKind::InvalidResponse)),
+                _ => continue,
+            };
+            if !seen.insert(key) || (seen.contains("page") && seen.contains("startIndex")) {
+                return Err(provider_error(ErrorKind::InvalidResponse));
+            }
+            canonical.query_pairs_mut().append_pair(key, &value);
+            continue;
+        }
         let key = match name.to_ascii_lowercase().as_str() {
             "orderid" if order_details => "orderID",
             "orderid" => "orderId",
@@ -263,15 +302,54 @@ pub(crate) fn same_parcel_identity(original: &str, destination: &str) -> bool {
                     .is_none_or(|index| destination.index.as_ref() == Some(index))
         }
         (Err(_), Err(_)) => {
-            (["/your-orders/orders", "/gp/css/order-history"].contains(&retail_path(original))
-                && ["/your-orders/orders", "/gp/css/order-history"]
-                    .contains(&retail_path(destination)))
+            listing_identity(original)
+                .zip(listing_identity(destination))
+                .is_some_and(|(original, destination)| {
+                    original.page == destination.page
+                        && original
+                            .time_filter
+                            .as_ref()
+                            .is_none_or(|filter| destination.time_filter.as_ref() == Some(filter))
+                })
                 || order_details_identity(original)
                     .zip(order_details_identity(destination))
                     .is_some_and(|(original, destination)| original == destination)
         }
         _ => false,
     }
+}
+
+#[derive(PartialEq, Eq)]
+struct ListingIdentity {
+    page: u8,
+    time_filter: Option<String>,
+}
+
+fn listing_identity(path: &str) -> Option<ListingIdentity> {
+    let path = allowed_path(path).ok()?;
+    let url = Url::parse(ORIGIN).ok()?.join(&path).ok()?;
+    if !["/your-orders/orders", "/gp/css/order-history"].contains(&retail_path(url.path())) {
+        return None;
+    }
+    let mut page = 0;
+    let mut filter = None;
+    for (key, value) in url.query_pairs() {
+        match key.as_ref() {
+            "page" => page = value.parse().ok()?,
+            "startIndex" => page = u8::try_from(value.parse::<u16>().ok()? / 10).ok()?,
+            "timeFilter" => filter = Some(value.into_owned()),
+            _ => return None,
+        }
+    }
+    Some(ListingIdentity {
+        page,
+        time_filter: filter,
+    })
+}
+
+/// Ordinal only, validated by the same strict route/parameter contract as redirects.
+pub(crate) fn listing_page_index(path: &str) -> Option<u8> {
+    listing_identity(path).map(|identity| identity.page)
 }
 
 fn order_details_identity(path: &str) -> Option<String> {
@@ -296,7 +374,8 @@ fn order_details_identity(path: &str) -> Option<String> {
 
 pub(crate) fn listing(page: &str) -> Result<Listing, Error> {
     let html = Html::parse_document(page);
-    let mut groups: BTreeMap<(String, String, PackageSlot), ParcelPage> = BTreeMap::new();
+    let mut groups: BTreeMap<(String, String, PackageSlot), usize> = BTreeMap::new();
+    let mut parcels = Vec::new();
     let mut reasons = DeferredCounts::default();
     let mut found = false;
     for (index, node) in html
@@ -333,26 +412,33 @@ pub(crate) fn listing(page: &str) -> Result<Listing, Error> {
             .attr("aria-label")
             .and_then(|label| label.split_once(", Order placed "))
             .map(|(title, _)| title.trim())
-            .filter(|title| {
-                !title.is_empty() && title.len() <= 500 && !title.chars().any(char::is_control)
-            })
+            // The response and anchor limits already bound source names.
+            // Generated shipment labels have a separate display byte limit.
+            .filter(|title| !title.is_empty() && !title.chars().any(char::is_control))
         else {
             reasons.missing_product += 1;
             continue;
         };
-        let parcel = groups
+        let index = groups
             .entry((
                 identity.order.clone(),
                 identity.shipment.clone(),
                 package.clone(),
             ))
-            .or_insert_with(|| ParcelPage {
-                order: identity.order,
-                shipment: identity.shipment,
-                package,
-                path,
-                titles: Vec::new(),
+            .or_insert_with(|| {
+                let index = parcels.len();
+                parcels.push(ParcelPage {
+                    order: identity.order,
+                    shipment: identity.shipment,
+                    package,
+                    path,
+                    titles: Vec::new(),
+                });
+                index
             });
+        let parcel = parcels
+            .get_mut(*index)
+            .ok_or_else(|| provider_error(ErrorKind::Configuration))?;
         if !parcel.titles.iter().any(|value| value == title) {
             parcel.titles.push(title.to_owned());
         }
@@ -364,10 +450,99 @@ pub(crate) fn listing(page: &str) -> Result<Listing, Error> {
         return Err(provider_error(ErrorKind::InvalidResponse));
     }
     Ok(Listing {
-        parcels: groups.into_values().collect(),
+        parcels,
+        next_page: next_listing_page(&html)?,
         deferred: reasons.total(),
         deferred_reasons: reasons,
     })
+}
+
+fn next_listing_page(html: &Html) -> Result<Option<String>, Error> {
+    let mut next: Option<(String, ListingIdentity)> = None;
+    #[derive(Deserialize)]
+    struct StateKey {
+        key: String,
+    }
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct ChunkState {
+        next_start_index: Option<u16>,
+        time_filter: String,
+    }
+    for script in html.select(&selector(r#"script[type="a-state"][data-a-state]"#)?) {
+        let Some(metadata) = script
+            .value()
+            .attr("data-a-state")
+            .and_then(|value| serde_json::from_str::<StateKey>(value).ok())
+        else {
+            continue;
+        };
+        if metadata.key != "chunkState" {
+            continue;
+        }
+        let state: ChunkState = serde_json::from_str(&script.text().collect::<String>())
+            .map_err(|_| provider_error(ErrorKind::InvalidResponse))?;
+        if state.time_filter != "months-3" {
+            return Err(provider_error(ErrorKind::InvalidResponse));
+        }
+        // No chunkState (or an explicit null next index) is a normal final page.
+        // Continuation tokens are unnecessary and never retained.
+        let Some(index) = state.next_start_index else {
+            continue;
+        };
+        if index == 0 || index > 1000 || index % 10 != 0 {
+            return Err(provider_error(ErrorKind::InvalidResponse));
+        }
+        let path = format!("/your-orders/orders?startIndex={index}&timeFilter=months-3");
+        let identity =
+            listing_identity(&path).ok_or_else(|| provider_error(ErrorKind::InvalidResponse))?;
+        if next
+            .as_ref()
+            .is_some_and(|(_, existing)| *existing != identity)
+        {
+            return Err(provider_error(ErrorKind::InvalidResponse));
+        }
+        next.get_or_insert((path, identity));
+    }
+    for anchor in html.select(&selector(
+        ".a-pagination li.a-last a[href], a[rel~=next][href]",
+    )?) {
+        let relation = anchor
+            .value()
+            .attr("rel")
+            .is_some_and(|value| value.split_whitespace().any(|value| value == "next"));
+        let label = anchor.text().collect::<Vec<_>>().join(" ");
+        if !relation
+            && !label.trim().strip_prefix("Next").is_some_and(|tail| {
+                tail.chars()
+                    .all(|character| character.is_whitespace() || character == '→')
+            })
+        {
+            return Err(provider_error(ErrorKind::InvalidResponse));
+        }
+        let path = allowed_path(
+            anchor
+                .value()
+                .attr("href")
+                .ok_or_else(|| provider_error(ErrorKind::InvalidResponse))?,
+        )?;
+        let identity =
+            listing_identity(&path).ok_or_else(|| provider_error(ErrorKind::InvalidResponse))?;
+        let url = Url::parse(ORIGIN)
+            .and_then(|base| base.join(&path))
+            .map_err(|_| provider_error(ErrorKind::InvalidResponse))?;
+        if !url.query_pairs().any(|(key, _)| key == "page") {
+            return Err(provider_error(ErrorKind::InvalidResponse));
+        }
+        if next
+            .as_ref()
+            .is_some_and(|(_, existing)| *existing != identity)
+        {
+            return Err(provider_error(ErrorKind::InvalidResponse));
+        }
+        next.get_or_insert((path, identity));
+    }
+    Ok(next.map(|(path, _)| path))
 }
 
 pub(crate) fn order_tracking_pages(page: &str, order: &str) -> Result<Vec<ParcelPage>, Error> {
@@ -503,6 +678,17 @@ struct PageState {
     shipment_id: Option<String>,
     package_id: Option<String>,
     package_index: Option<String>,
+    #[serde(deserialize_with = "provider_optional")]
+    promise: Option<Promise>,
+    #[serde(deserialize_with = "provider_optional")]
+    timezone: Option<String>,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+struct Promise {
+    #[serde(deserialize_with = "provider_optional")]
+    promise_message: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -647,7 +833,8 @@ pub(crate) fn tracking_failure_shape(page: &str) -> &'static str {
 }
 
 pub(crate) fn tracking(page: &str, path: &str, expected: Option<&str>) -> Result<Tracker, Error> {
-    tracking_with_package(page, path, expected, None)
+    let observed_at = time::OffsetDateTime::now_utc();
+    tracking_with_package(page, path, expected, None, observed_at)
 }
 
 pub(crate) fn tracking_parcel(
@@ -658,7 +845,8 @@ pub(crate) fn tracking_parcel(
     if !query_identity(&parcel.path)?.compatible_with(&query_identity(path)?) {
         return Err(provider_error(ErrorKind::InvalidResponse));
     }
-    tracking_with_package(page, path, None, parcel.package.package_id())
+    let observed_at = time::OffsetDateTime::now_utc();
+    tracking_with_package(page, path, None, parcel.package.package_id(), observed_at)
 }
 
 fn tracking_with_package(
@@ -666,6 +854,7 @@ fn tracking_with_package(
     path: &str,
     expected: Option<&str>,
     package: Option<&str>,
+    observed_at: time::OffsetDateTime,
 ) -> Result<Tracker, Error> {
     let path = allowed_path(path)?;
     if !is_tracking(&path) {
@@ -753,6 +942,13 @@ fn tracking_with_package(
     }
     let actual_status =
         observed_status(&state).ok_or_else(|| provider_error(ErrorKind::InvalidResponse))?;
+    let delivery_date = state
+        .promise
+        .and_then(|promise| promise.promise_message)
+        .zip(state.timezone)
+        .and_then(|(message, timezone)| {
+            provider_delivery_date(&message, actual_status, observed_at, &timezone)
+        });
     Ok(Tracker {
         provider: ProviderId::AmazonAccount,
         id: path.clone(),
@@ -760,8 +956,121 @@ fn tracking_with_package(
         carrier: actual_carrier,
         status: actual_status,
         public_url: Some(format!("{ORIGIN}{path}")),
-        carrier_tracking: CarrierTracking::default(),
+        carrier_tracking: CarrierTracking {
+            delivery_date,
+            ..Default::default()
+        },
     })
+}
+
+fn provider_delivery_date(
+    message: &str,
+    status: Status,
+    observed_at: time::OffsetDateTime,
+    timezone: &str,
+) -> Option<ProviderDeliveryDate> {
+    if message.len() > 500 || message.chars().any(char::is_control) || timezone.len() > 128 {
+        return None;
+    }
+    let zone = jiff::tz::TimeZoneDatabase::bundled().get(timezone).ok()?;
+    let local = jiff::Timestamp::from_second(observed_at.unix_timestamp())
+        .ok()?
+        .to_zoned(zone)
+        .date();
+    let today = time::Date::from_calendar_date(
+        i32::from(local.year()),
+        time::Month::try_from(u8::try_from(local.month()).ok()?).ok()?,
+        u8::try_from(local.day()).ok()?,
+    )
+    .ok()?;
+    let (body, delivered) = if let Some(body) = message.strip_prefix("Delivered ") {
+        if status != Status::Delivered {
+            return None;
+        }
+        (body, true)
+    } else {
+        if Status::TERMINAL.contains(&status) {
+            return None;
+        }
+        (
+            message
+                .strip_prefix("Arriving ")
+                .or_else(|| message.strip_prefix("Now arriving "))?,
+            false,
+        )
+    };
+    let value = if let Some((start, end)) = body.split_once(" - ") {
+        if delivered {
+            return None;
+        }
+        let (start_month, start_day) = month_day(start)?;
+        let (end_month, end_day) = month_day(end)?;
+        let start = infer_year(start_month, start_day, today, false)?;
+        let end_year = start.year() + i32::from(end_month < start_month);
+        let end = time::Date::from_calendar_date(end_year, end_month, end_day).ok()?;
+        if end < start {
+            return None;
+        }
+        DeliveryDateValue::EstimatedRange { start, end }
+    } else {
+        let date = if body.eq_ignore_ascii_case("today") {
+            today
+        } else if body.eq_ignore_ascii_case("yesterday") {
+            today.previous_day()?
+        } else if body.eq_ignore_ascii_case("tomorrow") && !delivered {
+            today.next_day()?
+        } else {
+            let (month, day) = month_day(body)?;
+            infer_year(month, day, today, delivered)?
+        };
+        if delivered {
+            DeliveryDateValue::Delivered { date }
+        } else {
+            DeliveryDateValue::Estimated { date }
+        }
+    };
+    ProviderDeliveryDate::new(value, observed_at, timezone.into())
+}
+
+fn month_day(value: &str) -> Option<(time::Month, u8)> {
+    let (month, day) = value.split_once(' ')?;
+    let month = match month {
+        "January" => time::Month::January,
+        "February" => time::Month::February,
+        "March" => time::Month::March,
+        "April" => time::Month::April,
+        "May" => time::Month::May,
+        "June" => time::Month::June,
+        "July" => time::Month::July,
+        "August" => time::Month::August,
+        "September" => time::Month::September,
+        "October" => time::Month::October,
+        "November" => time::Month::November,
+        "December" => time::Month::December,
+        _ => return None,
+    };
+    if day.is_empty() || day.len() > 2 || !day.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    Some((month, day.parse().ok()?))
+}
+
+fn infer_year(
+    month: time::Month,
+    day: u8,
+    today: time::Date,
+    delivered: bool,
+) -> Option<time::Date> {
+    let dates = [-1, 0, 1]
+        .into_iter()
+        .filter_map(|delta| time::Date::from_calendar_date(today.year() + delta, month, day).ok());
+    if delivered {
+        dates.filter(|date| *date <= today).max()
+    } else {
+        // Estimates may be overdue. Nearest adjacent-year date preserves that;
+        // future wins a tie, without jumping years to find a leap day.
+        dates.min_by_key(|date| ((*date - today).whole_days().abs(), *date < today))
+    }
 }
 
 #[cfg(test)]
@@ -773,6 +1082,521 @@ mod tests {
         format!(
             r#"<h3>Delivery By USPS</h3><script id="page-state">{{"trackingId":"{number}","shortStatus":"IN_TRANSIT"}}</script>"#
         )
+    }
+
+    fn promise_page(message: &str, short_status: &str, timezone_json: &str) -> String {
+        let message = serde_json::to_string(message).unwrap();
+        format!(
+            r#"<h3>Delivery facilitated by Amazon</h3><script type="a-state" data-a-state='{{"key":"page-state"}}'>{{"trackingId":"TBA000000000070","shortStatus":"{short_status}","timezone":{timezone_json},"promise":{{"secondaryPromiseIdentifier":"DELIVERY","promiseMessage":{message}}}}}</script>"#
+        )
+    }
+
+    #[test]
+    fn provider_promise_produces_a_civil_date_without_inventing_an_actual_timestamp() {
+        // Typed consumer projection also runs unchanged against the merge base.
+        #[derive(serde::Deserialize)]
+        struct DeliveryDate {
+            kind: String,
+            date: String,
+            observed_at: String,
+            timezone: String,
+        }
+        #[derive(serde::Deserialize)]
+        struct TrackingDates {
+            #[serde(default)]
+            delivery_date: Option<DeliveryDate>,
+            delivered_at: Option<String>,
+            estimated_delivery_at: Option<String>,
+            estimated_delivery_window: Option<crate::models::EstimatedDeliveryWindow>,
+            events: Vec<crate::models::CarrierEvent>,
+        }
+        let html = promise_page(
+            "Delivered October 25",
+            "DELIVERED",
+            r#""America/Los_Angeles""#,
+        );
+        let tracker = pages::tracking(&html, PATH, None).unwrap();
+        let dates: TrackingDates =
+            serde_json::from_str(&serde_json::to_string(&tracker.carrier_tracking).unwrap())
+                .unwrap();
+        let date = dates
+            .delivery_date
+            .expect("Provider civil delivery date was discarded");
+        assert_eq!(date.kind, "delivered");
+        assert!(date.date.ends_with("-10-25"));
+        assert_eq!(date.date.len(), 10);
+        assert_eq!(date.timezone, "America/Los_Angeles");
+        time::OffsetDateTime::parse(
+            &date.observed_at,
+            &time::format_description::well_known::Rfc3339,
+        )
+        .unwrap();
+        assert!(dates.delivered_at.is_none());
+        assert!(dates.estimated_delivery_at.is_none());
+        assert!(dates.estimated_delivery_window.is_none());
+        assert!(dates.events.is_empty());
+    }
+
+    fn observed(value: &str) -> time::OffsetDateTime {
+        time::OffsetDateTime::parse(value, &time::format_description::well_known::Rfc3339).unwrap()
+    }
+
+    fn civil(value: &str) -> time::Date {
+        let format = time::format_description::parse_borrowed::<2>("[year]-[month]-[day]").unwrap();
+        time::Date::parse(value, &format).unwrap()
+    }
+
+    #[test]
+    fn yearless_provider_dates_resolve_rollover_overdue_and_leap_days() {
+        use crate::models::DeliveryDateValue;
+        for (message, status, at, expected) in [
+            (
+                "Delivered December 31",
+                Status::Delivered,
+                "2027-01-02T12:00:00Z",
+                DeliveryDateValue::Delivered {
+                    date: civil("2026-12-31"),
+                },
+            ),
+            (
+                "Delivered January 2",
+                Status::Delivered,
+                "2026-12-31T12:00:00Z",
+                DeliveryDateValue::Delivered {
+                    date: civil("2026-01-02"),
+                },
+            ),
+            (
+                "Arriving January 2",
+                Status::InTransit,
+                "2026-12-31T12:00:00Z",
+                DeliveryDateValue::Estimated {
+                    date: civil("2027-01-02"),
+                },
+            ),
+            (
+                "Arriving December 31",
+                Status::InTransit,
+                "2027-01-02T12:00:00Z",
+                DeliveryDateValue::Estimated {
+                    date: civil("2026-12-31"),
+                },
+            ),
+            (
+                "Arriving October 30",
+                Status::InTransit,
+                "2026-10-31T19:00:00Z",
+                DeliveryDateValue::Estimated {
+                    date: civil("2026-10-30"),
+                },
+            ),
+            (
+                "Delivered February 29",
+                Status::Delivered,
+                "2025-01-01T12:00:00Z",
+                DeliveryDateValue::Delivered {
+                    date: civil("2024-02-29"),
+                },
+            ),
+            (
+                "Arriving February 29",
+                Status::InTransit,
+                "2023-12-31T12:00:00Z",
+                DeliveryDateValue::Estimated {
+                    date: civil("2024-02-29"),
+                },
+            ),
+            (
+                "Now arriving December 31 - January 2",
+                Status::InTransit,
+                "2026-12-30T12:00:00Z",
+                DeliveryDateValue::EstimatedRange {
+                    start: civil("2026-12-31"),
+                    end: civil("2027-01-02"),
+                },
+            ),
+            (
+                "Now arriving November 3 - November 8",
+                Status::InTransit,
+                "2026-10-31T19:00:00Z",
+                DeliveryDateValue::EstimatedRange {
+                    start: civil("2026-11-03"),
+                    end: civil("2026-11-08"),
+                },
+            ),
+        ] {
+            let date =
+                pages::provider_delivery_date(message, status, observed(at), "America/Los_Angeles")
+                    .unwrap();
+            assert_eq!(date.value, expected, "{message} at {at}");
+            assert_eq!(date.observed_at, observed(at));
+        }
+    }
+
+    #[test]
+    fn relative_dates_use_provider_calendar_across_dst_not_utc_or_24_hours() {
+        use crate::models::DeliveryDateValue;
+        for (message, at, timezone, expected) in [
+            // Spring-forward eve: UTC is already March 8; LA is still March 7.
+            (
+                "Arriving tomorrow",
+                "2026-03-08T07:30:00Z",
+                "America/Los_Angeles",
+                "2026-03-08",
+            ),
+            // Spring-forward morning and fall-back duplicate local hour.
+            (
+                "Arriving tomorrow",
+                "2026-03-08T09:30:00Z",
+                "America/Los_Angeles",
+                "2026-03-09",
+            ),
+            (
+                "Arriving tomorrow",
+                "2026-11-01T07:30:00Z",
+                "America/Los_Angeles",
+                "2026-11-02",
+            ),
+            (
+                "Arriving tomorrow",
+                "2026-11-01T08:30:00Z",
+                "America/Los_Angeles",
+                "2026-11-02",
+            ),
+            (
+                "Arriving tomorrow",
+                "2026-11-01T09:30:00Z",
+                "America/Los_Angeles",
+                "2026-11-02",
+            ),
+            (
+                "Arriving today",
+                "2027-01-01T07:30:00Z",
+                "America/Los_Angeles",
+                "2026-12-31",
+            ),
+            (
+                "Arriving tomorrow",
+                "2026-12-31T23:30:00Z",
+                "Asia/Tokyo",
+                "2027-01-02",
+            ),
+            (
+                "Arriving tomorrow",
+                "2024-02-28T20:00:00Z",
+                "America/Los_Angeles",
+                "2024-02-29",
+            ),
+        ] {
+            let date =
+                pages::provider_delivery_date(message, Status::InTransit, observed(at), timezone)
+                    .unwrap();
+            assert_eq!(
+                date.value,
+                DeliveryDateValue::Estimated {
+                    date: civil(expected)
+                }
+            );
+            assert_eq!(date.timezone, timezone);
+        }
+        let date = pages::provider_delivery_date(
+            "Delivered today",
+            Status::Delivered,
+            observed("2027-01-01T07:30:00Z"),
+            "America/Los_Angeles",
+        )
+        .unwrap();
+        assert_eq!(
+            date.value,
+            DeliveryDateValue::Delivered {
+                date: civil("2026-12-31")
+            }
+        );
+        for (message, status, expected) in [
+            (
+                "Delivered yesterday",
+                Status::Delivered,
+                DeliveryDateValue::Delivered {
+                    date: civil("2026-12-30"),
+                },
+            ),
+            (
+                "Arriving yesterday",
+                Status::InTransit,
+                DeliveryDateValue::Estimated {
+                    date: civil("2026-12-30"),
+                },
+            ),
+        ] {
+            let date = pages::provider_delivery_date(
+                message,
+                status,
+                observed("2027-01-01T07:30:00Z"),
+                "America/Los_Angeles",
+            )
+            .unwrap();
+            assert_eq!(date.value, expected);
+        }
+    }
+
+    #[test]
+    fn malformed_optional_promise_metadata_keeps_valid_tracking() {
+        let valid = promise_page(
+            "Delivered October 25",
+            "DELIVERED",
+            r#""America/Los_Angeles""#,
+        );
+        for html in [
+            valid.replace(r#""promiseMessage":"Delivered October 25""#, r#""promiseMessage":17"#),
+            valid.replace(r#""promiseMessage":"Delivered October 25""#, r#""promiseMessage":[]"#),
+            valid.replace(r#""promiseMessage":"Delivered October 25""#, r#""promiseMessage":"""#),
+            valid.replace(r#""promise":{"secondaryPromiseIdentifier":"DELIVERY","promiseMessage":"Delivered October 25"}"#, r#""promise":[]"#),
+        ] {
+            let tracker = pages::tracking(&html, PATH, None).unwrap();
+            assert_eq!(tracker.status, Status::Delivered);
+            assert!(tracker.carrier_tracking.delivery_date.is_none());
+        }
+        for timezone in [
+            r#"17"#,
+            r#"[]"#,
+            r#""""#,
+            r#""Pacific Standard Time""#,
+            r#""Not/A_Real_Zone""#,
+        ] {
+            let html = promise_page("Delivered October 25", "DELIVERED", timezone);
+            let tracker = pages::tracking(&html, PATH, None).unwrap();
+            assert_eq!(tracker.status, Status::Delivered);
+            assert!(tracker.carrier_tracking.delivery_date.is_none());
+        }
+        for (message, status) in [
+            ("Delivered tomorrow", Status::Delivered),
+            ("Arriving October 25", Status::Delivered),
+            ("Delivered October 25", Status::InTransit),
+            ("Arriving February 30", Status::InTransit),
+            ("Arriving February 29", Status::InTransit),
+            ("Now arriving November 8 - November 3", Status::InTransit),
+            ("Arriving sometime soon", Status::InTransit),
+            ("Arriving tomorrow by 10 PM", Status::InTransit),
+            ("Arriving October 25 2026", Status::InTransit),
+            ("Delivered October 25\nPRIVATE", Status::Delivered),
+        ] {
+            assert!(
+                pages::provider_delivery_date(
+                    message,
+                    status,
+                    observed("2026-10-31T19:00:00Z"),
+                    "America/Los_Angeles"
+                )
+                .is_none(),
+                "{message}"
+            );
+        }
+    }
+
+    #[test]
+    fn listing_keeps_first_seen_dom_order_while_grouping_package_items() {
+        let recent =
+            "/progress-tracker/package?orderId=999-1234567-1234567&shipmentId=SHIP2&packageIndex=0";
+        let older =
+            "/progress-tracker/package?orderId=111-1234567-1234567&shipmentId=SHIP1&packageIndex=0";
+        let listing = pages::listing(&format!(
+            r#"<a class="item-card__link" href="{recent}" aria-label="Recent adapter, Order placed 31 October 2026, Shipped"></a><a class="item-card__link" href="{older}" aria-label="Older book, Order placed 23 October 2026, Shipped"></a><a class="item-card__link" href="{recent}" aria-label="Recent cable, Order placed 31 October 2026, Shipped"></a>"#
+        )).unwrap();
+        assert_eq!(listing.parcels.len(), 2);
+        assert_eq!(listing.parcels[0].path, recent);
+        assert_eq!(
+            listing.parcels[0].titles,
+            ["Recent adapter", "Recent cable"]
+        );
+        assert_eq!(listing.parcels[1].path, older);
+        assert_eq!(listing.parcels[1].titles, ["Older book"]);
+    }
+
+    #[test]
+    fn listing_pagination_normalizes_only_bounded_recent_order_parameters() {
+        assert_eq!(
+            pages::allowed_path("/your-orders/orders?page=1&ref_=fixture&timeFilter=months-3")
+                .unwrap(),
+            "/your-orders/orders?page=1&timeFilter=months-3",
+        );
+        for page in [0, 100] {
+            let path = format!("/your-orders/orders?page={page}");
+            assert_eq!(pages::allowed_path(&path).unwrap(), path);
+        }
+        assert_eq!(
+            pages::allowed_path("/your-orders/orders?page=001").unwrap(),
+            "/your-orders/orders?page=1"
+        );
+        for query in [
+            "page=101",
+            "page=-1",
+            "page=1.0",
+            "page=+1",
+            "page=",
+            "page=PRIVATE",
+            "page=1&page=2",
+            "page=1&PAGE=2",
+            "timeFilter=year-2025",
+            "timeFilter=",
+            "timeFilter=months-3&timeFilter=months-3",
+        ] {
+            assert!(
+                pages::allowed_path(&format!("/your-orders/orders?{query}")).is_err(),
+                "{query}"
+            );
+        }
+        assert_eq!(
+            pages::allowed_path(&format!("{PATH}&page=1&timeFilter=months-3")).unwrap(),
+            PATH
+        );
+    }
+
+    #[test]
+    fn mobile_listing_parameters_preserve_the_actual_start_index() {
+        assert_eq!(
+            pages::allowed_path(
+                "/your-orders/orders?startIndex=10&timeFilter=months-3&ref_=fixture"
+            )
+            .unwrap(),
+            "/your-orders/orders?startIndex=10&timeFilter=months-3"
+        );
+    }
+
+    #[test]
+    fn mobile_chunk_pagination_keeps_only_the_validated_recent_order_ordinal() {
+        let item = format!(
+            r#"<a class="item-card__link" href="{PATH}" aria-label="Widget, Order placed 1 October 2026, Shipped"></a>"#
+        );
+        let first = format!(
+            r#"{item}<script type="a-state" data-a-state='{{"key":"chunkState"}}'>{{"nextStartIndex":10,"timeFilter":"months-3","nextContinuationToken":"unused-fixture"}}</script>"#
+        );
+        assert_eq!(
+            pages::listing(&first).unwrap().next_page.as_deref(),
+            Some("/your-orders/orders?startIndex=10&timeFilter=months-3")
+        );
+        let second = first.replace("\"nextStartIndex\":10", "\"nextStartIndex\":20");
+        assert_eq!(
+            pages::listing(&second).unwrap().next_page.as_deref(),
+            Some("/your-orders/orders?startIndex=20&timeFilter=months-3")
+        );
+        assert!(pages::listing(&item).unwrap().next_page.is_none());
+        assert!(
+            pages::listing(&first.replace("\"nextStartIndex\":10", "\"nextStartIndex\":null"))
+                .unwrap()
+                .next_page
+                .is_none()
+        );
+        for bad in ["0", "11", "1010", "-10", "\"20\""] {
+            let html = first.replace(
+                "\"nextStartIndex\":10",
+                &format!("\"nextStartIndex\":{bad}"),
+            );
+            assert!(pages::listing(&html).is_err(), "{bad}");
+        }
+        assert!(pages::listing(&first.replace("months-3", "year-2025")).is_err());
+        assert!(pages::listing(&(first.clone() + &second)).is_err());
+        for (query, ordinal) in [
+            ("startIndex=0", 0),
+            ("startIndex=10", 1),
+            ("startIndex=1000", 100),
+            ("page=2", 2),
+            ("timeFilter=months-3", 0),
+        ] {
+            let path = format!("/your-orders/orders?{query}");
+            assert_eq!(pages::listing_page_index(&path), Some(ordinal));
+            assert_eq!(pages::allowed_path(&path).unwrap(), path);
+        }
+        for query in [
+            "startIndex=11",
+            "startIndex=1010",
+            "startIndex=-10",
+            "startIndex=",
+            "startIndex=10&STARTINDEX=20",
+            "page=1&startIndex=10",
+        ] {
+            let path = format!("/your-orders/orders?{query}");
+            assert!(pages::allowed_path(&path).is_err(), "{query}");
+            assert!(pages::listing_page_index(&path).is_none());
+        }
+        assert!(pages::same_parcel_identity(
+            "/your-orders/orders?startIndex=10&timeFilter=months-3",
+            "/your-orders/orders?page=1&timeFilter=months-3"
+        ));
+        assert!(!pages::same_parcel_identity(
+            "/your-orders/orders?startIndex=10&timeFilter=months-3",
+            "/your-orders/orders?startIndex=20&timeFilter=months-3"
+        ));
+        assert!(!pages::same_parcel_identity(
+            "/your-orders/orders?startIndex=10&timeFilter=months-3",
+            "/your-orders/orders?startIndex=10"
+        ));
+    }
+
+    #[test]
+    fn listing_extracts_one_real_next_page_and_deduplicates_equivalent_links() {
+        let item = format!(
+            r#"<a class="item-card__link" href="{PATH}" aria-label="Widget, Order placed 1 October 2026, Shipped"></a>"#
+        );
+        let listing = pages::listing(&(item.clone() + r#"<ul class="a-pagination"><li class="a-last"><a href="/your-orders/orders?page=1&timeFilter=months-3&ref_=fixture">Next→</a></li></ul><a rel="next" href="/your-orders/orders?timeFilter=months-3&page=1&ref_=other">Next</a>"#)).unwrap();
+        assert_eq!(
+            listing.next_page.as_deref(),
+            Some("/your-orders/orders?page=1&timeFilter=months-3")
+        );
+        assert_eq!(listing.parcels.len(), 1);
+        let last = pages::listing(&(item + r#"<ul class="a-pagination"><li class="a-disabled a-last"><span>Next→</span></li></ul>"#)).unwrap();
+        assert!(last.next_page.is_none());
+        let empty = pages::listing("<main>You have no orders</main>").unwrap();
+        assert!(empty.next_page.is_none());
+    }
+
+    #[test]
+    fn listing_next_links_never_leave_recent_order_listing_routes() {
+        let item = format!(
+            r#"<a class="item-card__link" href="{PATH}" aria-label="Widget, Order placed 1 October 2026, Shipped"></a>"#
+        );
+        for href in [
+            "https://evil.example/your-orders/orders?page=1",
+            "/your-orders/pop?orderId=111-1234567-1234567&page=1",
+            "/progress-tracker/package?orderId=111-1234567-1234567&shipmentId=SHIP1&packageIndex=0&page=1",
+            "/your-orders/orders",
+            "/your-orders/orders?page=101",
+            "/your-orders/orders?page=1&page=2",
+            "/your-orders/orders?page=1&timeFilter=year-2025",
+        ] {
+            let html = format!(r#"{item}<a rel="next" href="{href}">Next</a>"#);
+            assert!(pages::listing(&html).is_err(), "{href}");
+        }
+        let ambiguous = format!(
+            r#"{item}<a rel="next" href="/your-orders/orders?page=1">Next</a><a rel="next" href="/your-orders/orders?page=2">Next</a>"#
+        );
+        assert!(pages::listing(&ambiguous).is_err());
+    }
+
+    #[test]
+    fn listing_redirects_retain_page_and_any_explicit_recent_filter() {
+        let original = "/your-orders/orders?page=1&timeFilter=months-3";
+        let same = "/-/en/gp/css/order-history?page=1&timeFilter=months-3";
+        assert!(pages::same_parcel_identity(original, same));
+        for destination in [
+            "/your-orders/orders?page=2&timeFilter=months-3",
+            "/your-orders/orders?timeFilter=months-3",
+            "/your-orders/orders?page=1",
+            "https://evil.example/your-orders/orders?page=1&timeFilter=months-3",
+            "/your-orders/order-details?orderID=111-1234567-1234567",
+        ] {
+            assert!(
+                !pages::same_parcel_identity(original, destination),
+                "{destination}"
+            );
+        }
+        assert!(pages::same_parcel_identity(
+            "/your-orders/orders",
+            "/gp/css/order-history?page=0"
+        ));
+        assert!(!pages::same_parcel_identity(
+            "/your-orders/orders",
+            "/gp/css/order-history?page=1"
+        ));
     }
 
     #[test]

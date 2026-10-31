@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 from aiohttp import ClientError, ClientTimeout
+from homeassistant.components.homeassistant import exposed_entities
 from homeassistant.config_entries import SOURCE_HASSIO, SOURCE_USER, ConfigEntryState
 from homeassistant.core import (
     Context,
@@ -32,6 +33,12 @@ from custom_components.shipments.const import (
     CONF_TOKEN,
     DOMAIN,
     SENSOR_KEYS,
+)
+from custom_components.shipments.voice import (
+    ShipmentDay,
+    ShipmentQuery,
+    VoiceRequest,
+    async_query,
 )
 
 from .conftest import get_state
@@ -62,6 +69,11 @@ async def produce_database(database: Path, scenario: str) -> None:
             "ha_events",
             "native_adapter_fixture_uses_the_real_store",
             "SHIPMENTS_TEST_NATIVE_DATABASE",
+        ),
+        "typed_dates": (
+            "typed_delivery_dates",
+            "typed_provider_dates_flow_through_calendar_sorts_and_civil_day_queries",
+            "SHIPMENTS_TEST_TYPED_DATE_DATABASE",
         ),
     }[scenario]
     process = await asyncio.create_subprocess_exec(
@@ -109,7 +121,7 @@ async def rust_backend(
     }
     database = tmp_path / "shipments.sqlite3"
     mode = getattr(request, "param", False)
-    if mode in {"calendar", "native"}:
+    if mode in {"calendar", "native", "typed_dates"}:
         await produce_database(database, mode)
     arguments = [
         "--bind",
@@ -509,3 +521,80 @@ async def test_real_store_projection_reaches_native_inbound_calendar(
     ]
     assert all("Carrier estimate:" in event["description"] for event in events)
     assert len({event["uid"] for event in events}) == 4
+
+
+@pytest.mark.parametrize("rust_backend", ["typed_dates"], indirect=True)
+async def test_real_civil_dates_reach_calendar_day_items_and_assist(
+    hass: HomeAssistant,
+    hass_client,
+    hass_admin_user,
+    rust_backend: RustBackend,
+    freezer,
+) -> None:
+    """Consume real Store-produced civil dates across all native HA surfaces."""
+    freezer.move_to("2026-10-31T19:00:00Z")
+    await hass.config.async_set_time_zone("America/Los_Angeles")
+    configured = await hass.config_entries.flow.async_init(
+        DOMAIN, context={"source": SOURCE_USER}
+    )
+    configured = await hass.config_entries.flow.async_configure(
+        configured["flow_id"], {"next_step_id": "standalone"}
+    )
+    configured = await hass.config_entries.flow.async_configure(
+        configured["flow_id"],
+        {
+            CONF_BACKEND_URL: rust_backend.origin,
+            CONF_TOKEN: rust_backend.integration_token,
+        },
+    )
+    assert configured["type"] is FlowResultType.CREATE_ENTRY
+    await hass.async_block_till_done(wait_background_tasks=True)
+    delivered = get_state(hass, "sensor.shipments_inbound_delivered_today")
+    items = delivered.attributes["items"]
+    item = next(item for item in items if item["title"] == "Civil delivered")
+    assert item["delivered_at"] == "2026-10-31"
+    assert "Civil estimate" not in {
+        item["title"]
+        for item in get_state(hass, "sensor.shipments_inbound_due_today").attributes[
+            "items"
+        ]
+    }
+    refresh_token = await hass.auth.async_create_refresh_token(
+        hass_admin_user, client_id="https://example.invalid"
+    )
+    client = await hass_client(hass.auth.async_create_access_token(refresh_token))
+    response = await client.get(
+        "/api/calendars/calendar.shipments_inbound_deliveries",
+        params={"start": "2026-10-31T07:00:00Z", "end": "2026-11-03T08:00:00Z"},
+    )
+    assert response.status == 200
+    events = await response.json()
+    actual = next(
+        event for event in events if event["summary"] == "Delivered: Civil delivered"
+    )
+    expected = next(event for event in events if event["summary"] == "Civil estimate")
+    assert actual["start"] == {"date": "2026-10-31"}
+    assert expected["start"] == {"date": "2026-11-01"}
+    exposed_entities.async_expose_entity(
+        hass, "conversation", "sensor.shipments_inbound_active", True
+    )
+    answer = await async_query(
+        hass, VoiceRequest(ShipmentQuery.DELIVERED), Context(), "conversation"
+    )
+    assert answer.error is None
+    assert any(
+        item["title"] == "Civil delivered" and item["delivered_at"] == "2026-10-31"
+        for item in answer.as_dict()["items"]
+    )
+    assert "delivered on October 31." in answer.speech
+    assert "12:00 AM" not in answer.speech
+    arriving = await async_query(
+        hass,
+        VoiceRequest(ShipmentQuery.ARRIVING, day=ShipmentDay.TOMORROW),
+        Context(),
+        "conversation",
+    )
+    assert arriving.error is None
+    assert any(
+        item["title"] == "Civil estimate" for item in arriving.as_dict()["items"]
+    )

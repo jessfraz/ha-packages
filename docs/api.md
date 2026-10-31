@@ -140,7 +140,14 @@ preserved. AfterShip supplies carrier bounds through
 `courier_estimated_delivery_date.estimated_delivery_date_min/max`; predictive
 AI bounds and a lone EasyPost ETA are not carrier time windows. `delivered_at`
 contains the verified actual delivery timestamp when available. Delivered
-shipments without a verified actual date are omitted rather than dated from
+shipments can instead carry `delivery_date`: a tagged `delivered` or `estimated`
+calendar `date`, or an `estimated_range` with inclusive `start` and `end` dates.
+The backend uses typed dates and an `observed_at` timestamp with the provider's
+IANA `timezone`; JSON dates use ISO `YYYY-MM-DD`. Amazon's yearless wording is
+resolved at observation, including overdue estimates and year boundaries.
+An unchanged date retains its first observation; sync freshness is separate.
+Date-only delivery reports never become fabricated scan timestamps.
+Shipments without a reported actual date are omitted rather than dated from
 an ETA or an override's creation time. Effective user status remains authoritative;
 archived, cancelled and returned shipments stay excluded. Keyset pagination
 orders delivered rows by actual date and other rows by window start or estimate.
@@ -268,6 +275,11 @@ List and summary queries accept paired `delivered_after` (inclusive) and
 delivery timestamps, independently of manual status corrections. Use
 `direction=inbound` for incoming deliveries. The list also supports
 `tracking_issues=true`, filtering stored tracking failures before pagination.
+With the same bounds, add `delivered_on=YYYY-MM-DD` to include provider-reported
+civil delivery dates for that calendar day. Home Assistant supplies its own
+civil day explicitly; it is never guessed from a UTC bound. An actual delivery
+timestamp takes priority over a date-only report. Without `delivered_on`, the
+query retains exact-instant semantics and excludes date-only reports.
 
 ### Retry old failed attempts
 
@@ -317,8 +329,10 @@ Safe connection state is also included in the integration-readable `/v1/system`.
 - `POST /v1/amazon/complete`: submit `flow_id` and `landing_url` in the JSON body.
   Only the expected HTTPS Amazon landing route is accepted. Never put the address
   or authorization code in a URL or log.
-- `POST /v1/amazon/preview`: read verified candidate parcels and a deferred count.
-  This does not create or modify shipments or mark candidates imported.
+- `POST /v1/amazon/preview`: read verified candidate parcels, a deferred count,
+  and `complete` / `has_more` coverage flags. A bounded preview is not necessarily
+  a complete recent-account audit. This does not create or modify shipments or
+  mark candidates imported.
 - `POST /v1/amazon/enable`: explicitly enable automatic imports after preview.
 - `POST /v1/amazon/refresh`: queue bounded discovery, respecting cooldown/backoff.
 - `DELETE /v1/amazon`: remove local account credentials; retain shipment data.
