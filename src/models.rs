@@ -341,6 +341,14 @@ pub struct CarrierTracking {
     pub estimated_delivery_window: Option<EstimatedDeliveryWindow>,
     /// Actual delivery scan time, independent of an estimated delivery date.
     pub delivered_at: Option<String>,
+    /// Provider-reported civil delivery date, distinct from an actual scan
+    /// instant. Yearless wording is resolved at observation in its IANA zone.
+    /// Omit absent metadata so historical snapshots retain their wire shape.
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "provider_optional"
+    )]
+    pub delivery_date: Option<ProviderDeliveryDate>,
     pub events_truncated: bool,
 }
 
@@ -381,11 +389,164 @@ impl CarrierTracking {
         if let Some(estimated_delivery_at) = &incoming.estimated_delivery_at {
             self.estimated_delivery_at = Some(estimated_delivery_at.clone());
             self.estimated_delivery_raw = incoming.estimated_delivery_raw.clone();
+        } else if incoming.delivery_date.is_some() {
+            // A current civil-date forecast replaces an older canonical ETA;
+            // it must not be hidden by stale data from a previous observation.
+            self.estimated_delivery_at = None;
+            self.estimated_delivery_raw = None;
         }
-        // A successful provider snapshot is authoritative for its current
-        // window, including withdrawal. Historical scans and overrides survive.
+        // A successful snapshot owns its current window and civil date,
+        // including withdrawal. Historical scans and overrides survive.
         self.estimated_delivery_window = incoming.estimated_delivery_window.clone();
+        // Keep the first observation of an unchanged civil date. Poll freshness
+        // belongs to sync.last_success_at, not a new shipment-history event.
+        if self
+            .delivery_date
+            .as_ref()
+            .map(|date| (&date.value, &date.timezone))
+            != incoming
+                .delivery_date
+                .as_ref()
+                .map(|date| (&date.value, &date.timezone))
+        {
+            self.delivery_date = incoming.delivery_date.clone();
+        }
         *self != previous
+    }
+}
+
+/// A provider civil date never implies a time of day or an actual scan instant.
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum DeliveryDateValue {
+    Delivered {
+        #[serde(with = "civil_date_serde")]
+        #[schemars(schema_with = "civil_date_schema")]
+        date: time::Date,
+    },
+    Estimated {
+        #[serde(with = "civil_date_serde")]
+        #[schemars(schema_with = "civil_date_schema")]
+        date: time::Date,
+    },
+    EstimatedRange {
+        #[serde(with = "civil_date_serde")]
+        #[schemars(schema_with = "civil_date_schema")]
+        start: time::Date,
+        #[serde(with = "civil_date_serde")]
+        #[schemars(schema_with = "civil_date_schema")]
+        end: time::Date,
+    },
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[serde(try_from = "ProviderDeliveryDateFields")]
+pub struct ProviderDeliveryDate {
+    #[serde(flatten)]
+    pub value: DeliveryDateValue,
+    /// Observation metadata, never the actual delivery instant.
+    #[serde(with = "observation_time_serde")]
+    #[schemars(schema_with = "observation_time_schema")]
+    pub observed_at: time::OffsetDateTime,
+    /// Validated provider IANA timezone used to resolve relative/yearless dates.
+    pub timezone: String,
+}
+
+#[derive(Deserialize)]
+struct ProviderDeliveryDateFields {
+    #[serde(flatten)]
+    value: DeliveryDateValue,
+    #[serde(with = "observation_time_serde")]
+    observed_at: time::OffsetDateTime,
+    timezone: String,
+}
+
+impl ProviderDeliveryDate {
+    pub(crate) fn new(
+        value: DeliveryDateValue,
+        observed_at: time::OffsetDateTime,
+        timezone: String,
+    ) -> Option<Self> {
+        if timezone.len() > 128
+            || jiff::tz::TimeZoneDatabase::bundled()
+                .get(&timezone)
+                .is_err()
+            || matches!(&value, DeliveryDateValue::EstimatedRange { start, end } if end < start)
+        {
+            return None;
+        }
+        Some(Self {
+            value,
+            observed_at,
+            timezone,
+        })
+    }
+}
+
+impl TryFrom<ProviderDeliveryDateFields> for ProviderDeliveryDate {
+    type Error = &'static str;
+
+    fn try_from(value: ProviderDeliveryDateFields) -> Result<Self, Self::Error> {
+        Self::new(value.value, value.observed_at, value.timezone)
+            .ok_or("invalid provider delivery date")
+    }
+}
+
+fn civil_date_schema(_: &mut schemars::r#gen::SchemaGenerator) -> schemars::schema::Schema {
+    schemars::schema::SchemaObject {
+        instance_type: Some(schemars::schema::InstanceType::String.into()),
+        format: Some("date".into()),
+        ..Default::default()
+    }
+    .into()
+}
+
+fn observation_time_schema(_: &mut schemars::r#gen::SchemaGenerator) -> schemars::schema::Schema {
+    schemars::schema::SchemaObject {
+        instance_type: Some(schemars::schema::InstanceType::String.into()),
+        format: Some("date-time".into()),
+        ..Default::default()
+    }
+    .into()
+}
+
+mod civil_date_serde {
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(value: &time::Date, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&value.to_string())
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<time::Date, D::Error> {
+        let value = String::deserialize(deserializer)?;
+        let format = time::format_description::parse_borrowed::<2>("[year]-[month]-[day]")
+            .map_err(serde::de::Error::custom)?;
+        if value.len() != 10 {
+            return Err(serde::de::Error::custom("expected an ISO civil date"));
+        }
+        time::Date::parse(&value, &format).map_err(serde::de::Error::custom)
+    }
+}
+
+mod observation_time_serde {
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(
+        value: &time::OffsetDateTime,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        let value = value
+            .format(&time::format_description::well_known::Rfc3339)
+            .map_err(serde::ser::Error::custom)?;
+        serializer.serialize_str(&value)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<time::OffsetDateTime, D::Error> {
+        let value = String::deserialize(deserializer)?;
+        time::OffsetDateTime::parse(&value, &time::format_description::well_known::Rfc3339)
+            .map_err(serde::de::Error::custom)
     }
 }
 
@@ -573,6 +734,10 @@ pub struct Filters {
     pub delivered_after: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub delivered_before: Option<i64>,
+    /// ISO civil day for providers without a scan instant. Requires both UTC
+    /// bounds so timestamp-backed shipments retain the caller's local-day window.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub delivered_on: Option<String>,
     /// Expected delivery first, or most recent actual delivery first. Unknown dates sort last.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sort: Option<ShipmentSort>,
@@ -692,6 +857,9 @@ pub struct DeliveryEstimate {
     pub estimated_delivery_window: Option<EstimatedDeliveryWindow>,
     /// Verified actual carrier delivery date/time, never an ETA or override time.
     pub delivered_at: Option<String>,
+    /// Provider civil date without an invented delivery instant.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delivery_date: Option<ProviderDeliveryDate>,
 }
 pub struct DeliveryEstimatePosition {
     pub id: Uuid,
@@ -705,6 +873,143 @@ pub struct DeliveryEstimateEntry {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn delivery_dates_validate_typed_civil_bounds_and_observation_metadata() {
+        for value in [
+            r#"{"kind":"delivered","date":"2026-10-25","observed_at":"2026-10-26T00:30:00Z","timezone":"America/Los_Angeles"}"#,
+            r#"{"kind":"estimated","date":"2027-01-02","observed_at":"2026-12-31T23:30:00-08:00","timezone":"America/Los_Angeles"}"#,
+            r#"{"kind":"estimated_range","start":"2026-12-31","end":"2027-01-02","observed_at":"2026-12-30T23:30:00Z","timezone":"America/Los_Angeles"}"#,
+        ] {
+            let parsed: ProviderDeliveryDate = serde_json::from_str(value).unwrap();
+            let restored: ProviderDeliveryDate =
+                serde_json::from_str(&serde_json::to_string(&parsed).unwrap()).unwrap();
+            assert_eq!(parsed, restored);
+        }
+        for value in [
+            r#"{"kind":"estimated","date":"2026-02-29","observed_at":"2026-10-26T00:30:00Z","timezone":"America/Los_Angeles"}"#,
+            r#"{"kind":"delivered","date":"2026-10-25T00:00:00Z","observed_at":"2026-10-26T00:30:00Z","timezone":"America/Los_Angeles"}"#,
+            r#"{"kind":"delivered","date":"2026-10-25","observed_at":"2026-10-26","timezone":"America/Los_Angeles"}"#,
+            r#"{"kind":"estimated_range","start":"2026-11-08","end":"2026-11-03","observed_at":"2026-10-26T00:30:00Z","timezone":"America/Los_Angeles"}"#,
+            r#"{"kind":"estimated","date":"2026-10-25","observed_at":"2026-10-26T00:30:00Z","timezone":"Not/A_Timezone"}"#,
+            r#"[]"#,
+        ] {
+            let tracking: CarrierTracking = serde_json::from_str(&format!(
+                r#"{{"delivery_date":{value},"delivered_at":"2026-10-25T16:54:00-07:00"}}"#,
+            ))
+            .unwrap();
+            assert!(tracking.delivery_date.is_none(), "{value}");
+            assert_eq!(
+                tracking.delivered_at.as_deref(),
+                Some("2026-10-25T16:54:00-07:00")
+            );
+        }
+    }
+
+    #[test]
+    fn successful_snapshots_replace_and_withdraw_civil_dates_without_changing_scans() {
+        let event = CarrierEvent {
+            status: Some(Status::Delivered),
+            datetime: Some("2026-10-25T16:54:00-07:00".into()),
+            ..Default::default()
+        };
+        let mut stored = CarrierTracking {
+            events: vec![event.clone()],
+            ..Default::default()
+        };
+        let first: CarrierTracking = serde_json::from_str(
+            r#"{"delivery_date":{"kind":"estimated","date":"2026-10-25","observed_at":"2026-10-24T22:00:00Z","timezone":"America/Los_Angeles"}}"#,
+        ).unwrap();
+        assert!(stored.merge(&first));
+        assert_eq!(stored.delivery_date, first.delivery_date);
+        let replacement: CarrierTracking = serde_json::from_str(
+            r#"{"delivery_date":{"kind":"delivered","date":"2026-10-25","observed_at":"2026-10-26T00:30:00Z","timezone":"America/Los_Angeles"}}"#,
+        ).unwrap();
+        assert!(stored.merge(&replacement));
+        assert_eq!(stored.delivery_date, replacement.delivery_date);
+        assert!(stored.merge(&CarrierTracking::default()));
+        assert!(stored.delivery_date.is_none());
+        assert_eq!(stored.events, [event]);
+        assert_eq!(
+            stored.delivered_at.as_deref(),
+            Some("2026-10-25T16:54:00-07:00")
+        );
+        assert!(stored.estimated_delivery_at.is_none());
+        assert!(stored.estimated_delivery_window.is_none());
+    }
+
+    #[test]
+    fn unchanged_civil_dates_do_not_create_tracking_history_on_each_poll() {
+        let mut stored: CarrierTracking = serde_json::from_str(
+            r#"{"delivery_date":{"kind":"estimated","date":"2026-11-01","observed_at":"2026-10-31T19:00:00Z","timezone":"America/Los_Angeles"}}"#,
+        ).unwrap();
+        let first = stored.delivery_date.clone();
+        let mut next = stored.clone();
+        next.delivery_date.as_mut().unwrap().observed_at += time::Duration::minutes(30);
+        assert!(
+            !stored.merge(&next),
+            "the sync worker audits each semantic change"
+        );
+        assert_eq!(stored.delivery_date, first);
+
+        next.delivery_date.as_mut().unwrap().value = DeliveryDateValue::Estimated {
+            date: time::Date::from_calendar_date(2026, time::Month::November, 2).unwrap(),
+        };
+        assert!(stored.merge(&next));
+        assert_eq!(stored.delivery_date, next.delivery_date);
+    }
+
+    #[test]
+    fn a_current_provider_civil_date_replaces_stale_eta_but_not_actual_delivery() {
+        let delivered = "2026-10-25T16:54:00-07:00";
+        let scan = CarrierEvent {
+            status: Some(Status::Delivered),
+            datetime: Some(delivered.into()),
+            ..Default::default()
+        };
+        let stored = CarrierTracking {
+            events: vec![scan.clone()],
+            delivered_at: Some(delivered.into()),
+            estimated_delivery_at: Some("2026-10-30".into()),
+            estimated_delivery_raw: Some("2026-10-30T00:00:00Z".into()),
+            ..Default::default()
+        };
+        let current_promise: CarrierTracking = serde_json::from_str(
+            r#"{"delivery_date":{"kind":"estimated","date":"2026-11-01","observed_at":"2026-10-31T19:00:00Z","timezone":"America/Los_Angeles"}}"#,
+        ).unwrap();
+        let mut fresh = stored.clone();
+        let changed = fresh.merge(&current_promise);
+        assert!(fresh.estimated_delivery_at.is_none());
+        assert!(fresh.estimated_delivery_raw.is_none());
+        assert!(changed);
+        assert_eq!(fresh.delivered_at.as_deref(), Some(delivered));
+        assert_eq!(fresh.events.as_slice(), std::slice::from_ref(&scan));
+
+        let canonical = CarrierTracking {
+            estimated_delivery_at: Some("2026-11-01".into()),
+            estimated_delivery_raw: Some("2026-11-01T00:00:00Z".into()),
+            ..current_promise
+        };
+        assert!(fresh.merge(&canonical));
+        assert_eq!(fresh.estimated_delivery_at, canonical.estimated_delivery_at);
+        assert_eq!(
+            fresh.estimated_delivery_raw,
+            canonical.estimated_delivery_raw
+        );
+        assert_eq!(fresh.delivered_at.as_deref(), Some(delivered));
+        assert_eq!(fresh.events.as_slice(), std::slice::from_ref(&scan));
+
+        let mut unchanged = stored.clone();
+        unchanged.merge(&CarrierTracking::default());
+        assert_eq!(
+            unchanged.estimated_delivery_at,
+            stored.estimated_delivery_at
+        );
+        assert_eq!(
+            unchanged.estimated_delivery_raw,
+            stored.estimated_delivery_raw
+        );
+    }
 
     #[test]
     fn estimated_delivery_windows_require_valid_explicit_paired_bounds() {

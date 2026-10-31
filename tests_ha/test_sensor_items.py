@@ -99,6 +99,7 @@ async def test_empty_item_lists_are_present_and_use_two_bounded_requests(
                     "archived": "false",
                     "delivered_after": str(int(DAY_START.timestamp())),
                     "delivered_before": str(int(DAY_END.timestamp())),
+                    "delivered_on": "2026-10-15",
                     "sort": "delivered",
                     "limit": "20",
                 }.items()

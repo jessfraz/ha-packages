@@ -6,7 +6,7 @@ pub mod connection;
 mod pages;
 
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     io::{Read, Write},
     net::IpAddr,
     path::PathBuf,
@@ -44,6 +44,7 @@ use crate::{
 
 const MAX_BODY: usize = 4 * 1024 * 1024;
 const MAX_TRACK_LOADS: usize = 5;
+const MAX_LISTING_LOADS: usize = 3;
 const FLOW_LIFETIME: Duration = Duration::from_secs(600);
 const REQUEST_PAUSE: Duration = Duration::from_secs(2);
 const ACCOUNT_OPERATION_TIMEOUT: Duration = Duration::from_secs(120);
@@ -111,6 +112,9 @@ pub struct Discovery {
     pub parcels: Vec<AmazonParcel>,
     pub deferred: usize,
     pub deferred_reasons: DeferredCounts,
+    pub has_more: bool,
+    pub complete: bool,
+    pub failure: Option<ConnectionError>,
 }
 
 // Deliberately no Debug: serde is only used for the owner-only credential file.
@@ -141,9 +145,29 @@ struct State {
     generation: u64,
     flow: Option<Flow>,
     last_error: Option<String>,
-    cursor: usize,
+    scan: Option<DiscoveryScan>,
     imported: BTreeSet<String>,
     observed: BTreeMap<String, Tracker>,
+}
+struct DiscoveryScan {
+    pending: VecDeque<pages::ParcelPage>,
+    retry: VecDeque<pages::ParcelPage>,
+    next_page: Option<String>,
+    seen_pages: BTreeSet<u8>,
+    seen_sources: BTreeSet<String>,
+    deferred: DeferredCounts,
+}
+impl Default for DiscoveryScan {
+    fn default() -> Self {
+        Self {
+            pending: VecDeque::new(),
+            retry: VecDeque::new(),
+            next_page: Some("/your-orders/orders?timeFilter=months-3".into()),
+            seen_pages: BTreeSet::new(),
+            seen_sources: BTreeSet::new(),
+            deferred: DeferredCounts::default(),
+        }
+    }
 }
 struct RequestSchedule {
     next: Instant,
@@ -231,7 +255,7 @@ impl AmazonClient {
                 generation,
                 flow: None,
                 last_error: None,
-                cursor: 0,
+                scan: None,
                 imported: BTreeSet::new(),
                 observed: BTreeMap::new(),
             })),
@@ -464,7 +488,7 @@ impl AmazonClient {
         self.epoch.store(credential.generation, Ordering::Release);
         state.credential = Some(credential);
         state.last_error = None;
-        state.cursor = 0;
+        state.scan = None;
         state.observed.clear();
         *session = None;
         self.clear_cookies()
@@ -487,6 +511,7 @@ impl AmazonClient {
         state.credential = None;
         state.flow = None;
         state.last_error = None;
+        state.scan = None;
         state.imported.clear();
         state.observed.clear();
         *session = None;
@@ -509,23 +534,40 @@ impl AmazonClient {
                 retry_after: None,
             }));
         }
+        let was_enabled = credential.imports_enabled;
         credential.imports_enabled = true;
         save(&self.path, &credential)?;
         state.credential = Some(credential);
-        state.cursor = 0;
+        if !was_enabled {
+            state.scan = None;
+        }
         self.paused.store(false, Ordering::Release);
         drop(state);
         Ok(self.status().await)
     }
 
     pub async fn discover(&self) -> Result<Discovery, Error> {
-        self.check_account(AccountCheck::Discovery)
+        let mut batch = self
+            .discovery_batch()
             .await
-            .map_err(ConnectionError::into_provider)
+            .map_err(ConnectionError::into_provider)?;
+        if let Some(error) = batch.failure.take() {
+            return Err(error.into_provider());
+        }
+        Ok(batch)
     }
 
     pub async fn preview(&self) -> Result<Discovery, ConnectionError> {
-        self.check_account(AccountCheck::Preview).await
+        let mut batch = self.check_account(AccountCheck::Preview).await?;
+        if let Some(error) = batch.failure.take() {
+            return Err(error);
+        }
+        Ok(batch)
+    }
+
+    /// The owning worker commits verified progress even if a later page fails.
+    pub async fn discovery_batch(&self) -> Result<Discovery, ConnectionError> {
+        self.check_account(AccountCheck::Discovery).await
     }
 
     /// Verify a selected existing record without discovering or importing new orders.
@@ -695,81 +737,160 @@ impl AmazonClient {
             ));
         }
         let generation = self.generation().await;
-        let result = match tokio::time::timeout(self.operation_timeout, self.discover_inner()).await
-        {
-            Ok(result) => result,
-            Err(_) => {
-                let error = self.requests.lock().await.failure(ErrorKind::Timeout);
-                Err(ConnectionError::new(ConnectionStage::Orders, error))
-            }
+        let result = self.discover_inner(check).await;
+        let failure = match &result {
+            Err(error) => Some(error),
+            Ok(batch) => batch.failure.as_ref(),
         };
-        if let Err(error) = &result {
+        if let Some(error) = failure {
             self.record_error(generation, error.provider_error())
                 .await
-                .map_err(|e| ConnectionError::new(ConnectionStage::Credentials, e))?;
+                .map_err(|error| ConnectionError::new(ConnectionStage::Credentials, error))?;
         }
         result
     }
-    async fn discover_inner(&self) -> Result<Discovery, ConnectionError> {
-        let (generation, customer) = {
-            let state = self.state.lock().await;
-            let c = state
+
+    async fn discovery_timeout(&self, path: &str) -> ConnectionError {
+        ConnectionError::new(
+            ConnectionStage::Orders,
+            self.requests.lock().await.failure(ErrorKind::Timeout),
+        )
+        .with_page_kind(pages::page_kind(path))
+        .with_path(path)
+    }
+
+    async fn discovery_page(
+        &self,
+        path: &str,
+        deadline: Instant,
+    ) -> Result<String, ConnectionError> {
+        match tokio::time::timeout_at(deadline, self.fetch_page_detailed(path)).await {
+            Ok(result) => result,
+            Err(_) => Err(self.discovery_timeout(path).await),
+        }
+    }
+
+    async fn discover_inner(&self, check: AccountCheck) -> Result<Discovery, ConnectionError> {
+        let (generation, customer, imported, mut scan) = {
+            let mut state = self.state.lock().await;
+            let credential = state
                 .credential
                 .as_ref()
-                .filter(|c| !c.auth_required)
+                .filter(|value| !value.auth_required)
                 .ok_or_else(|| {
                     ConnectionError::new(
                         ConnectionStage::AccessToken,
                         provider_error(ErrorKind::AuthenticationRequired),
                     )
                 })?;
-            (state.generation, c.customer_id.clone())
+            let customer = credential.customer_id.clone();
+            let scan = if matches!(check, AccountCheck::Discovery) {
+                state.scan.take().unwrap_or_default()
+            } else {
+                DiscoveryScan::default()
+            };
+            (state.generation, customer, state.imported.clone(), scan)
         };
-        // Validate the saved refresh token once for the account's discovery
-        // cycle, including when no parcels exist. Per-parcel reads share cookies.
-        {
-            let mut session = self.session.lock().await;
-            self.ensure_session(&mut session, generation).await?;
-        }
-        let listing = self.order_listing().await?;
+        let deadline = Instant::now() + self.operation_timeout;
         let mut parcels = Vec::new();
-        let mut deferred = listing.deferred;
-        let mut deferred_reasons = listing.deferred_reasons;
-        let (start, imported) = {
-            let state = self.state.lock().await;
-            (state.cursor, state.imported.clone())
-        };
-        let count = listing.parcels.len();
         let mut reads = 0;
-        for offset in 0..count {
-            let index = (start + offset) % count;
-            let parcel = &listing.parcels[index];
-            let source_key = source_key(&customer, parcel);
+        let mut listings = 0;
+        let mut failure = None;
+        let mut restart = false;
+        let mut deferred = scan.deferred.total();
+        while reads < MAX_TRACK_LOADS {
+            let candidate = if let Some(parcel) = scan.pending.pop_front() {
+                parcel
+            } else if let Some(path) = scan.next_page.take() {
+                if listings >= MAX_LISTING_LOADS {
+                    scan.next_page = Some(path);
+                    break;
+                }
+                let page = pages::listing_page_index(&path);
+                let Some(page) = page.filter(|page| !scan.seen_pages.contains(page)) else {
+                    restart = true;
+                    failure = Some(
+                        ConnectionError::new(
+                            ConnectionStage::Orders,
+                            provider_error(ErrorKind::InvalidResponse),
+                        )
+                        .with_page_kind(PageKind::Orders)
+                        .with_path(&path),
+                    );
+                    break;
+                };
+                listings += 1;
+                let listing =
+                    match tokio::time::timeout_at(deadline, self.order_listing(&path)).await {
+                        Ok(Ok(listing)) => listing,
+                        result => {
+                            scan.next_page = Some(path.clone());
+                            failure = Some(match result {
+                                Ok(Err(error)) => error,
+                                _ => self.discovery_timeout(&path).await,
+                            });
+                            break;
+                        }
+                    };
+                scan.seen_pages.insert(page);
+                if let Some(next) = &listing.next_page {
+                    let next_page = pages::listing_page_index(next);
+                    if next_page != page.checked_add(1) {
+                        restart = true;
+                        failure = Some(
+                            ConnectionError::new(
+                                ConnectionStage::Orders,
+                                provider_error(ErrorKind::InvalidResponse),
+                            )
+                            .with_page_kind(PageKind::Orders)
+                            .with_path(next),
+                        );
+                    }
+                }
+                scan.next_page = if failure.is_none() {
+                    listing.next_page
+                } else {
+                    None
+                };
+                deferred += listing.deferred;
+                scan.deferred.unsupported_link += listing.deferred_reasons.unsupported_link;
+                scan.deferred.missing_identity += listing.deferred_reasons.missing_identity;
+                scan.deferred.missing_product += listing.deferred_reasons.missing_product;
+                for parcel in listing.parcels {
+                    let key = source_key(&customer, &parcel);
+                    if !imported.contains(&key) && scan.seen_sources.insert(key) {
+                        scan.pending.push_back(parcel);
+                    }
+                }
+                if failure.is_some() {
+                    break;
+                }
+                continue;
+            } else if let Some(parcel) = scan.retry.pop_front() {
+                parcel
+            } else {
+                break;
+            };
+            let source_key = source_key(&customer, &candidate);
             if imported.contains(&source_key) {
                 continue;
             }
-            if reads >= MAX_TRACK_LOADS {
-                deferred += 1;
-                deferred_reasons.request_limit += 1;
-                continue;
-            }
             reads += 1;
-            self.state.lock().await.cursor = (index + 1) % count;
             let result = async {
-                let mut path = parcel.path.clone();
-                let mut page = self.fetch_page_detailed(&path).await?;
+                let mut path = candidate.path.clone();
+                let mut page = self.discovery_page(&path, deadline).await?;
                 if !pages::is_tracking(&path) {
-                    path = pages::tracking_link(&page, parcel).map_err(|e| {
-                        ConnectionError::with_status(ConnectionStage::Orders, e, 200)
-                            .with_page_kind(connection::PageKind::Item)
+                    path = pages::tracking_link(&page, &candidate).map_err(|error| {
+                        ConnectionError::with_status(ConnectionStage::Orders, error, 200)
+                            .with_page_kind(PageKind::Item)
                             .with_path(&path)
-                            .with_shape(pages::order_details_failure_shape(&page, &parcel.order))
+                            .with_shape(pages::order_details_failure_shape(&page, &candidate.order))
                     })?;
-                    page = self.fetch_page_detailed(&path).await?;
+                    page = self.discovery_page(&path, deadline).await?;
                 }
-                pages::tracking_parcel(&page, &path, parcel).map_err(|e| {
-                    ConnectionError::with_status(ConnectionStage::Orders, e, 200)
-                        .with_page_kind(connection::PageKind::Tracking)
+                pages::tracking_parcel(&page, &path, &candidate).map_err(|error| {
+                    ConnectionError::with_status(ConnectionStage::Orders, error, 200)
+                        .with_page_kind(PageKind::Tracking)
                         .with_path(&path)
                         .with_shape(pages::tracking_failure_shape(&page))
                 })
@@ -778,15 +899,20 @@ impl AmazonClient {
             match result {
                 Ok(mut tracker) => {
                     tracker.id = format!("{}:{}", account_key(&customer), tracker.id);
-                    let title = parcel.titles.join("; ");
+                    let title = candidate.titles.join("; ");
+                    let title = if title.starts_with("Amazon: ") {
+                        title
+                    } else {
+                        format!("Amazon: {title}")
+                    };
                     if title.len() > 500 {
+                        scan.deferred.missing_product += 1;
                         deferred += 1;
-                        deferred_reasons.missing_product += 1;
                         continue;
                     }
                     parcels.push(AmazonParcel {
                         title,
-                        order_reference: parcel.order.clone(),
+                        order_reference: candidate.order,
                         source_key,
                         tracker,
                     });
@@ -795,12 +921,23 @@ impl AmazonClient {
                     if error.stage == ConnectionStage::Orders
                         && matches!(error.provider_error().kind, ErrorKind::InvalidResponse) =>
                 {
+                    scan.deferred.unverified_tracking += 1;
                     deferred += 1;
-                    deferred_reasons.unverified_tracking += 1;
                 }
-                Err(error) => return Err(error),
+                Err(error) => {
+                    scan.retry.push_back(candidate);
+                    failure = Some(error);
+                    break;
+                }
             }
         }
+        let has_more = restart
+            || !scan.pending.is_empty()
+            || !scan.retry.is_empty()
+            || scan.next_page.is_some();
+        let mut deferred_reasons = scan.deferred.clone();
+        deferred_reasons.request_limit = scan.pending.len() + scan.retry.len();
+        let complete = !has_more && failure.is_none();
         let mut state = self.state.lock().await;
         if state.generation != generation {
             return Err(ConnectionError::failure(
@@ -816,25 +953,54 @@ impl AmazonClient {
         while state.observed.len() > 500 {
             state.observed.pop_first();
         }
-        if let Some(c) = &mut state.credential {
-            c.last_success_at =
-                Some(now().map_err(|e| ConnectionError::new(ConnectionStage::Credentials, e))?);
-            c.challenge_required = false;
-            save(&self.path, c)
-                .map_err(|e| ConnectionError::new(ConnectionStage::Credentials, e))?;
+        // A manually requested, verified preview may resolve a challenge even
+        // when the remaining account scan still needs bounded continuation.
+        let recovered = matches!(check, AccountCheck::Preview)
+            && failure.is_none()
+            && (!parcels.is_empty() || (complete && deferred_reasons.total() == 0));
+        let challenged = state
+            .credential
+            .as_ref()
+            .is_some_and(|credential| credential.challenge_required);
+        let healthy = complete && (!challenged || recovered);
+        if (healthy || recovered)
+            && let Some(credential) = &mut state.credential
+        {
+            if healthy {
+                credential.last_success_at =
+                    Some(now().map_err(|error| {
+                        ConnectionError::new(ConnectionStage::Credentials, error)
+                    })?);
+            }
+            credential.challenge_required = false;
+            save(&self.path, credential)
+                .map_err(|error| ConnectionError::new(ConnectionStage::Credentials, error))?;
             self.paused.store(false, Ordering::Release);
         }
-        state.last_error = None;
+        if healthy
+            || (recovered && state.last_error.as_deref() == Some("provider_challenge_required"))
+        {
+            state.last_error = None;
+        }
+        if matches!(check, AccountCheck::Discovery) && has_more && !restart {
+            state.scan = Some(scan);
+        }
         drop(state);
-        let mut requests = self.requests.lock().await;
-        requests.failures = 0;
-        requests.cooldown = None;
-        drop(requests);
+        // Successful requests recover the transport backoff independently of
+        // whether the full account sweep has verified every parcel yet.
+        if failure.is_none() && (reads > 0 || listings > 0) {
+            let mut requests = self.requests.lock().await;
+            requests.failures = 0;
+            requests.cooldown = None;
+        }
         Ok(Discovery {
             generation,
             parcels,
-            deferred,
+            deferred: deferred + deferred_reasons.request_limit,
             deferred_reasons,
+            has_more,
+            complete,
+            failure,
         })
     }
 
@@ -1146,12 +1312,17 @@ impl AmazonClient {
         auth::exchange_cookies(self, replacement.as_deref().unwrap_or(&token)).await
     }
 
-    async fn order_listing(&self) -> Result<pages::Listing, ConnectionError> {
+    async fn order_listing(&self, path: &str) -> Result<pages::Listing, ConnectionError> {
         let mut last = ConnectionError::failure(
             ConnectionStage::Orders,
             ConnectionReason::UnsupportedOrdersLayout,
         );
-        for path in ["/your-orders/orders", "/gp/css/order-history"] {
+        let paths = if path == "/your-orders/orders?timeFilter=months-3" {
+            vec![path, "/gp/css/order-history?timeFilter=months-3"]
+        } else {
+            vec![path]
+        };
+        for path in paths {
             match self.fetch_page_detailed(path).await {
                 Ok(page) => match pages::listing(&page) {
                     Ok(listing) => return Ok(listing),
@@ -1255,8 +1426,10 @@ impl AmazonClient {
                     state.observed.clear();
                     state.imported.clear();
                 }
+                state.scan = None;
                 self.paused.store(true, Ordering::Release);
             } else if matches!(error.kind, ErrorKind::AuthenticationRequired) {
+                state.scan = None;
                 self.paused.store(true, Ordering::Release);
                 if let Some(c) = &mut state.credential {
                     c.auth_required = true;
@@ -1742,7 +1915,9 @@ mod tests {
                 "/auth/register" => (200, REGISTER.into()),
                 "/auth/token" => (200, ACCESS.into()),
                 "/ap/exchangetoken/cookies" => (200, COOKIES.into()),
-                "/your-orders/orders" => (200, listing()),
+                "/your-orders/orders" | "/your-orders/orders?timeFilter=months-3" => {
+                    (200, listing())
+                }
                 _ => (200, tracking()),
             })
         }
@@ -1777,7 +1952,9 @@ mod tests {
         Fixture::with_response(move |path| match path {
             "/auth/token" => (200, String::new(), ACCESS.as_bytes().to_vec()),
             "/ap/exchangetoken/cookies" => (200, String::new(), COOKIES.as_bytes().to_vec()),
-            "/your-orders/orders" => (200, "Content-Encoding: gzip\r\n".into(), orders.to_vec()),
+            "/your-orders/orders" | "/your-orders/orders?timeFilter=months-3" => {
+                (200, "Content-Encoding: gzip\r\n".into(), orders.to_vec())
+            }
             _ => (
                 200,
                 "Content-Encoding: gzip\r\n".into(),
@@ -1795,7 +1972,7 @@ mod tests {
         let preview = client.preview().await.unwrap();
         assert_eq!(preview.parcels.len(), 1);
         assert_eq!(preview.deferred, 0);
-        assert_eq!(preview.parcels[0].title, "Widget");
+        assert_eq!(preview.parcels[0].title, "Amazon: Widget");
         assert_eq!(preview.parcels[0].tracker.tracking_code, NUMBER);
         assert_eq!(
             preview.parcels[0].tracker.status,
@@ -1849,7 +2026,7 @@ mod tests {
             "/auth/register" => (200, REGISTER.into()),
             "/auth/token" => (200, ACCESS.into()),
             "/ap/exchangetoken/cookies" => (200, COOKIES.into()),
-            "/your-orders/orders" => (
+            "/your-orders/orders" | "/your-orders/orders?timeFilter=months-3" => (
                 200,
                 format!(
                     r#"<a class="item-card__link" href="{POP}" aria-label="Widget, Order placed 1 October 2026, Shipped"></a>"#
@@ -1895,7 +2072,7 @@ mod tests {
                 "/auth/token",
                 "/auth/token",
                 "/ap/exchangetoken/cookies",
-                "/your-orders/orders",
+                "/your-orders/orders?timeFilter=months-3",
                 POP,
                 TRACK,
             ]
@@ -1930,7 +2107,7 @@ mod tests {
         let fixture = Fixture::new(|path| match path {
             "/auth/token" => (200, ACCESS.into()),
             "/ap/exchangetoken/cookies" => (200, COOKIES.into()),
-            "/your-orders/orders" => (
+            "/your-orders/orders" | "/your-orders/orders?timeFilter=months-3" => (
                 200,
                 format!(
                     r#"<a class="item-card__link" href="{POP}" aria-label="Widget, Order placed 1 October 2026, Shipped"></a>"#
@@ -1945,7 +2122,7 @@ mod tests {
         let preview = client.preview().await.unwrap();
         assert_eq!(preview.parcels.len(), 1);
         assert_eq!(preview.deferred, 0);
-        assert_eq!(preview.parcels[0].title, "Widget");
+        assert_eq!(preview.parcels[0].title, "Amazon: Widget");
         assert_eq!(preview.parcels[0].tracker.tracking_code, NUMBER);
         assert!(!client.status().await.imports_enabled);
     }
@@ -1970,7 +2147,7 @@ mod tests {
                     package - 1
                 )
             };
-            if path == "/your-orders/orders" {
+            if path == "/your-orders/orders?timeFilter=months-3" {
                 return (200,[1,2].into_iter().map(|package|format!(r#"<a class="item-card__link" href="{}" aria-label="Product {package}, Order placed 1 October 2026, Shipped"></a>"#,pop(package))).collect());
             }
             for package in [1, 2] {
@@ -1997,9 +2174,9 @@ mod tests {
         let preview = client.preview().await.unwrap();
         assert_eq!(preview.deferred, 0);
         assert_eq!(preview.parcels.len(), 2);
-        assert_eq!(preview.parcels[0].title, "Product 1");
+        assert_eq!(preview.parcels[0].title, "Amazon: Product 1");
         assert_eq!(preview.parcels[0].tracker.tracking_code, "TBA000000000101");
-        assert_eq!(preview.parcels[1].title, "Product 2");
+        assert_eq!(preview.parcels[1].title, "Amazon: Product 2");
         assert_eq!(preview.parcels[1].tracker.tracking_code, "TBA000000000102");
         assert_ne!(preview.parcels[0].source_key, preview.parcels[1].source_key);
     }
@@ -2013,7 +2190,7 @@ mod tests {
         let fixture = Fixture::with_location(|path| match path {
             "/auth/token" => (200, None, ACCESS.into()),
             "/ap/exchangetoken/cookies" => (200, None, COOKIES.into()),
-            "/your-orders/orders" => (
+            "/your-orders/orders" | "/your-orders/orders?timeFilter=months-3" => (
                 200,
                 None,
                 format!(
@@ -2076,7 +2253,7 @@ mod tests {
         let fixture = Fixture::new(|path| match path {
             "/auth/token" => (200, ACCESS.into()),
             "/ap/exchangetoken/cookies" => (200, COOKIES.into()),
-            "/your-orders/orders" => (200, listing()),
+            "/your-orders/orders" | "/your-orders/orders?timeFilter=months-3" => (200, listing()),
             _ => (200, "<input name=\"captchacharacters\">".into()),
         });
         let dir = tempfile::tempdir().unwrap();
@@ -2160,10 +2337,12 @@ mod tests {
         let fixture = Fixture::new(move |path| match path {
             "/auth/token" => (200, ACCESS.into()),
             "/ap/exchangetoken/cookies" => (200, COOKIES.into()),
-            "/your-orders/orders" if response.load(Ordering::Acquire) => {
+            "/your-orders/orders" | "/your-orders/orders?timeFilter=months-3"
+                if response.load(Ordering::Acquire) =>
+            {
                 (503, "<input name=\"captchacharacters\">".into())
             }
-            "/your-orders/orders" => (200, listing()),
+            "/your-orders/orders" | "/your-orders/orders?timeFilter=months-3" => (200, listing()),
             _ => (200, tracking()),
         });
         let dir = tempfile::tempdir().unwrap();
@@ -2218,7 +2397,7 @@ mod tests {
         let fixture = Fixture::new(move |path| match path {
             "/auth/token" => (200, ACCESS.into()),
             "/ap/exchangetoken/cookies" => (200, COOKIES.into()),
-            "/your-orders/orders" => {
+            "/your-orders/orders" | "/your-orders/orders?timeFilter=months-3" => {
                 entered.send(()).unwrap();
                 released
                     .recv_timeout(std::time::Duration::from_secs(5))
@@ -2450,7 +2629,7 @@ mod tests {
             "/auth/token" if count.fetch_add(1, Ordering::AcqRel) == 0 => (200, ACCESS.into()),
             "/auth/token" => (400, r#"{"error":"invalid_grant"}"#.into()),
             "/ap/exchangetoken/cookies" => (200, COOKIES.into()),
-            "/your-orders/orders" => (200, listing()),
+            "/your-orders/orders" | "/your-orders/orders?timeFilter=months-3" => (200, listing()),
             _ => (200, tracking()),
         });
         let dir = tempfile::tempdir().unwrap();
@@ -2480,7 +2659,7 @@ mod tests {
         assert_eq!(
             calls
                 .iter()
-                .filter(|path| path.as_str() == "/your-orders/orders")
+                .filter(|path| path.as_str() == "/your-orders/orders?timeFilter=months-3")
                 .count(),
             1
         );
@@ -2542,7 +2721,9 @@ mod tests {
         let fixture = Fixture::new(move |path| match path {
             "/auth/token" => (200, ACCESS.into()),
             "/ap/exchangetoken/cookies" => (200, COOKIES.into()),
-            "/your-orders/orders" => (200, listing.clone()),
+            "/your-orders/orders" | "/your-orders/orders?timeFilter=months-3" => {
+                (200, listing.clone())
+            }
             _ => (200, tracking()),
         });
         let dir = tempfile::tempdir().unwrap();
@@ -2591,6 +2772,553 @@ mod tests {
         ));
         assert!(scoped.observation_guard().await.is_ok());
     }
+
+    fn coverage_listing(packages: std::ops::RangeInclusive<usize>, next: Option<&str>) -> String {
+        let mut page: String = packages.map(|package| format!(
+            r#"<a class="item-card__link" href="{}" aria-label="Product {package}, Order placed 1 October 2026, Shipped"></a>"#,
+            PATH.replace("packageId=1", &format!("packageId={package}")),
+        )).collect();
+        if let Some(next) = next {
+            page.push_str(&format!(r#"<ul class="a-pagination"><li class="a-last"><a href="{next}">Next→</a></li></ul>"#));
+        }
+        page
+    }
+
+    fn coverage_tracking(path: &str) -> String {
+        let package: usize = path.rsplit_once("packageId=").unwrap().1.parse().unwrap();
+        tracking().replace(NUMBER, &format!("940011112222333344{package:04}"))
+    }
+
+    async fn force_discovery_due(store: &crate::store::Store) {
+        sqlx::query("UPDATE amazon_discovery SET next_attempt_at=unixepoch()-1 WHERE id=1")
+            .execute(store.pool())
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn discovery_retains_verified_progress_when_one_page_keeps_failing() {
+        use crate::{amazon_sync::AmazonDiscoveryWorker, store::Store};
+        let failed = PATH.replace("packageId=1", "packageId=5");
+        let fixture = Fixture::new(move |path| match path {
+            "/auth/token" => (200, ACCESS.into()),
+            "/ap/exchangetoken/cookies" => (200, COOKIES.into()),
+            "/your-orders/orders" | "/your-orders/orders?timeFilter=months-3" => {
+                (200, coverage_listing(1..=9, None))
+            }
+            value if value == failed => (500, "Service temporarily unavailable".into()),
+            value => (200, coverage_tracking(value)),
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let client = Arc::new(configured(&dir, &fixture));
+        client.enable_imports().await.unwrap();
+        let store = Store::open(&dir.path().join("registry.sqlite3"))
+            .await
+            .unwrap();
+        let worker = AmazonDiscoveryWorker::new(store.clone(), client.clone());
+        for _ in 0..4 {
+            force_discovery_due(&store).await;
+            assert!(worker.tick().await.unwrap());
+        }
+        let saved: i64 = sqlx::query_scalar("SELECT count(*) FROM shipments")
+            .fetch_one(store.pool())
+            .await
+            .unwrap();
+        assert_eq!(
+            saved, 8,
+            "a failing page must not discard other verified parcels"
+        );
+        assert_eq!(
+            client.status().await.last_error_code.as_deref(),
+            Some("provider_http")
+        );
+        assert_eq!(client.status().await.last_success_at, None);
+        let (attempts, delay): (i64, i64) = sqlx::query_as(
+            "SELECT attempts,next_attempt_at-unixepoch() FROM amazon_discovery WHERE id=1",
+        )
+        .fetch_one(store.pool())
+        .await
+        .unwrap();
+        assert_eq!(attempts, 4);
+        assert!((479..=480).contains(&delay));
+        store.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn discovery_continues_pending_batches_before_the_regular_completed_scan_cadence() {
+        use crate::{amazon_sync::AmazonDiscoveryWorker, store::Store};
+        let fixture = Fixture::new(|path| match path {
+            "/auth/token" => (200, ACCESS.into()),
+            "/ap/exchangetoken/cookies" => (200, COOKIES.into()),
+            "/your-orders/orders" | "/your-orders/orders?timeFilter=months-3" => {
+                (200, coverage_listing(1..=7, None))
+            }
+            value => (200, coverage_tracking(value)),
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let client = Arc::new(configured(&dir, &fixture));
+        client.enable_imports().await.unwrap();
+        client.state.lock().await.last_error = Some("provider_http".into());
+        client.requests.lock().await.failures = 1;
+        let store = Store::open(&dir.path().join("registry.sqlite3"))
+            .await
+            .unwrap();
+        let worker = AmazonDiscoveryWorker::new(store.clone(), client.clone());
+        assert!(worker.tick().await.unwrap());
+        let delay: i64 = sqlx::query_scalar(
+            "SELECT next_attempt_at-unixepoch() FROM amazon_discovery WHERE id=1",
+        )
+        .fetch_one(store.pool())
+        .await
+        .unwrap();
+        assert!(
+            (59..=60).contains(&delay),
+            "pending work should continue conservatively within the sweep"
+        );
+        assert_eq!(client.status().await.last_success_at, None);
+        assert_eq!(
+            client.status().await.last_error_code.as_deref(),
+            Some("provider_http"),
+            "a healthy bounded batch is not yet a complete account scan"
+        );
+        assert_eq!(client.requests.lock().await.failures, 0);
+        assert!(!worker.tick().await.unwrap());
+        force_discovery_due(&store).await;
+        assert!(worker.tick().await.unwrap());
+        let saved: i64 = sqlx::query_scalar("SELECT count(*) FROM shipments")
+            .fetch_one(store.pool())
+            .await
+            .unwrap();
+        assert_eq!(saved, 7);
+        let delay: i64 = sqlx::query_scalar(
+            "SELECT next_attempt_at-unixepoch() FROM amazon_discovery WHERE id=1",
+        )
+        .fetch_one(store.pool())
+        .await
+        .unwrap();
+        assert!((1799..=1980).contains(&delay));
+        assert!(client.status().await.last_success_at.is_some());
+        store.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn discovery_visits_next_pages_once_and_retains_archived_tracking_identity() {
+        use crate::models::{CarrierTracking, CreateShipment, Direction, InputTracking, Status};
+        use crate::shipping_api::types::{ProviderId, Tracker};
+        use crate::{amazon_sync::AmazonDiscoveryWorker, store::Store};
+        const NEXT: &str = "/your-orders/orders?page=1";
+        let fixture = Fixture::new(|path| match path {
+            "/auth/token" => (200, ACCESS.into()),
+            "/ap/exchangetoken/cookies" => (200, COOKIES.into()),
+            "/your-orders/orders" | "/your-orders/orders?timeFilter=months-3" => {
+                (200, coverage_listing(1..=6, Some(NEXT)))
+            }
+            NEXT => (200, coverage_listing(6..=8, None)),
+            value => (200, coverage_tracking(value)),
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let client = Arc::new(configured(&dir, &fixture));
+        client.enable_imports().await.unwrap();
+        let store = Store::open(&dir.path().join("registry.sqlite3"))
+            .await
+            .unwrap();
+        let number = "9400111122223333440002";
+        let existing = store
+            .create(
+                CreateShipment {
+                    title: "Owner's archived parcel".into(),
+                    direction: Direction::Inbound,
+                    merchant: None,
+                    order_reference: None,
+                    signature_required: None,
+                    tracking: InputTracking {
+                        number: number.into(),
+                        carrier: Some(crate::carrier::Carrier::Usps),
+                        recipient_url: None,
+                    },
+                    source: None,
+                },
+                "owner",
+                "archived-number",
+                Some(&Tracker {
+                    provider: ProviderId::EasyPost,
+                    id: "original-tracker".into(),
+                    tracking_code: number.into(),
+                    carrier: crate::carrier::Carrier::Usps,
+                    status: Status::InTransit,
+                    public_url: None,
+                    carrier_tracking: CarrierTracking::default(),
+                }),
+            )
+            .await
+            .unwrap();
+        let archived = store
+            .archive(existing.id, existing.revision, true, "owner")
+            .await
+            .unwrap();
+        let worker = AmazonDiscoveryWorker::new(store.clone(), client);
+        for _ in 0..3 {
+            force_discovery_due(&store).await;
+            assert!(worker.tick().await.unwrap());
+        }
+        let saved: i64 = sqlx::query_scalar("SELECT count(*) FROM shipments")
+            .fetch_one(store.pool())
+            .await
+            .unwrap();
+        assert_eq!(
+            saved, 8,
+            "recent parcels on the next page must be discovered without duplicates"
+        );
+        let retained = store.get(archived.id).await.unwrap();
+        assert!(retained.archived);
+        assert_eq!(retained.title, archived.title);
+        assert_eq!(retained.tracking, archived.tracking);
+        assert_eq!(retained.sync.provider, ProviderId::EasyPost);
+        {
+            let calls = fixture.calls.lock().unwrap();
+            assert_eq!(calls.iter().filter(|path| path.as_str() == NEXT).count(), 2);
+            // Two forced scans revisit listings, but committed tracking pages are skipped.
+            for package in 1..=8 {
+                let path = PATH.replace("packageId=1", &format!("packageId={package}"));
+                assert_eq!(calls.iter().filter(|value| *value == &path).count(), 1);
+            }
+        }
+        store.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn discovery_follows_mobile_chunk_state_through_the_complete_recent_sweep() {
+        use crate::{amazon_sync::AmazonDiscoveryWorker, store::Store};
+        const NEXT: &str = "/your-orders/orders?startIndex=10&timeFilter=months-3";
+        const LAST: &str = "/your-orders/orders?startIndex=20&timeFilter=months-3";
+        let fixture = Fixture::new(|path| match path {
+            "/auth/token" => (200, ACCESS.into()),
+            "/ap/exchangetoken/cookies" => (200, COOKIES.into()),
+            "/your-orders/orders" | "/your-orders/orders?timeFilter=months-3" => (
+                200,
+                coverage_listing(1..=10, None)
+                    + r#"<script type="a-state" data-a-state='{"key":"chunkState"}'>{"nextStartIndex":10,"nextContinuationToken":"PRIVATE_UNUSED_TOKEN","timeFilter":"months-3","enablePosy":false}</script>"#,
+            ),
+            NEXT => (
+                200,
+                coverage_listing(11..=20, None)
+                    + r#"<script type="a-state" data-a-state='{"key":"chunkState"}'>{"nextStartIndex":20,"nextContinuationToken":"PRIVATE_UNUSED_TOKEN","timeFilter":"months-3","enablePosy":false}</script>"#,
+            ),
+            LAST => (200, coverage_listing(21..=23, None)),
+            value if value.starts_with("/gp/your-account/ship-track?") => {
+                (200, coverage_tracking(value))
+            }
+            _ => (404, "Unexpected request".into()),
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let client = Arc::new(configured(&dir, &fixture));
+        client.enable_imports().await.unwrap();
+        let store = Store::open(&dir.path().join("registry.sqlite3"))
+            .await
+            .unwrap();
+        let worker = AmazonDiscoveryWorker::new(store.clone(), client.clone());
+        for expected in [5, 10, 15, 20, 23] {
+            force_discovery_due(&store).await;
+            assert!(worker.tick().await.unwrap());
+            let saved: i64 = sqlx::query_scalar("SELECT count(*) FROM shipments")
+                .fetch_one(store.pool())
+                .await
+                .unwrap();
+            assert_eq!(saved, expected);
+        }
+        assert!(client.status().await.last_success_at.is_some());
+        {
+            let calls = fixture.calls.lock().unwrap();
+            let listings: Vec<_> = calls
+                .iter()
+                .filter(|path| path.starts_with("/your-orders/orders"))
+                .map(String::as_str)
+                .collect();
+            assert_eq!(
+                listings,
+                ["/your-orders/orders?timeFilter=months-3", NEXT, LAST]
+            );
+            assert!(
+                !calls
+                    .iter()
+                    .any(|path| path.contains("PRIVATE_UNUSED_TOKEN"))
+            );
+            for package in 1..=23 {
+                let path = PATH.replace("packageId=1", &format!("packageId={package}"));
+                assert_eq!(calls.iter().filter(|value| **value == path).count(), 1);
+            }
+        }
+        store.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn preview_reports_incomplete_coverage_without_consuming_the_discovery_sweep() {
+        use crate::{api, store::Store};
+        #[derive(serde::Deserialize)]
+        struct Preview {
+            complete: bool,
+            has_more: bool,
+        }
+        let fixture = Fixture::new(|path| match path {
+            "/auth/token" => (200, ACCESS.into()),
+            "/ap/exchangetoken/cookies" => (200, COOKIES.into()),
+            "/your-orders/orders" | "/your-orders/orders?timeFilter=months-3" => {
+                (200, coverage_listing(1..=7, None))
+            }
+            value => (200, coverage_tracking(value)),
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let client = Arc::new(configured(&dir, &fixture));
+        let store = Store::open(&dir.path().join("registry.sqlite3"))
+            .await
+            .unwrap();
+        let owner = "synthetic-preview-owner-credential-32-bytes";
+        let server = api::start(
+            "127.0.0.1:0".parse().unwrap(),
+            Arc::new(
+                api::Context::new(store.clone(), owner, None, None).with_amazon(client.clone()),
+            ),
+        )
+        .unwrap();
+        let response = reqwest::Client::new()
+            .post(format!("http://{}/v1/amazon/preview", server.local_addr()))
+            .bearer_auth(owner)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        let result: Preview = response.json().await.unwrap();
+        assert!(!result.complete);
+        assert!(result.has_more);
+        let batch = client.discover().await.unwrap();
+        assert_eq!(batch.parcels.len(), 5);
+        assert_eq!(batch.parcels[0].title, "Amazon: Product 1");
+        assert!(!client.status().await.imports_enabled);
+        server.close().await.unwrap();
+        store.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn discovery_does_not_commit_partial_observations_after_authentication_or_challenge() {
+        use crate::{amazon_sync::AmazonDiscoveryWorker, store::Store};
+        for challenge in [true, false] {
+            let access_reads = std::sync::atomic::AtomicUsize::new(0);
+            let target = PATH.replace("packageId=1", "packageId=2");
+            let fixture = Fixture::with_location(move |path| match path {
+                "/auth/token" if !challenge && access_reads.fetch_add(1, Ordering::AcqRel) > 0 => {
+                    (400, None, r#"{"error":"invalid_grant"}"#.into())
+                }
+                "/auth/token" => (200, None, ACCESS.into()),
+                "/ap/exchangetoken/cookies" => (200, None, COOKIES.into()),
+                "/your-orders/orders" | "/your-orders/orders?timeFilter=months-3" => {
+                    (200, None, coverage_listing(1..=2, None))
+                }
+                value if value == target && challenge => {
+                    (503, None, "<input id=captchacharacters>".into())
+                }
+                value if value == target => (302, Some("/ap/signin".into()), String::new()),
+                value => (200, None, coverage_tracking(value)),
+            });
+            let dir = tempfile::tempdir().unwrap();
+            let client = Arc::new(configured(&dir, &fixture));
+            client.enable_imports().await.unwrap();
+            let store = Store::open(&dir.path().join("registry.sqlite3"))
+                .await
+                .unwrap();
+            let worker = AmazonDiscoveryWorker::new(store.clone(), client.clone());
+            assert!(worker.tick().await.unwrap());
+            let count: i64 = sqlx::query_scalar("SELECT count(*) FROM shipments")
+                .fetch_one(store.pool())
+                .await
+                .unwrap();
+            assert_eq!(count, 0);
+            assert!(client.blocked());
+            let count = fixture.calls.lock().unwrap().len();
+            force_discovery_due(&store).await;
+            assert!(!worker.tick().await.unwrap());
+            assert_eq!(fixture.calls.lock().unwrap().len(), count);
+            assert_eq!(client.status().await.challenge_required, challenge);
+            store.close().await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn discovery_deadline_keeps_the_parcels_verified_before_a_slow_response() {
+        use crate::{amazon_sync::AmazonDiscoveryWorker, store::Store};
+        let slow = PATH.replace("packageId=1", "packageId=2");
+        let fixture = Fixture::new(move |path| match path {
+            "/auth/token" => (200, ACCESS.into()),
+            "/ap/exchangetoken/cookies" => (200, COOKIES.into()),
+            "/your-orders/orders" | "/your-orders/orders?timeFilter=months-3" => {
+                (200, coverage_listing(1..=2, None))
+            }
+            value if value == slow => {
+                thread::sleep(std::time::Duration::from_millis(500));
+                (200, coverage_tracking(value))
+            }
+            value => (200, coverage_tracking(value)),
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let mut account = configured(&dir, &fixture);
+        account.operation_timeout = std::time::Duration::from_millis(200);
+        let client = Arc::new(account);
+        client.enable_imports().await.unwrap();
+        let store = Store::open(&dir.path().join("registry.sqlite3"))
+            .await
+            .unwrap();
+        let worker = AmazonDiscoveryWorker::new(store.clone(), client.clone());
+        assert!(worker.tick().await.unwrap());
+        let count: i64 = sqlx::query_scalar("SELECT count(*) FROM shipments")
+            .fetch_one(store.pool())
+            .await
+            .unwrap();
+        assert_eq!(count, 1);
+        assert_eq!(
+            client.status().await.last_error_code.as_deref(),
+            Some("provider_timeout")
+        );
+        assert_eq!(client.status().await.last_success_at, None);
+        store.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn verified_bounded_preview_can_recover_a_challenge_without_claiming_a_complete_scan() {
+        let challenge = Arc::new(AtomicBool::new(true));
+        let response = challenge.clone();
+        let fixture = Fixture::new(move |path| match path {
+            "/auth/token" => (200, ACCESS.into()),
+            "/ap/exchangetoken/cookies" => (200, COOKIES.into()),
+            "/your-orders/orders" | "/your-orders/orders?timeFilter=months-3"
+                if response.load(Ordering::Acquire) =>
+            {
+                (503, "<input id=captchacharacters>".into())
+            }
+            "/your-orders/orders" | "/your-orders/orders?timeFilter=months-3" => {
+                (200, coverage_listing(1..=7, None))
+            }
+            value => (200, coverage_tracking(value)),
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let client = configured(&dir, &fixture);
+        client.enable_imports().await.unwrap();
+        let failed = client.preview().await.err().unwrap();
+        assert!(client.status().await.challenge_required);
+        tokio::time::pause();
+        tokio::time::advance(std::time::Duration::from_secs(
+            failed.retry_after().unwrap() as u64 + 1,
+        ))
+        .await;
+        tokio::time::resume();
+        challenge.store(false, Ordering::Release);
+        let preview = client.preview().await.unwrap();
+        assert_eq!(preview.parcels.len(), 5);
+        assert!(preview.has_more);
+        assert!(!preview.complete);
+        assert!(!client.status().await.challenge_required);
+        assert!(!client.blocked());
+        assert!(client.status().await.imports_enabled);
+        assert_eq!(client.status().await.last_success_at, None);
+    }
+
+    #[tokio::test]
+    async fn a_fully_visited_deferred_order_is_healthy_but_cannot_clear_a_challenge() {
+        for challenged in [false, true] {
+            let unavailable = Arc::new(AtomicBool::new(true));
+            let response = unavailable.clone();
+            let fixture = Fixture::new(move |path| match path {
+                "/auth/token" => (200, ACCESS.into()),
+                "/ap/exchangetoken/cookies" => (200, COOKIES.into()),
+                "/your-orders/orders" | "/your-orders/orders?timeFilter=months-3"
+                    if response.load(Ordering::Acquire) =>
+                {
+                    (
+                        503,
+                        if challenged {
+                            "<input id=captchacharacters>"
+                        } else {
+                            "Service unavailable"
+                        }
+                        .into(),
+                    )
+                }
+                "/your-orders/orders" | "/your-orders/orders?timeFilter=months-3" => (
+                    200,
+                    format!(
+                        r#"<a class="item-card__link" href="{}" aria-label="Widget, Order placed 1 October 2026, Not yet shipped"></a>"#,
+                        PATH.replace("&packageId=1", ""),
+                    ),
+                ),
+                _ => (404, "Unexpected tracking request".into()),
+            });
+            let dir = tempfile::tempdir().unwrap();
+            let client = configured(&dir, &fixture);
+            let failed = client.preview().await.err().unwrap();
+            unavailable.store(false, Ordering::Release);
+            tokio::time::pause();
+            tokio::time::advance(std::time::Duration::from_secs(
+                failed.retry_after().unwrap() as u64 + 1,
+            ))
+            .await;
+            tokio::time::resume();
+            let preview = client.preview().await.unwrap();
+            assert!(preview.complete);
+            assert!(!preview.has_more);
+            assert!(preview.parcels.is_empty());
+            assert_eq!(preview.deferred_reasons.missing_identity, 1);
+            let status = client.status().await;
+            assert_eq!(status.challenge_required, challenged);
+            assert_eq!(client.blocked(), challenged);
+            if challenged {
+                assert_eq!(status.last_success_at, None);
+                assert_eq!(
+                    status.last_error_code.as_deref(),
+                    Some("provider_challenge_required")
+                );
+            } else {
+                assert!(status.last_success_at.is_some());
+                assert_eq!(status.last_error_code, None);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn discovery_titles_keep_one_prefix_and_enforce_the_final_title_limit() {
+        let prefixed_limit = format!("Amazon: {}", "x".repeat(492));
+        for (title, expected) in [
+            (prefixed_limit.clone(), Some(prefixed_limit)),
+            ("x".repeat(493), None),
+            (
+                "x".repeat(492),
+                Some(format!("Amazon: {}", "x".repeat(492))),
+            ),
+        ] {
+            let fixture = Fixture::new(move |path| match path {
+                "/auth/token" => (200, ACCESS.into()),
+                "/ap/exchangetoken/cookies" => (200, COOKIES.into()),
+                "/your-orders/orders" | "/your-orders/orders?timeFilter=months-3" => (
+                    200,
+                    format!(
+                        r#"<a class="item-card__link" href="{PATH}" aria-label="{title}, Order placed 1 October 2026, Shipped"></a>"#,
+                    ),
+                ),
+                _ => (200, tracking()),
+            });
+            let dir = tempfile::tempdir().unwrap();
+            let client = configured(&dir, &fixture);
+            let preview = client.preview().await.unwrap();
+            if let Some(expected) = expected {
+                assert_eq!(preview.parcels.len(), 1);
+                assert_eq!(preview.parcels[0].title, expected);
+                assert_eq!(preview.deferred, 0);
+            } else {
+                assert!(preview.parcels.is_empty());
+                assert_eq!(preview.deferred, 1);
+                assert_eq!(preview.deferred_reasons.missing_product, 1);
+            }
+            assert!(!client.status().await.imports_enabled);
+        }
+    }
+
     #[tokio::test]
     async fn preview_then_shared_discovery_worker_imports_once_and_respects_due_time() {
         use crate::{amazon_sync::AmazonDiscoveryWorker, store::Store};
@@ -2613,7 +3341,7 @@ mod tests {
             .get(uuid::Uuid::parse_str(&id).unwrap())
             .await
             .unwrap();
-        assert_eq!(shipment.title, "Widget");
+        assert_eq!(shipment.title, "Amazon: Widget");
         assert_eq!(
             shipment.sync.provider,
             crate::shipping_api::types::ProviderId::AmazonAccount
@@ -2642,7 +3370,7 @@ mod tests {
         let fixture = Fixture::new(move |path| match path {
             "/auth/token" => (200, ACCESS.into()),
             "/ap/exchangetoken/cookies" => (200, COOKIES.into()),
-            "/your-orders/orders" => (200, listing()),
+            "/your-orders/orders" | "/your-orders/orders?timeFilter=months-3" => (200, listing()),
             _ if tracking_read.swap(true, Ordering::AcqRel) => {
                 entered.send(()).unwrap();
                 released
@@ -2705,7 +3433,9 @@ mod tests {
             let fixture = Fixture::new(move |path| match path {
                 "/auth/token" => (200, ACCESS.into()),
                 "/ap/exchangetoken/cookies" => (200, COOKIES.into()),
-                "/your-orders/orders" => (200, listing()),
+                "/your-orders/orders" | "/your-orders/orders?timeFilter=months-3" => {
+                    (200, listing())
+                }
                 _ => (200, tracking().replace("IN_TRANSIT", status)),
             });
             let dir = tempfile::tempdir().unwrap();
@@ -2781,7 +3511,9 @@ mod tests {
             let fixture = Fixture::with_location(move |path| match path {
                 "/auth/token" => (200, None, ACCESS.into()),
                 "/ap/exchangetoken/cookies" => (200, None, COOKIES.into()),
-                "/your-orders/orders" => (200, None, listing()),
+                "/your-orders/orders" | "/your-orders/orders?timeFilter=months-3" => {
+                    (200, None, listing())
+                }
                 value if value == PATH && !redirected.swap(true, Ordering::AcqRel) => {
                     (302, Some(target.clone()), String::new())
                 }
@@ -2792,7 +3524,7 @@ mod tests {
             if accepted {
                 let result = client.discover().await.unwrap();
                 assert_eq!(result.parcels.len(), 1);
-                assert_eq!(result.parcels[0].title, "Widget");
+                assert_eq!(result.parcels[0].title, "Amazon: Widget");
                 assert_eq!(result.parcels[0].tracker.tracking_code, NUMBER);
                 assert_eq!(result.deferred, 0);
             } else {
@@ -2820,7 +3552,9 @@ mod tests {
                 "/auth/register" => (200, REGISTER.into()),
                 "/auth/token" => (200, ACCESS.into()),
                 "/ap/exchangetoken/cookies" => (200, cookies.clone()),
-                "/your-orders/orders" => (200, listing()),
+                "/your-orders/orders" | "/your-orders/orders?timeFilter=months-3" => {
+                    (200, listing())
+                }
                 _ => (200, tracking()),
             });
             let dir = tempfile::tempdir().unwrap();
@@ -2880,7 +3614,9 @@ mod tests {
                     "/auth/register" => (200, REGISTER.into()),
                     "/auth/token" => (200, ACCESS.into()),
                     "/ap/exchangetoken/cookies" => (200, COOKIES.into()),
-                    "/your-orders/orders" => (200, listing()),
+                    "/your-orders/orders" | "/your-orders/orders?timeFilter=months-3" => {
+                        (200, listing())
+                    }
                     _ => (404, String::new()),
                 }
             });
@@ -3001,7 +3737,9 @@ mod tests {
                 "/auth/register" => (200, REGISTER.into()),
                 "/auth/token" => (200, ACCESS.into()),
                 "/ap/exchangetoken/cookies" => (200, COOKIES.into()),
-                "/your-orders/orders" => (200, listing()),
+                "/your-orders/orders" | "/your-orders/orders?timeFilter=months-3" => {
+                    (200, listing())
+                }
                 _ => (404, String::new()),
             }
         });
@@ -3100,9 +3838,13 @@ mod tests {
             let fixture = Fixture::new(move |path| match path {
                 "/auth/token" => (200, ACCESS.into()),
                 "/ap/exchangetoken/cookies" => (200, COOKIES.into()),
-                "/your-orders/orders" => (200, "<html>Unknown first layout</html>".into()),
-                "/gp/css/order-history" if recognized => (200, listing()),
-                "/gp/css/order-history" => (200, "<html>Unknown legacy layout</html>".into()),
+                "/your-orders/orders" | "/your-orders/orders?timeFilter=months-3" => {
+                    (200, "<html>Unknown first layout</html>".into())
+                }
+                "/gp/css/order-history?timeFilter=months-3" if recognized => (200, listing()),
+                "/gp/css/order-history?timeFilter=months-3" => {
+                    (200, "<html>Unknown legacy layout</html>".into())
+                }
                 _ => (200, tracking()),
             });
             let dir = tempfile::tempdir().unwrap();
@@ -3132,7 +3874,7 @@ mod tests {
             assert_eq!(
                 calls
                     .iter()
-                    .filter(|p| p.as_str() == "/gp/css/order-history")
+                    .filter(|p| p.as_str() == "/gp/css/order-history?timeFilter=months-3")
                     .count(),
                 1
             );
@@ -3176,7 +3918,7 @@ mod tests {
                     .lock()
                     .unwrap()
                     .iter()
-                    .any(|p| p == "/gp/css/order-history")
+                    .any(|p| p == "/gp/css/order-history?timeFilter=months-3")
             );
         }
     }
@@ -3270,7 +4012,11 @@ mod tests {
                     .count(),
                 1
             );
-            assert!(!calls.iter().any(|path| path == "/your-orders/orders"));
+            assert!(
+                !calls
+                    .iter()
+                    .any(|path| path == "/your-orders/orders?timeFilter=months-3")
+            );
         }
         let restored = AmazonClient::new(dir.path().join("amazon-account.json")).unwrap();
         assert!(!restored.status().await.imports_enabled);

@@ -45,6 +45,7 @@ _LIST_QUERY = {
     "tracking_issues",
     "delivered_after",
     "delivered_before",
+    "delivered_on",
     "limit",
     "page_token",
 }
@@ -80,7 +81,12 @@ class ShipmentsView(HomeAssistantView):
             if path == "shipments":
                 allowed_query = _LIST_QUERY
             elif path == "summary":
-                allowed_query = {"direction", "delivered_after", "delivered_before"}
+                allowed_query = {
+                    "direction",
+                    "delivered_after",
+                    "delivered_before",
+                    "delivered_on",
+                }
             elif path == "delivery-estimates":
                 allowed_query = _EVENT_QUERY
             elif path.endswith("/events"):

@@ -58,9 +58,9 @@ impl AmazonDiscoveryWorker {
         let Some(claim) = claim else {
             return Ok(false);
         };
-        let result = self.client.discover().await;
+        let result = self.client.discovery_batch().await;
         let (delay, succeeded) = match result {
-            Ok(batch) => {
+            Ok(mut batch) => {
                 // An old response cannot import after disconnect or account replacement.
                 let guard = self.client.commit_guard(batch.generation).await;
                 let mut imported = Vec::new();
@@ -86,8 +86,32 @@ impl AmazonDiscoveryWorker {
                     }
                     drop(guard);
                     self.client.remember_imported(&imported).await;
+                } else if let Err(error) = guard
+                    && batch.failure.is_none()
+                {
+                    batch.failure = Some(crate::amazon::connection::ConnectionError::new(
+                        crate::amazon::connection::ConnectionStage::Account,
+                        error,
+                    ));
                 }
-                (discovery_delay("amazon_account"), true)
+                if let Some(error) = batch.failure {
+                    (
+                        retry_delay(
+                            claim.attempts.saturating_add(1),
+                            error.retry_after().unwrap_or(0),
+                        ),
+                        false,
+                    )
+                } else {
+                    (
+                        if batch.has_more {
+                            60
+                        } else {
+                            discovery_delay("amazon_account")
+                        },
+                        true,
+                    )
+                }
             }
             Err(error) => (
                 retry_delay(

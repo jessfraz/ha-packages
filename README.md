@@ -47,13 +47,13 @@ tracked before its first scan.
 | --- | --- |
 | EasyPost | Most carriers, including automatic carrier detection. |
 | Amazon account | Verified parcels from your connected Amazon.com account. |
-| AfterShip | Amazon MCF / Logistics, SpeedX, Sway / Returnmates, and Veho. |
+| AfterShip | Amazon MCF, SpeedX, Sway / Returnmates, and Veho. |
 | DoorDash | Parcels with an original DoorDash Drive recipient tracking link. No API key required. |
 
 ### Amazon account imports
 
-Amazon.com shipment discovery is under development and still needs a
-user-connected live preview to validate its website compatibility. Existing Amazon MCF tracking remains separate.
+Amazon Account discovers verified consumer-account parcels from recent Amazon.com
+orders. Existing Amazon MCF tracking remains separate.
 
 Administrators can connect one Amazon.com retail account from the dashboard's
 **Amazon** settings. Open the generated Amazon sign-in link, complete any
@@ -78,8 +78,9 @@ Preview does not change shipment records. Only parcels with verified item mappin
 a supported carrier and a real tracking number are imported. Split parcels stay
 separate; a number already in Shipments links to its existing record.
 
-Amazon parcels use the same tracking schedule as other shipments. Discovery keeps
-checking for new parcels even when none are active. If Amazon rejects the saved
+Amazon parcels use the same tracking schedule as other shipments. Discovery checks
+recent order pages in small paced batches, then checks again every 30–33 minutes.
+New work continues even when none of the saved parcels are active. If Amazon rejects the saved
 sign-in, Home Assistant shows a notification linking directly to **Reconnect
 Amazon**. Network failures and changed pages retain saved data and retry separately.
 Disconnect stops account access and retains shipment records and history.

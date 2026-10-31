@@ -3,6 +3,7 @@
 import json
 from datetime import datetime
 from urllib.parse import urlencode
+from zoneinfo import ZoneInfo
 
 import pytest
 from homeassistant.core import HomeAssistant
@@ -81,6 +82,10 @@ async def test_inbound_delivered_today_uses_ha_timezone_and_dst(
             "direction": "inbound",
             "delivered_after": str(int(datetime.fromisoformat(after).timestamp())),
             "delivered_before": str(int(datetime.fromisoformat(before).timestamp())),
+            "delivered_on": datetime.fromisoformat(now)
+            .astimezone(ZoneInfo(zone))
+            .date()
+            .isoformat(),
         }
         for query in queries
     )
@@ -171,6 +176,7 @@ async def test_presence_shares_exact_ha_day_with_the_app_ui(
         "direction": "inbound",
         "delivered_after": str(report["delivery_day"]["delivered_after"]),
         "delivered_before": str(report["delivery_day"]["delivered_before"]),
+        "delivered_on": report["delivery_day"]["date"],
     }
 
 
@@ -183,6 +189,7 @@ async def test_ha_bridge_preserves_delivery_day_bounds(
         "direction": "inbound",
         "delivered_after": "1792047600",
         "delivered_before": "1792134000",
+        "delivered_on": "2026-10-15",
     }
     response = await client.get(f"/api/shipments/v1/{route}", params=bounds)
     assert response.status == 200

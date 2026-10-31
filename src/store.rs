@@ -1191,130 +1191,7 @@ impl Store {
         after: Option<ShipmentPosition>,
         limit: u32,
     ) -> Result<Vec<ShipmentListEntry>, Error> {
-        if filters.source_namespace.is_some() != filters.source_key.is_some() {
-            return Err(Error::Invalid(
-                "source_namespace and source_key must be supplied together".into(),
-            ));
-        }
-        let delivery_window = crate::delivery::DeliveryWindow::from_bounds(
-            filters.delivered_after,
-            filters.delivered_before,
-        )?;
-        // Date keys are indexed generated columns. Every page uses the key
-        // captured when the preceding row was selected, never a mutable lookup.
-        let sort_column = match filters.sort.unwrap_or_default() {
-            ShipmentSort::Id => None,
-            ShipmentSort::Expected => Some("expected_sort_key"),
-            ShipmentSort::Delivered if delivery_window.is_some() => {
-                Some("-unixepoch(json_extract(carrier_tracking,'$.delivered_at'))")
-            }
-            ShipmentSort::Delivered => Some("delivered_sort_key"),
-        };
-        let mut query = QueryBuilder::<Sqlite>::new("SELECT shipments.*,");
-        query.push(sort_column.unwrap_or("NULL"));
-        query.push(" AS list_sort_key FROM shipments WHERE archived=");
-        query.push_bind(filters.archived.unwrap_or(false));
-        if let Some(direction) = filters.direction {
-            query.push(" AND direction=").push_bind(direction.as_str());
-        }
-        if let Some(issues) = filters.tracking_issues {
-            query.push(if issues {
-                " AND last_error IS NOT NULL"
-            } else {
-                " AND last_error IS NULL"
-            });
-        }
-        if let Some(window) = delivery_window {
-            query
-                .push(" AND unixepoch(json_extract(carrier_tracking,'$.delivered_at'))>=")
-                .push_bind(window.after())
-                .push(" AND unixepoch(json_extract(carrier_tracking,'$.delivered_at'))<")
-                .push_bind(window.before());
-        }
-        if let Some(position) = after {
-            if let Some(column) = sort_column {
-                query
-                    .push(" AND (")
-                    .push(column)
-                    .push(",id)>(")
-                    .push_bind(position.sort_key.unwrap_or(i64::MAX))
-                    .push(",")
-                    .push_bind(position.id.to_string())
-                    .push(")");
-            } else {
-                query.push(" AND id>").push_bind(position.id.to_string());
-            }
-        }
-        if let Some(value) = &filters.tracking_number {
-            let mut tracking = InputTracking {
-                number: value.clone(),
-                carrier: None,
-                recipient_url: None,
-            };
-            normalize_number(&mut tracking.number)?;
-            query
-                .push(" AND tracking_number=")
-                .push_bind(tracking.number);
-        }
-        if let Some(value) = &filters.carrier {
-            query
-                .push(" AND tracking_carrier=")
-                .push_bind(value.as_db_key());
-        }
-        if let Some(value) = &filters.order_reference {
-            query.push(" AND order_reference=").push_bind(value);
-        }
-        if let (Some(namespace), Some(key)) = (&filters.source_namespace, &filters.source_key) {
-            query
-                .push(" AND id=(SELECT shipment_id FROM sources WHERE namespace=")
-                .push_bind(namespace)
-                .push(" AND key=")
-                .push_bind(key)
-                .push(")");
-        }
-        if let Some(value) = &filters.search {
-            valid_text(value, "search", 500)?;
-            query
-                .push(" AND (instr(lower(title),lower(")
-                .push_bind(value)
-                .push("))>0 OR instr(lower(coalesce(merchant,'')),lower(")
-                .push_bind(value)
-                .push("))>0 OR instr(lower(coalesce(order_reference,'')),lower(")
-                .push_bind(value)
-                .push("))>0)");
-        }
-        if let Some(active) = filters.active {
-            query.push(" AND coalesce(override_status,carrier_status,'\"expected\"')");
-            query.push(if active { " NOT IN (" } else { " IN (" });
-            {
-                let mut terminal = query.separated(",");
-                for status in Status::TERMINAL {
-                    terminal.push_bind(serde_json::to_string(&status)?);
-                }
-            }
-            query.push(")");
-        }
-        if let Some(value) = filters.status {
-            query
-                .push(" AND coalesce(override_status,carrier_status,'\"expected\"')=")
-                .push_bind(serde_json::to_string(&value)?);
-        }
-        if let Some(exceptions) = filters.exceptions {
-            query.push(" AND coalesce(override_status,carrier_status,'\"expected\"')");
-            query.push(if exceptions { " IN (" } else { " NOT IN (" });
-            {
-                let mut statuses = query.separated(",");
-                for status in [Status::Failure, Status::Error, Status::ReturnToSender] {
-                    statuses.push_bind(serde_json::to_string(&status)?);
-                }
-            }
-            query.push(")");
-        }
-        query.push(" ORDER BY ");
-        if let Some(column) = sort_column {
-            query.push(column).push(",");
-        }
-        query.push("id LIMIT ").push_bind(limit.min(201));
+        let mut query = shipment_list_query(filters, after, limit)?;
         #[derive(FromRow)]
         struct ListRecord {
             #[sqlx(flatten)]
@@ -1397,6 +1274,7 @@ impl Store {
             tracking_provider: ProviderId,
             estimated_delivery_window: Option<String>,
             delivered_at: Option<String>,
+            delivery_date: Option<String>,
             calendar_sort_key: i64,
         }
         let mut query = delivery_estimates_query(after, limit);
@@ -1432,6 +1310,11 @@ impl Store {
                             .map(serde_json::from_str)
                             .transpose()?,
                         delivered_at: row.delivered_at,
+                        delivery_date: row
+                            .delivery_date
+                            .as_deref()
+                            .map(serde_json::from_str)
+                            .transpose()?,
                     },
                     position: DeliveryEstimatePosition {
                         id,
@@ -1539,20 +1422,16 @@ impl Store {
         direction: Option<Direction>,
         window: Option<crate::delivery::DeliveryWindow>,
     ) -> Result<Summary, Error> {
-        let mut query = QueryBuilder::<Sqlite>::new(
-            "SELECT coalesce(override_status,carrier_status,'\"expected\"') AS status,count(*),count(last_error) FROM shipments WHERE archived=0",
-        );
-        if let Some(direction) = direction {
-            query.push(" AND direction=").push_bind(direction.as_str());
-        }
-        if let Some(window) = window.as_ref() {
-            query
-                .push(" AND unixepoch(json_extract(carrier_tracking,'$.delivered_at'))>=")
-                .push_bind(window.after())
-                .push(" AND unixepoch(json_extract(carrier_tracking,'$.delivered_at'))<")
-                .push_bind(window.before());
-        }
-        query.push(" GROUP BY status");
+        self.summary_in_day(direction, window, None).await
+    }
+
+    pub async fn summary_in_day(
+        &self,
+        direction: Option<Direction>,
+        window: Option<crate::delivery::DeliveryWindow>,
+        delivered_on: Option<&str>,
+    ) -> Result<Summary, Error> {
+        let mut query = summary_query(direction, window, delivered_on)?;
         let rows = query
             .build_query_as::<(String, i64, i64)>()
             .fetch_all(&self.pool)
@@ -1562,8 +1441,8 @@ impl Store {
             summary.sync_errors += sync_errors;
             let status: Status = serde_json::from_str(&status)?;
             if window.is_some() {
-                // The window is based on an actual delivery scan, independent
-                // of a subsequent manual status correction.
+                // A provider's actual delivery (scan or explicit civil date)
+                // remains independent of a later manual status correction.
                 summary.delivered += count;
             }
             if !status.is_terminal() {
@@ -1621,6 +1500,196 @@ impl Store {
     }
 }
 
+fn summary_query(
+    direction: Option<Direction>,
+    window: Option<crate::delivery::DeliveryWindow>,
+    delivered_on: Option<&str>,
+) -> Result<QueryBuilder<Sqlite>, Error> {
+    let delivered_on = validate_delivered_on(delivered_on, window)?;
+    let mut query = QueryBuilder::<Sqlite>::new(
+        "SELECT coalesce(override_status,carrier_status,'\"expected\"') AS status,count(*),count(last_error) FROM shipments WHERE archived=0",
+    );
+    if let Some(direction) = direction {
+        query.push(" AND direction=").push_bind(direction.as_str());
+    }
+    if let Some(window) = window {
+        push_delivery_window(&mut query, window, delivered_on);
+    }
+    query.push(" GROUP BY status");
+    Ok(query)
+}
+
+fn validate_delivered_on(
+    delivered_on: Option<&str>,
+    window: Option<crate::delivery::DeliveryWindow>,
+) -> Result<Option<&str>, Error> {
+    if let Some(date) = delivered_on {
+        let format = time::format_description::parse_borrowed::<2>("[year]-[month]-[day]")
+            .map_err(|_| Error::Invalid("invalid civil date format".into()))?;
+        if date.len() != 10 || time::Date::parse(date, &format).is_err() {
+            return Err(Error::Invalid(
+                "delivered_on must be an ISO civil date".into(),
+            ));
+        }
+        if window.is_none() {
+            return Err(Error::Invalid(
+                "delivered_on requires delivered_after and delivered_before".into(),
+            ));
+        }
+    }
+    Ok(delivered_on)
+}
+
+fn push_delivery_window(
+    query: &mut QueryBuilder<Sqlite>,
+    window: crate::delivery::DeliveryWindow,
+    delivered_on: Option<&str>,
+) {
+    query
+        .push(" AND (unixepoch(json_extract(carrier_tracking,'$.delivered_at'))>=")
+        .push_bind(window.after())
+        .push(" AND unixepoch(json_extract(carrier_tracking,'$.delivered_at'))<")
+        .push_bind(window.before());
+    if let Some(date) = delivered_on {
+        // provider_delivered_on is NULL when an actual timestamp exists.
+        // Civil matching uses the caller's day, never a guessed UTC date.
+        query.push(" OR provider_delivered_on=").push_bind(date);
+    }
+    query.push(")");
+}
+
+fn shipment_list_query(
+    filters: &Filters,
+    after: Option<ShipmentPosition>,
+    limit: u32,
+) -> Result<QueryBuilder<Sqlite>, Error> {
+    if filters.source_namespace.is_some() != filters.source_key.is_some() {
+        return Err(Error::Invalid(
+            "source_namespace and source_key must be supplied together".into(),
+        ));
+    }
+    let delivery_window = crate::delivery::DeliveryWindow::from_bounds(
+        filters.delivered_after,
+        filters.delivered_before,
+    )?;
+    let delivered_on = validate_delivered_on(filters.delivered_on.as_deref(), delivery_window)?;
+    // Date keys are indexed generated columns. Every page uses the key
+    // captured when the preceding row was selected, never a mutable lookup.
+    let sort_column = match filters.sort.unwrap_or_default() {
+        ShipmentSort::Id => None,
+        ShipmentSort::Expected => Some("expected_sort_key"),
+        ShipmentSort::Delivered if delivery_window.is_some() && delivered_on.is_some() => Some(
+            "-coalesce(unixepoch(json_extract(carrier_tracking,'$.delivered_at')),unixepoch(provider_delivered_on))",
+        ),
+        ShipmentSort::Delivered if delivery_window.is_some() => {
+            Some("-unixepoch(json_extract(carrier_tracking,'$.delivered_at'))")
+        }
+        ShipmentSort::Delivered => Some("delivered_sort_key"),
+    };
+    let mut query = QueryBuilder::<Sqlite>::new("SELECT shipments.*,");
+    query.push(sort_column.unwrap_or("NULL"));
+    query.push(" AS list_sort_key FROM shipments WHERE archived=");
+    query.push_bind(filters.archived.unwrap_or(false));
+    if let Some(direction) = filters.direction {
+        query.push(" AND direction=").push_bind(direction.as_str());
+    }
+    if let Some(issues) = filters.tracking_issues {
+        query.push(if issues {
+            " AND last_error IS NOT NULL"
+        } else {
+            " AND last_error IS NULL"
+        });
+    }
+    if let Some(window) = delivery_window {
+        push_delivery_window(&mut query, window, delivered_on);
+    }
+    if let Some(position) = after {
+        if let Some(column) = sort_column {
+            query
+                .push(" AND (")
+                .push(column)
+                .push(",id)>(")
+                .push_bind(position.sort_key.unwrap_or(i64::MAX))
+                .push(",")
+                .push_bind(position.id.to_string())
+                .push(")");
+        } else {
+            query.push(" AND id>").push_bind(position.id.to_string());
+        }
+    }
+    if let Some(value) = &filters.tracking_number {
+        let mut tracking = InputTracking {
+            number: value.clone(),
+            carrier: None,
+            recipient_url: None,
+        };
+        normalize_number(&mut tracking.number)?;
+        query
+            .push(" AND tracking_number=")
+            .push_bind(tracking.number);
+    }
+    if let Some(value) = &filters.carrier {
+        query
+            .push(" AND tracking_carrier=")
+            .push_bind(value.as_db_key());
+    }
+    if let Some(value) = &filters.order_reference {
+        query.push(" AND order_reference=").push_bind(value);
+    }
+    if let (Some(namespace), Some(key)) = (&filters.source_namespace, &filters.source_key) {
+        query
+            .push(" AND id=(SELECT shipment_id FROM sources WHERE namespace=")
+            .push_bind(namespace)
+            .push(" AND key=")
+            .push_bind(key)
+            .push(")");
+    }
+    if let Some(value) = &filters.search {
+        valid_text(value, "search", 500)?;
+        query
+            .push(" AND (instr(lower(title),lower(")
+            .push_bind(value)
+            .push("))>0 OR instr(lower(coalesce(merchant,'')),lower(")
+            .push_bind(value)
+            .push("))>0 OR instr(lower(coalesce(order_reference,'')),lower(")
+            .push_bind(value)
+            .push("))>0)");
+    }
+    if let Some(active) = filters.active {
+        query.push(" AND coalesce(override_status,carrier_status,'\"expected\"')");
+        query.push(if active { " NOT IN (" } else { " IN (" });
+        {
+            let mut terminal = query.separated(",");
+            for status in Status::TERMINAL {
+                terminal.push_bind(serde_json::to_string(&status)?);
+            }
+        }
+        query.push(")");
+    }
+    if let Some(value) = filters.status {
+        query
+            .push(" AND coalesce(override_status,carrier_status,'\"expected\"')=")
+            .push_bind(serde_json::to_string(&value)?);
+    }
+    if let Some(exceptions) = filters.exceptions {
+        query.push(" AND coalesce(override_status,carrier_status,'\"expected\"')");
+        query.push(if exceptions { " IN (" } else { " NOT IN (" });
+        {
+            let mut statuses = query.separated(",");
+            for status in [Status::Failure, Status::Error, Status::ReturnToSender] {
+                statuses.push_bind(serde_json::to_string(&status)?);
+            }
+        }
+        query.push(")");
+    }
+    query.push(" ORDER BY ");
+    if let Some(column) = sort_column {
+        query.push(column).push(",");
+    }
+    query.push("id LIMIT ").push_bind(limit.min(201));
+    Ok(query)
+}
+
 fn delivery_estimates_query(
     after: Option<DeliveryEstimatePosition>,
     limit: u32,
@@ -1632,6 +1701,7 @@ fn delivery_estimates_query(
                   json_extract(carrier_tracking, '$.estimated_delivery_raw') AS estimated_delivery_raw,
                   json_extract(carrier_tracking, '$.estimated_delivery_window') AS estimated_delivery_window,
                   json_extract(carrier_tracking, '$.delivered_at') AS delivered_at,
+                  json_extract(carrier_tracking, '$.delivery_date') AS delivery_date,
                   calendar_sort_key
            FROM shipments
            WHERE archived = 0 AND direction = 'inbound'
@@ -1651,4 +1721,414 @@ fn delivery_estimates_query(
         .push(" ORDER BY calendar_sort_key,id LIMIT ")
         .push_bind(limit.min(201));
     query
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::{
+        carrier::Carrier,
+        delivery::DeliveryWindow,
+        models::{
+            CarrierTracking, CreateShipment, DeliveryDateValue, DeliveryEstimatePosition,
+            Direction, Filters, InputTracking, ProviderDeliveryDate, ShipmentSort, Status,
+        },
+        shipping_api::types::{ProviderId, Tracker},
+        store::{Store, delivery_estimates_query, shipment_list_query, summary_query},
+    };
+    use serde::Serialize;
+    use sqlx::{Connection, Execute, QueryBuilder, Row, Sqlite, migrate::Migrator};
+    use std::path::Path;
+    use uuid::Uuid;
+
+    #[derive(Serialize)]
+    struct QueryPlan {
+        name: &'static str,
+        sql: String,
+        plan: Vec<String>,
+        returned_rows: usize,
+        elapsed_micros: u128,
+    }
+
+    async fn explain(
+        store: &Store,
+        name: &'static str,
+        mut builder: QueryBuilder<Sqlite>,
+    ) -> QueryPlan {
+        let sql = builder.sql().as_str().to_owned();
+        let mut query = builder.build();
+        let arguments = query.take_arguments().unwrap().unwrap();
+        let mut actual = QueryBuilder::<Sqlite>::with_arguments("", arguments.clone());
+        actual.push(&sql);
+        let started = std::time::Instant::now();
+        let returned_rows = actual.build().fetch_all(store.pool()).await.unwrap().len();
+        let elapsed_micros = started.elapsed().as_micros();
+        let mut explain = QueryBuilder::<Sqlite>::with_arguments("EXPLAIN QUERY PLAN ", arguments);
+        explain.push(&sql);
+        let plan = explain
+            .build()
+            .fetch_all(store.pool())
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|row| row.get("detail"))
+            .collect();
+        QueryPlan {
+            name,
+            sql,
+            plan,
+            returned_rows,
+            elapsed_micros,
+        }
+    }
+
+    #[tokio::test]
+    async fn typed_delivery_projections_keep_indexed_bounds_and_migration_history() {
+        let directory = tempfile::tempdir().unwrap();
+        let migration_directory = directory.path().join("before-typed-dates");
+        std::fs::create_dir(&migration_directory).unwrap();
+        for entry in
+            std::fs::read_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join("migrations")).unwrap()
+        {
+            let entry = entry.unwrap();
+            let name = entry.file_name();
+            let version: i64 = name
+                .to_str()
+                .unwrap()
+                .split_once('_')
+                .unwrap()
+                .0
+                .parse()
+                .unwrap();
+            if version <= 23 {
+                std::fs::copy(entry.path(), migration_directory.join(name)).unwrap();
+            }
+        }
+        let database = directory.path().join("plans.sqlite3");
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(
+                sqlx::sqlite::SqliteConnectOptions::new()
+                    .filename(&database)
+                    .create_if_missing(true)
+                    .foreign_keys(true),
+            )
+            .await
+            .unwrap();
+        Migrator::new(migration_directory.as_path())
+            .await
+            .unwrap()
+            .run(&pool)
+            .await
+            .unwrap();
+        let store = Store { pool };
+        let observed = time::OffsetDateTime::parse(
+            "2026-10-31T19:00:00Z",
+            &time::format_description::well_known::Rfc3339,
+        )
+        .unwrap();
+        let mut protected = Vec::new();
+        let mut transaction = store.pool().begin().await.unwrap();
+        for index in 0..3072 {
+            let date = time::Date::from_calendar_date(
+                2026,
+                time::Month::October,
+                u8::try_from(index / 4 % 28 + 1).unwrap(),
+            )
+            .unwrap();
+            let (status, tracking) = match index % 4 {
+                0 => (
+                    Status::Delivered,
+                    CarrierTracking {
+                        delivered_at: Some(
+                            date.with_hms(12, 0, 0)
+                                .unwrap()
+                                .assume_utc()
+                                .format(&time::format_description::well_known::Rfc3339)
+                                .unwrap(),
+                        ),
+                        ..Default::default()
+                    },
+                ),
+                1 => (
+                    Status::Delivered,
+                    CarrierTracking {
+                        delivery_date: ProviderDeliveryDate::new(
+                            DeliveryDateValue::Delivered { date },
+                            observed,
+                            "America/Los_Angeles".into(),
+                        ),
+                        ..Default::default()
+                    },
+                ),
+                2 => (
+                    Status::InTransit,
+                    CarrierTracking {
+                        delivery_date: ProviderDeliveryDate::new(
+                            DeliveryDateValue::Estimated { date },
+                            observed,
+                            "America/Los_Angeles".into(),
+                        ),
+                        ..Default::default()
+                    },
+                ),
+                _ => (Status::Expected, CarrierTracking::default()),
+            };
+            let id = Uuid::now_v7();
+            sqlx::query("INSERT INTO shipments(id,title,tracking_carrier,tracking_number,carrier_tracking,carrier_status,direction,archived) VALUES (?,?,?,?,?,?,?,?)")
+                .bind(id.to_string()).bind(format!("Representative parcel {index}"))
+                .bind("USPS").bind(format!("SYNTHETICPLAN{index:06}"))
+                .bind(serde_json::to_string(&tracking).unwrap()).bind(serde_json::to_string(&status).unwrap())
+                .bind(if index % 7 == 0 { "outbound" } else { "inbound" }).bind(index % 5 == 0)
+                .execute(&mut *transaction).await.unwrap();
+        }
+        transaction.commit().await.unwrap();
+        for index in 0..2 {
+            let tracker = Tracker {
+                provider: ProviderId::AmazonAccount,
+                id: format!("synthetic-protected-{index}"),
+                tracking_code: format!("PROTECTEDPLAN{index:06}"),
+                carrier: Carrier::Usps,
+                status: Status::Delivered,
+                public_url: None,
+                carrier_tracking: CarrierTracking {
+                    delivery_date: ProviderDeliveryDate::new(
+                        DeliveryDateValue::Delivered {
+                            date: time::Date::from_calendar_date(2026, time::Month::October, 31)
+                                .unwrap(),
+                        },
+                        observed,
+                        "America/Los_Angeles".into(),
+                    ),
+                    ..Default::default()
+                },
+            };
+            let row = store
+                .create(
+                    CreateShipment {
+                        title: format!("Protected parcel {index}"),
+                        direction: Direction::Inbound,
+                        merchant: Some("Synthetic merchant".into()),
+                        order_reference: Some(format!("synthetic-order-{index}")),
+                        signature_required: Some(true),
+                        tracking: InputTracking {
+                            number: tracker.tracking_code.clone(),
+                            carrier: Some(Carrier::Usps),
+                            recipient_url: None,
+                        },
+                        source: None,
+                    },
+                    "owner",
+                    &format!("protected-{index}"),
+                    Some(&tracker),
+                )
+                .await
+                .unwrap();
+            protected.push((
+                row.id,
+                serde_json::to_string(&row).unwrap(),
+                serde_json::to_string(&store.events(row.id, 0, 100).await.unwrap()).unwrap(),
+            ));
+        }
+        sqlx::query("ANALYZE").execute(store.pool()).await.unwrap();
+        let day_start = time::Date::from_calendar_date(2026, time::Month::October, 25)
+            .unwrap()
+            .midnight()
+            .assume_utc()
+            .unix_timestamp();
+        let window = DeliveryWindow::from_bounds(Some(day_start), Some(day_start + 86400)).unwrap();
+        let timestamp_filters = Filters {
+            direction: Some(Direction::Inbound),
+            sort: Some(ShipmentSort::Delivered),
+            delivered_after: window.map(DeliveryWindow::after),
+            delivered_before: window.map(DeliveryWindow::before),
+            ..Default::default()
+        };
+        let mut evidence = Vec::new();
+        for (phase, after_migration) in [("before", false), ("after", true)] {
+            if after_migration {
+                sqlx::migrate!().run(store.pool()).await.unwrap();
+                // Production migrates before preparing reads. This same-pool
+                // before/after fixture must discard pre-migration SELECT * metadata.
+                store
+                    .pool()
+                    .acquire()
+                    .await
+                    .unwrap()
+                    .clear_cached_statements()
+                    .await
+                    .unwrap();
+                sqlx::query("ANALYZE").execute(store.pool()).await.unwrap();
+            }
+            evidence.push(
+                explain(
+                    &store,
+                    if after_migration {
+                        "calendar_after"
+                    } else {
+                        "calendar_before"
+                    },
+                    delivery_estimates_query(None, 101),
+                )
+                .await,
+            );
+            evidence.push(
+                explain(
+                    &store,
+                    if after_migration {
+                        "calendar_cursor_after"
+                    } else {
+                        "calendar_cursor_before"
+                    },
+                    delivery_estimates_query(
+                        Some(DeliveryEstimatePosition {
+                            id: protected[0].0,
+                            sort_key: day_start - 10 * 86400,
+                        }),
+                        101,
+                    ),
+                )
+                .await,
+            );
+            for sort in [ShipmentSort::Expected, ShipmentSort::Delivered] {
+                let filters = Filters {
+                    direction: Some(Direction::Inbound),
+                    sort: Some(sort),
+                    ..Default::default()
+                };
+                let plan = explain(
+                    &store,
+                    match (phase, sort) {
+                        ("before", ShipmentSort::Expected) => "expected_before",
+                        ("before", _) => "delivered_before",
+                        (_, ShipmentSort::Expected) => "expected_after",
+                        _ => "delivered_after",
+                    },
+                    shipment_list_query(&filters, None, 101).unwrap(),
+                )
+                .await;
+                evidence.push(plan);
+            }
+            evidence.push(
+                explain(
+                    &store,
+                    if after_migration {
+                        "timestamp_day_after"
+                    } else {
+                        "timestamp_day_before"
+                    },
+                    shipment_list_query(&timestamp_filters, None, 101).unwrap(),
+                )
+                .await,
+            );
+            evidence.push(
+                explain(
+                    &store,
+                    if after_migration {
+                        "timestamp_summary_after"
+                    } else {
+                        "timestamp_summary_before"
+                    },
+                    summary_query(Some(Direction::Inbound), window, None).unwrap(),
+                )
+                .await,
+            );
+        }
+        let civil_filters = Filters {
+            delivered_on: Some("2026-10-25".into()),
+            ..timestamp_filters
+        };
+        evidence.push(
+            explain(
+                &store,
+                "civil_day_after",
+                shipment_list_query(&civil_filters, None, 101).unwrap(),
+            )
+            .await,
+        );
+        evidence.push(
+            explain(
+                &store,
+                "civil_summary_after",
+                summary_query(Some(Direction::Inbound), window, Some("2026-10-25")).unwrap(),
+            )
+            .await,
+        );
+        for item in &evidence {
+            if item.name.starts_with("calendar")
+                || item.name.starts_with("expected")
+                || item.name.starts_with("delivered")
+            {
+                let expected_index = if item.name.starts_with("calendar") {
+                    "shipments_direction_calendar_delivery"
+                } else if item.name.starts_with("expected") {
+                    "shipments_direction_expected_delivery"
+                } else {
+                    "shipments_direction_delivered_date"
+                };
+                assert!(
+                    item.plan.iter().any(|line| line.contains(expected_index)),
+                    "{}: {:?}",
+                    item.name,
+                    item.plan
+                );
+                assert!(
+                    !item.plan.iter().any(|line| line.contains("TEMP B-TREE")),
+                    "{}: {:?}",
+                    item.name,
+                    item.plan
+                );
+            } else {
+                assert!(
+                    item.plan
+                        .iter()
+                        .any(|line| line.contains("shipments_carrier_delivered_at")),
+                    "{}: {:?}",
+                    item.name,
+                    item.plan
+                );
+                if item.name.starts_with("civil") {
+                    assert!(
+                        item.plan
+                            .iter()
+                            .any(|line| line.contains("shipments_provider_delivered_on")),
+                        "{}: {:?}",
+                        item.name,
+                        item.plan
+                    );
+                }
+            }
+        }
+        let timestamp_rows = evidence
+            .iter()
+            .find(|item| item.name == "timestamp_day_after")
+            .unwrap()
+            .returned_rows;
+        let civil_rows = evidence
+            .iter()
+            .find(|item| item.name == "civil_day_after")
+            .unwrap()
+            .returned_rows;
+        assert!(timestamp_rows > 0 && civil_rows > timestamp_rows && civil_rows < 101);
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM shipments")
+                .fetch_one(store.pool())
+                .await
+                .unwrap(),
+            3074
+        );
+        for (id, row, events) in protected {
+            assert_eq!(
+                serde_json::to_string(&store.get(id).await.unwrap()).unwrap(),
+                row
+            );
+            assert_eq!(
+                serde_json::to_string(&store.events(id, 0, 100).await.unwrap()).unwrap(),
+                events
+            );
+        }
+        if let Ok(path) = std::env::var("SHIPMENTS_TEST_TYPED_DATE_QUERY_EVIDENCE") {
+            std::fs::write(path, serde_json::to_string_pretty(&evidence).unwrap()).unwrap();
+        }
+        store.close().await.unwrap();
+    }
 }

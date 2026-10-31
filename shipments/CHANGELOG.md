@@ -1,3 +1,15 @@
+## 0.6.24
+
+- Continue bounded Amazon discovery across recent-order pages instead of
+  repeatedly checking only the first batch. Keep verified progress when a later
+  parcel fails, honor backoff, and pause on verification challenges.
+- Parse Amazon delivery promises into typed calendar dates, inferring the year
+  and resolving relative dates in the provider's timezone. Preserve date-only
+  precision without inventing delivery times.
+- Restore the `Amazon: ` prefix for new discoveries and untouched generated
+  titles. Enrich existing saved parcels without replacing IDs or history.
+- Distinguish incomplete previews from genuinely empty accounts.
+
 ## 0.6.23
 
 - Distinguish consumer Amazon Account tracking from Amazon MCF throughout the

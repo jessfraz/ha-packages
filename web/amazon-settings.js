@@ -321,11 +321,13 @@ export function installAmazonSettings(root, request, onUnauthorized) {
       if (!current()) return;
       if (!Array.isArray(result?.shipments) || result.shipments.length > 100 ||
           !Number.isSafeInteger(result.deferred) || result.deferred < 0 ||
+          typeof result.complete !== "boolean" || typeof result.has_more !== "boolean" || (result.complete && result.has_more) ||
           result.shipments.some(item => typeof item.title !== "string" || !item.title || item.title.length > 500 ||
             typeof item.tracking?.number !== "string" || !item.tracking.number || item.tracking.number.length > 256 ||
             typeof item.tracking?.carrier !== "string" || !item.tracking.carrier || item.tracking.carrier.length > 100 ||
             (item.order_reference != null && (typeof item.order_reference !== "string" || item.order_reference.length > 500)))) throw new Error("Invalid preview response");
-      if (status?.state === "connected") updateStatus({ ...status, challenge_required: false });
+      const verified = result.shipments.length > 0 || (result.complete && result.deferred === 0);
+      if (status?.state === "connected" && verified) updateStatus({ ...status, challenge_required: false });
       const list = byId("amazon-preview-list");
       for (const shipment of result.shipments) {
         const row = root.ownerDocument.createElement("li");
@@ -339,12 +341,23 @@ export function installAmazonSettings(root, request, onUnauthorized) {
       }
       byId("amazon-preview-note").textContent = result.shipments.length
         ? `${result.shipments.length} verified shipment${result.shipments.length === 1 ? "" : "s"}. Nothing has been added or changed.`
-        : "No verified shipments are ready to import. Nothing has been added or changed.";
+        : result.has_more ? "More recent orders remain to be checked. Nothing has been added or changed."
+          : "No verified shipments are ready to import. Nothing has been added or changed.";
       byId("amazon-deferred").textContent = result.deferred
         ? `${result.deferred} candidate${result.deferred === 1 ? " needs" : "s need"} a tracking number or exact parcel details before import.` : "";
       byId("amazon-preview-result").hidden = false;
-      previewed = result.shipments.length > 0 || result.deferred === 0;
-      message(previewed ? "Preview ready." : "No verified shipments are ready yet. Automatic imports remain off.");
+      previewed = verified;
+      if (status?.challenge_required === true) {
+        message("No verified parcels were found. Amazon verification is still required.");
+        return;
+      }
+      const importNote = status?.imports_enabled
+        ? "Automatic discovery will continue checking recent orders."
+        : "Automatic imports remain off.";
+      message(previewed
+        ? result.has_more ? "Preview ready. Automatic discovery will continue checking the remaining recent orders." : "Preview ready."
+        : result.has_more ? `The preview is incomplete. ${importNote}`
+          : `No verified shipments are ready yet. ${importNote}`);
     },
   ));
 
