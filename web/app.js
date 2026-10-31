@@ -1,6 +1,7 @@
 import { waitForConnection } from "./connection.js";
 import { calendarDate } from "./dates.js";
 import { providerNames, trackingLinks } from "./parcel-links.js";
+import { installAmazonSettings } from "./amazon-settings.js";
 
 const byId = (id) => document.getElementById(id);
 const labels = {
@@ -53,6 +54,7 @@ let agentBusy = false;
 let agentSession = 0;
 let agentTokenGeneration = 0;
 let issuedAgentId = null;
+const amazonSettings = installAmazonSettings(byId("amazon"), api, () => setOwnerAccess(false));
 
 class ApiError extends Error {
   constructor(message, status) {
@@ -88,6 +90,12 @@ function signatureLabel(shipment) {
 }
 
 function configurationIssue(sync) {
+  if (sync.provider === "amazon_account" && sync.error_code === "provider_authentication_required")
+    return {
+      label: "Amazon sign-in required",
+      instruction: "Your shipment is saved. Reconnect Amazon to resume tracking updates.",
+      reconnect: true,
+    };
   if (sync.registration_state !== "configuration_required") return null;
   if (["tracking_carrier_account_required", "tracking_carrier_credentials_required"].includes(sync.error_code))
     return {
@@ -187,13 +195,16 @@ async function applyRoute(initial = false) {
     if (showInstallation) {
       if (params.has("installation")) byId("installation").open = params.get("installation") === "open";
       byId("agent-access").open = params.get("agents") === "open";
+      byId("amazon").open = ["open", "connect"].includes(params.get("amazon"));
     }
     if (initial || changed) await load();
     if (generation !== routeGeneration) return;
     if (showInstallation) {
       byId("installation").open = params.has("installation") ? params.get("installation") === "open" : installationNeedsAttention;
       byId("agent-access").open = params.get("agents") === "open";
+      byId("amazon").open = ["open", "connect"].includes(params.get("amazon"));
     }
+    if (showInstallation && params.get("amazon") === "connect") amazonSettings.open();
     const id = params.get("shipment");
     const validId = id && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id);
     const edit = params.get("edit");
@@ -264,6 +275,7 @@ function guarded(action) {
 }
 
 function renderServiceStatus(system, checked) {
+  amazonSettings.updateStatus(system.amazon);
   byId("health").hidden = system.provider_enabled;
   byId("health").textContent = system.provider_enabled
     ? ""
@@ -357,6 +369,7 @@ async function startConnection() {
 function setOwnerAccess(owner, reset = false) {
   if (showInstallation === owner && !reset) return;
   showInstallation = owner;
+  amazonSettings.setAccess(owner, reset);
   // Role and connection changes invalidate pending credential responses and
   // clear any one-time token before privileged controls can disappear.
   agentSession += 1;
@@ -886,6 +899,7 @@ byId("dismiss-agent-token").addEventListener("click", () => {
   byId("agent-name").focus();
 });
 window.addEventListener("pagehide", clearAgentToken);
+window.addEventListener("pagehide", () => amazonSettings.clear());
 
 async function refreshDashboard() {
   if (listController || document.hidden || byId("dashboard").hidden) return;
@@ -1129,6 +1143,17 @@ async function show(id, preserveView = false, section = route().get("section")) 
         ? next * 1000 > Date.now() ? `Your shipment is saved. Next retry ${dateLabel(next * 1000)}.`
           : "Your shipment is saved. Waiting for the next retry."
         : "Your shipment is saved. Review the carrier and provider support before retrying.", "retry-timing"));
+    if (configuration?.reconnect && showInstallation) {
+      const reconnect = element("button", "Reconnect Amazon", "quiet");
+      reconnect.type = "button";
+      reconnect.addEventListener("click", () => {
+        userNavigation();
+        closeDetail(false);
+        writeRoute({ shipment: null, edit: null, section: null, amazon: "connect" });
+        amazonSettings.open();
+      });
+      issue.append(reconnect);
+    }
     provider.append(issue);
   }
   const fields = element("dl", undefined, "shipment-details");
@@ -1459,7 +1484,7 @@ function linkDisclosure(disclosure) {
 }
 
 for (const id of ["correction", "activity"]) linkDisclosure(byId(id));
-for (const [id, key] of [["installation", "installation"], ["agent-access", "agents"]]) {
+for (const [id, key] of [["installation", "installation"], ["agent-access", "agents"], ["amazon", "amazon"]]) {
   byId(id).querySelector("summary").addEventListener("click", () => {
     userNavigation();
     requestAnimationFrame(() => writeRoute({ [key]: byId(id).open ? "open" : "closed" }));

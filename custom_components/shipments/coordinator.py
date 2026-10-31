@@ -10,6 +10,7 @@ from urllib.parse import urlencode
 from uuid import UUID
 
 from aiohttp import ClientError
+from homeassistant.components import persistent_notification
 from homeassistant.config_entries import ConfigEntry, ConfigEntryState
 from homeassistant.core import CALLBACK_TYPE, HomeAssistant, callback
 from homeassistant.exceptions import ConfigEntryAuthFailed, HomeAssistantError
@@ -20,7 +21,13 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, Upda
 from homeassistant.util import dt as dt_util
 
 from .client import ResponseTooLarge, ShipmentsClient
-from .const import CONF_ADDON_SLUG, DIRECTION_SUMMARY_KEYS, DOMAIN, SUMMARY_KEYS
+from .const import (
+    CONF_ADDON_SLUG,
+    CONF_BACKEND_URL,
+    DIRECTION_SUMMARY_KEYS,
+    DOMAIN,
+    SUMMARY_KEYS,
+)
 from .models import (
     DeliveryDay,
     DeliveryDayReport,
@@ -36,6 +43,11 @@ from .models import (
 _LOGGER = logging.getLogger(__name__)
 _BACKUP_TIMEOUT_SECONDS = 10
 _ITEM_LIMIT = 20
+
+
+def amazon_notification_id(entry_id: str) -> str:
+    """Keep one account-expiry notice stable across reloads and sign-ins."""
+    return f"{DOMAIN}_{entry_id}_amazon_auth_required"
 
 
 class BackupReport(TypedDict):
@@ -93,6 +105,7 @@ class ShipmentsCoordinator(DataUpdateCoordinator[dict[str, int]]):
         self._after: int | None = None
         self._event_listeners: list[Callable[[ShipmentStatusEvent], None]] = []
         self.event_available = False
+        self._amazon_auth_required: bool | None = None
 
     async def _async_update_data(self) -> dict[str, int]:
         # A prior successful feed cannot establish availability for this refresh.
@@ -233,7 +246,9 @@ class ShipmentsCoordinator(DataUpdateCoordinator[dict[str, int]]):
         if response.status != 200:
             raise UpdateFailed("The backend could not return its version")
         data = response.json()
-        version = data.get("version") if isinstance(data, dict) else None
+        if not isinstance(data, dict):
+            raise ValueError("Invalid backend version")
+        version = data.get("version")
         if not isinstance(version, str) or not version or len(version) > 64:
             raise ValueError("Invalid backend version")
         self.last_backend_version = version
@@ -252,7 +267,44 @@ class ShipmentsCoordinator(DataUpdateCoordinator[dict[str, int]]):
             )
             return False
         ir.async_delete_issue(self.hass, DOMAIN, "version_mismatch")
+        self._async_amazon_notification(data.get("amazon"))
         return True
+
+    @callback
+    def _async_amazon_notification(self, report: object) -> None:
+        """Only a confirmed account state changes the existing HA notice."""
+        if (
+            not isinstance(report, dict)
+            or type(report.get("imports_enabled")) is not bool
+        ):
+            return
+        state = report.get("state")
+        if not isinstance(state, str) or state not in (
+            "connected",
+            "auth_required",
+            "disconnected",
+        ):
+            return
+        required = state == "auth_required"
+        if required == self._amazon_auth_required:
+            return
+        self._amazon_auth_required = required
+        notification_id = amazon_notification_id(self._entry.entry_id)
+        if not required:
+            persistent_notification.async_dismiss(self.hass, notification_id)
+            return
+        destination = (
+            "/shipments/shipments/amazon%3Dconnect"
+            if self._entry.data.get(CONF_ADDON_SLUG)
+            else f"{self._entry.data[CONF_BACKEND_URL]}/#amazon=connect"
+        )
+        persistent_notification.async_create(
+            self.hass,
+            "Amazon no longer accepts the saved sign-in. "
+            f"[Reconnect Amazon]({destination}) to resume Amazon tracking.",
+            title="Shipments: reconnect Amazon",
+            notification_id=notification_id,
+        )
 
     async def _async_estimates(self) -> tuple[DeliveryEstimate, ...]:
         estimates: list[DeliveryEstimate] = []

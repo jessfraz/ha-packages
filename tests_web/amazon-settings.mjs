@@ -1,0 +1,243 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import { amazonSignInUrl, installAmazonSettings } from "../web/amazon-settings.js";
+
+class Node extends EventTarget {
+  constructor(id = "", tagName = "div") {
+    super();
+    this.id = id;
+    this.tagName = tagName;
+    this.children = [];
+    this.textContent = "";
+    this.value = "";
+    this.hidden = false;
+    this.disabled = false;
+    this.open = false;
+    this.href = "";
+  }
+  append(...nodes) { this.children.push(...nodes); }
+  replaceChildren(...nodes) { this.children = nodes; }
+  removeAttribute(name) { this[name] = ""; }
+  focus() { this.focused = true; }
+  scrollIntoView() { this.scrolled = true; }
+}
+
+const disconnected = { state: "disconnected", imports_enabled: false };
+const connected = { state: "connected", imports_enabled: false, last_success_at: "2026-10-30T19:00:00Z" };
+const signIn = { flow_id: "synthetic-flow", url: "https://www.amazon.com/ap/signin?openid.oa2.code_challenge=SYNTHETIC" };
+const landing = "https://www.amazon.com/ap/maplanding?openid.oa2.authorization_code=SYNTHETIC_SECRET";
+const settle = () => new Promise(resolve => setImmediate(resolve));
+
+function setup(initial = disconnected) {
+  const nodes = new Map();
+  for (const id of ["state", "description", "check-note", "last-success", "start", "preview", "enable", "refresh", "disconnect", "landing-url", "sign-in-link", "sign-in", "cancel", "complete", "message", "error", "preview-list", "preview-note", "preview-result", "deferred"])
+    nodes.set(`amazon-${id}`, new Node(`amazon-${id}`, ["start", "preview", "enable", "refresh", "disconnect", "cancel", "complete"].includes(id) ? "button" : id === "landing-url" ? "input" : "div"));
+  const root = new Node("amazon");
+  root.ownerDocument = { createElement: tag => new Node("", tag) };
+  root.querySelector = selector => {
+    const node = nodes.get(selector.slice(1));
+    assert.ok(node, `Known UI element ${selector}`);
+    return node;
+  };
+  root.querySelectorAll = () => [...nodes.values()].filter(node => ["button", "input"].includes(node.tagName));
+  const calls = [];
+  const replies = [];
+  const request = async (path, options = {}) => {
+    calls.push({ path, ...options });
+    if (!replies.length) throw new Error(`No response queued for ${path}`);
+    const reply = replies.shift();
+    if (typeof reply === "function") return reply(options);
+    if (reply instanceof Error) throw reply;
+    return reply;
+  };
+  const settings = installAmazonSettings(root, request, () => settings.setAccess(false));
+  settings.setAccess(true);
+  settings.updateStatus(initial);
+  root.open = true;
+  return {
+    settings, root, calls, replies,
+    node: id => nodes.get(`amazon-${id}`),
+    async click(id) { nodes.get(`amazon-${id}`).dispatchEvent(new Event("click", { cancelable: true })); await settle(); },
+    async submit() { nodes.get("amazon-sign-in").dispatchEvent(new Event("submit", { cancelable: true })); await settle(); },
+    async close() { root.open = false; root.dispatchEvent(new Event("toggle")); await settle(); },
+  };
+}
+
+function content(node) {
+  return [node.textContent, ...node.children.map(content)].join(" ");
+}
+
+test("sign-in destinations stay on Amazon's exact HTTPS sign-in page", () => {
+  assert.equal(amazonSignInUrl(signIn.url), signIn.url);
+  for (const value of [null, {}, "https://www.amazon.com.evil.test/ap/signin", "http://www.amazon.com/ap/signin", "https://user:secret@www.amazon.com/ap/signin", "https://www.amazon.com:444/ap/signin", "https://www.amazon.com/ap/maplanding?code=secret", "https://www.amazon.com/ap/signin#secret", "https://www.amazon.com\\ap/signin", "https://www.ama\nzon.com/ap/signin", "https://www.amazon.com/ap/signin?x=" + "a".repeat(8192)])
+    assert.equal(amazonSignInUrl(value), null);
+});
+
+test("opening reconnect settings does not begin an Amazon sign-in", () => {
+  const ui = setup({ state: "auth_required", imports_enabled: true });
+  ui.root.open = false;
+  ui.settings.open();
+  assert.equal(ui.root.open, true);
+  assert.equal(ui.root.scrolled, true);
+  assert.equal(ui.node("start").focused, true);
+  assert.equal(ui.node("start").textContent, "Reconnect Amazon");
+  assert.equal(ui.node("description").textContent.includes("Reconnect"), true);
+  assert.deepEqual(ui.calls, []);
+});
+
+test("only an explicit action prepares a validated sign-in link", async () => {
+  const ui = setup();
+  ui.replies.push(signIn);
+  await ui.click("start");
+  assert.equal(ui.calls.length, 1);
+  assert.equal(ui.calls[0].path, "v1/amazon/sign-in");
+  assert.equal(ui.calls[0].method, "POST");
+  assert.equal(ui.calls[0].body, "{}");
+  assert.equal(ui.node("sign-in-link").href, signIn.url);
+  assert.equal(ui.node("sign-in").hidden, false);
+  await ui.close();
+});
+
+test("landing address is cleared before submission finishes and never becomes a link", async () => {
+  const ui = setup();
+  ui.replies.push(signIn);
+  await ui.click("start");
+  let resolve;
+  ui.replies.push(() => new Promise(done => { resolve = done; }));
+  ui.node("landing-url").value = landing;
+  await ui.submit();
+  assert.equal(ui.node("landing-url").value, "");
+  assert.equal(ui.node("sign-in-link").href, "");
+  assert.equal(ui.node("sign-in").hidden, true);
+  assert.deepEqual(JSON.parse(ui.calls[1].body), { flow_id: signIn.flow_id, landing_url: landing });
+  resolve(connected);
+  await settle();
+  assert.equal(ui.node("state").textContent, "Connected · preview ready");
+  assert.equal(ui.node("message").textContent.includes("SYNTHETIC_SECRET"), false);
+  assert.equal(ui.node("preview").hidden, false);
+  assert.equal(ui.node("enable").hidden, true);
+});
+
+test("closing or losing owner access aborts the request and ignores late sign-in responses", async () => {
+  for (const invalidate of [ui => ui.close(), ui => ui.settings.setAccess(false)]) {
+    const ui = setup();
+    let resolve;
+    ui.replies.push(() => new Promise(done => { resolve = done; }));
+    await ui.click("start");
+    ui.node("landing-url").value = landing;
+    await invalidate(ui);
+    assert.equal(ui.node("landing-url").value, "");
+    assert.equal(ui.calls[0].signal.aborted, true);
+    resolve(signIn);
+    await settle();
+    assert.equal(ui.node("sign-in-link").href, "");
+    assert.equal(ui.node("sign-in").hidden, true);
+  }
+});
+
+test("expired sign-in flows clear the address and link", async t => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const ui = setup();
+  ui.replies.push(signIn);
+  await ui.click("start");
+  ui.node("landing-url").value = landing;
+  t.mock.timers.tick(10 * 60 * 1000);
+  assert.equal(ui.node("landing-url").value, "");
+  assert.equal(ui.node("sign-in-link").href, "");
+  assert.equal(ui.node("sign-in").hidden, true);
+  assert.match(ui.node("error").textContent, /expired/);
+});
+
+test("sign-in failures never display backend messages or reuse submitted secrets", async () => {
+  const ui = setup();
+  ui.replies.push(signIn);
+  await ui.click("start");
+  ui.replies.push(new Error(`upstream rejected ${landing}`));
+  ui.node("landing-url").value = landing;
+  await ui.submit();
+  assert.equal(ui.node("landing-url").value, "");
+  assert.equal(ui.node("sign-in").hidden, true);
+  assert.match(ui.node("error").textContent, /Could not complete sign-in/);
+  assert.equal(ui.node("error").textContent.includes("SYNTHETIC_SECRET"), false);
+  await ui.submit();
+  assert.equal(ui.calls.length, 2);
+});
+
+test("untrusted sign-in responses never expose an external link", async () => {
+  const ui = setup();
+  ui.replies.push({ ...signIn, url: "https://evil.test/" });
+  await ui.click("start");
+  assert.equal(ui.node("sign-in").hidden, true);
+  assert.equal(ui.node("sign-in-link").href, "");
+  assert.match(ui.node("error").textContent, /Could not prepare/);
+});
+
+test("a non-writing preview renders parcel text safely and leaves enabling explicit", async () => {
+  const ui = setup(connected);
+  ui.replies.push({ shipments: [{ title: "<img src=x onerror=alert(1)>", order_reference: "SYNTHETIC-ORDER", tracking: { carrier: "USPS", number: "SYNTHETIC123" } }], deferred: 2 });
+  await ui.click("preview");
+  assert.equal(ui.calls.length, 1);
+  assert.equal(ui.calls[0].path, "v1/amazon/preview");
+  assert.equal(ui.node("preview-list").children.length, 1);
+  assert.equal(ui.node("preview-list").children[0].children[0].textContent, "<img src=x onerror=alert(1)>");
+  assert.equal(ui.node("preview-list").children[0].children[0].tagName, "strong");
+  assert.match(content(ui.node("preview-list")), /USPS · SYNTHETIC123/);
+  assert.match(ui.node("preview-note").textContent, /Nothing has been added or changed/);
+  assert.match(ui.node("deferred").textContent, /2 candidates/);
+  assert.equal(ui.node("enable").hidden, false);
+  await ui.close();
+  assert.equal(ui.node("preview-list").children.length, 0);
+});
+
+test("malformed previews cannot enable imports or render partial data", async () => {
+  const ui = setup(connected);
+  ui.replies.push({ shipments: [{ title: "Incomplete", tracking: { carrier: "USPS" } }], deferred: 0 });
+  await ui.click("preview");
+  assert.equal(ui.node("preview-list").children.length, 0);
+  assert.equal(ui.node("enable").hidden, true);
+  assert.match(ui.node("error").textContent, /Could not read a preview/);
+});
+
+test("enabling, refresh and disconnect follow the explicit connection state", async () => {
+  const ui = setup(connected);
+  ui.replies.push({ shipments: [], deferred: 0 });
+  await ui.click("preview");
+  ui.replies.push({ ...connected, imports_enabled: true });
+  await ui.click("enable");
+  assert.equal(ui.calls[1].path, "v1/amazon/enable");
+  assert.equal(ui.node("enable").hidden, true);
+  assert.equal(ui.node("refresh").hidden, false);
+  ui.replies.push(null);
+  await ui.click("refresh");
+  assert.equal(ui.calls[2].path, "v1/amazon/refresh");
+  ui.replies.push(null);
+  await ui.click("disconnect");
+  assert.equal(ui.calls[3].method, "DELETE");
+  assert.equal(ui.node("state").textContent, "Not connected");
+  assert.equal(ui.node("preview").hidden, true);
+  assert.match(ui.node("message").textContent, /Saved shipments and history/);
+});
+
+test("role loss disables owner actions and clears preview data", async () => {
+  const ui = setup(connected);
+  ui.replies.push({ shipments: [{ title: "Synthetic package", tracking: { carrier: "UPS", number: "SYNTHETIC" } }], deferred: 0 });
+  await ui.click("preview");
+  ui.settings.setAccess(false);
+  assert.equal(ui.root.hidden, true);
+  assert.equal(ui.node("preview-list").children.length, 0);
+  await ui.click("start");
+  assert.equal(ui.calls.length, 1);
+});
+
+
+test("expired authentication removes stale preview and action messages", async () => {
+  const ui = setup({ ...connected, imports_enabled: true });
+  ui.replies.push({ shipments: [{ title: "Synthetic package", tracking: { carrier: "USPS", number: "SYNTHETIC" } }], deferred: 0 });
+  await ui.click("preview");
+  assert.equal(ui.node("preview-list").children.length, 1);
+  ui.settings.updateStatus({ state: "auth_required", imports_enabled: true });
+  assert.equal(ui.node("preview-list").children.length, 0);
+  assert.equal(ui.node("preview-result").hidden, true);
+  assert.equal(ui.node("message").textContent, "");
+  assert.equal(ui.node("state").textContent, "Sign-in required");
+});

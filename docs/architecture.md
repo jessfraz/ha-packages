@@ -118,3 +118,40 @@ directory is copied. For standalone operation, stop the service before copying
 the database, or use SQLite's online backup facility. Do not copy only the main
 database file while a writer is running in WAL mode. Backups preserve saved
 agent access and revocations at the time of the backup.
+
+## Amazon account discovery
+
+`src/amazon` owns the Amazon.com retail device sign-in, private credential file,
+cookie session and bounded website adapters. `AmazonClient` implements the same
+`ShippingApi` contract as other tracking providers. An account-scoped opaque
+tracker ID binds the saved package page to the authenticated account; the carrier
+remains USPS, UPS, Amazon Logistics, or the actual carrier named by the page.
+
+`AmazonDiscoveryWorker` runs in the existing provider-worker lifecycle and uses
+the shared base polling interval, jitter and retry calculation. It reads the order
+listing once and follows at most ten unresolved parcel groups per cycle, rotating
+bounded work. The normal `SyncWorker` fetches a known parcel's saved page at the
+shared status-based cadence. Account listing is not repeated for each saved parcel.
+
+Imports start disabled. The owner-only preview endpoint performs reads without
+writing shipment data. Enabling imports schedules discovery. Real parcel identity
+and product mapping are required; missing tracking numbers never become synthetic
+barcodes. Verified source identity and shipment updates commit atomically. Global
+tracking-number uniqueness deduplicates an existing parcel, including archived
+records, without replacing user metadata or an existing last-mile provider.
+Different tracking numbers are not merged without explicit parcel evidence.
+
+Account replacement invalidates in-flight work. Discovery holds the account
+generation through each short database commit; normal sync uses the provider's
+observation guard as well as its shipment lease/generation fences. No network call
+holds a SQLite transaction. Metadata-only edits preserve tracking-provider ownership.
+
+The authenticated system report exposes only safe account connection state.
+Home Assistant creates one persistent reconnect notification on confirmed Amazon
+authentication rejection, retains it through outages, and clears it after reconnect
+or explicit disconnect. Amazon expiry does not invalidate Home Assistant pairing.
+The notification deep link opens settings without carrying codes or credentials.
+
+The adapter follows pinned ha-amazon/alexapy source with MIT and Apache-2.0
+attribution in NOTICE. The US website contract still needs a later, explicitly
+authorized non-writing live preview. Fixtures do not establish live compatibility.

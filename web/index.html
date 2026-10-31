@@ -81,6 +81,35 @@
           <p id="backup-date" class="muted"></p>
           <a href="https://github.com/jessfraz/ha-packages/blob/main/shipments/DOCS.md" target="_blank" rel="noopener noreferrer">Installation and pairing instructions ↗</a>
         </details>
+        <details id="amazon" class="installation" hidden>
+          <summary>Amazon <span id="amazon-state" class="optional-label">Not connected</span></summary>
+          <p id="amazon-description" class="muted"></p>
+          <p id="amazon-check-note" class="muted"></p>
+          <p id="amazon-last-success" class="muted"></p>
+          <div class="amazon-actions">
+            <button id="amazon-start" type="button">Connect Amazon</button>
+            <button id="amazon-preview" class="quiet" type="button" hidden>Preview shipments</button>
+            <button id="amazon-enable" type="button" hidden>Enable automatic imports</button>
+            <button id="amazon-refresh" class="quiet" type="button" hidden>Refresh tracking</button>
+            <button id="amazon-disconnect" class="quiet" type="button" hidden>Disconnect</button>
+          </div>
+          <form id="amazon-sign-in" hidden>
+            <p class="muted"><a id="amazon-sign-in-link" target="_blank" rel="noopener noreferrer">Sign in to Amazon ↗</a>. Complete any verification on Amazon. When the address starts with <strong>https://www.amazon.com/ap/maplanding</strong>, copy the full address and paste it below. The final page may look blank.</p>
+            <label for="amazon-landing-url">Final Amazon address<input id="amazon-landing-url" type="password" required autocomplete="off" spellcheck="false" maxlength="8192"></label>
+            <div class="amazon-actions">
+              <button id="amazon-complete" type="submit">Finish connecting</button>
+              <button id="amazon-cancel" class="quiet" type="button">Cancel sign-in</button>
+            </div>
+          </form>
+          <p id="amazon-message" role="status" aria-live="polite"></p>
+          <p id="amazon-error" role="alert"></p>
+          <section id="amazon-preview-result" hidden aria-label="Amazon shipment preview">
+            <h3>Shipment preview</h3>
+            <p id="amazon-preview-note" class="muted"></p>
+            <ol id="amazon-preview-list"></ol>
+            <p id="amazon-deferred" class="muted"></p>
+          </section>
+        </details>
         <details id="agent-access" class="installation" hidden>
           <summary>Agent access <span class="optional-label">Optional</span></summary>
           <p class="muted">Give each agent its own credential. Agents can read shipments, add or edit records, and refresh tracking. They cannot make manual corrections, archive shipments, or manage credentials.</p>

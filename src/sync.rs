@@ -7,7 +7,7 @@ use crate::{
     shipping_api::{
         ShippingApi,
         error::{Error as SyncError, ErrorKind},
-        types::{ProviderId, Registration, Tracker},
+        types::{Registration, Tracker},
     },
 };
 use sha2::{Digest, Sha256};
@@ -17,6 +17,25 @@ use uuid::Uuid;
 
 const LEASE_SECONDS: i64 = 60;
 const MAX_RETRY_SECONDS: i64 = 6 * 60 * 60;
+const BASE_POLL_SECONDS: i64 = 30 * 60;
+
+fn jitter(base: i64, key: &str) -> i64 {
+    let hash = Sha256::digest(key.as_bytes());
+    base + i64::from(u16::from_be_bytes([hash[0], hash[1]])) % (base / 10 + 1)
+}
+
+pub(crate) fn discovery_delay(key: &str) -> i64 {
+    jitter(BASE_POLL_SECONDS, key)
+}
+
+pub(crate) fn retry_delay(attempts: i64, retry_after: i64) -> i64 {
+    60_i64
+        .saturating_mul(
+            2_i64.saturating_pow(u32::try_from(attempts.saturating_sub(1)).unwrap_or(u32::MAX)),
+        )
+        .clamp(60, MAX_RETRY_SECONDS)
+        .max(retry_after)
+}
 
 pub(crate) fn poll_delay(status: Status, unchanged_seconds: i64, shipment_id: &str) -> Option<i64> {
     let base = if status.is_terminal() {
@@ -32,12 +51,11 @@ pub(crate) fn poll_delay(status: Status, unchanged_seconds: i64, shipment_id: &s
     {
         2 * 60 * 60
     } else {
-        30 * 60
+        BASE_POLL_SECONDS
     };
     // A stable per-shipment offset spreads batches out without new random state.
     // Only add delay, so jitter never increases the request rate.
-    let hash = Sha256::digest(shipment_id.as_bytes());
-    Some(base + i64::from(u16::from_be_bytes([hash[0], hash[1]])) % (base / 10 + 1))
+    Some(jitter(base, shipment_id))
 }
 
 #[derive(FromRow)]
@@ -135,7 +153,8 @@ impl SyncWorker {
                         let registration = match client.prepare_registration(registration).await {
                             Ok(slot) => slot,
                             Err(error) => {
-                                self.complete(&claim, Err(error)).await?;
+                                self.complete_observation(&claim, client.as_ref(), Err(error))
+                                    .await?;
                                 return Ok(true);
                             }
                         };
@@ -159,15 +178,38 @@ impl SyncWorker {
         let observation = observation.and_then(|tracker| {
             if tracker.provider != client.id()
                 || tracker.tracking_code != claim.tracking_number
-                || ProviderId::for_carrier(Some(tracker.carrier)) != client.id()
+                || !client.supports_carrier(tracker.carrier)
             {
                 Err(SyncError::new(client.id(), ErrorKind::InvalidResponse))
             } else {
                 Ok(tracker)
             }
         });
-        self.complete(&claim, observation).await?;
+        self.complete_observation(&claim, client.as_ref(), observation)
+            .await?;
         Ok(true)
+    }
+
+    async fn complete_observation(
+        &self,
+        claim: &Claim,
+        client: &dyn ShippingApi,
+        observation: Result<Tracker, SyncError>,
+    ) -> Result<(), Error> {
+        let guard = match client.observation_guard().await {
+            Ok(guard) => guard,
+            Err(_) => {
+                // Credential replacement invalidates the result, including errors.
+                // Release only our lease; a newer claim or user edit remains intact.
+                sqlx::query("UPDATE shipments SET lease_token=NULL,lease_until=NULL WHERE id=? AND tracking_generation=? AND lease_token=? AND tracking_provider=?")
+                    .bind(&claim.id).bind(claim.tracking_generation).bind(&claim.lease_token)
+                    .bind(client.id().as_str()).execute(&self.pool).await?;
+                return Ok(());
+            }
+        };
+        self.complete(claim, observation).await?;
+        drop(guard);
+        Ok(())
     }
 
     async fn release_cancelled_registration(&self, claim: &Claim) -> Result<(), Error> {
@@ -316,10 +358,6 @@ impl SyncWorker {
             }
             Err(error) => {
                 let attempts = current.attempts.saturating_add(1);
-                let exponential =
-                    60_i64.saturating_mul(2_i64.saturating_pow(
-                        u32::try_from(attempts.saturating_sub(1)).unwrap_or(u32::MAX),
-                    ));
                 let retry_after = error.retry_after().unwrap_or(0);
                 // Explicit refresh permits one probe after a terminal status,
                 // including when that probe fails. It must not restart polling.
@@ -328,7 +366,7 @@ impl SyncWorker {
                 let rejected = claim.tracker_id.is_none() && error.rejects_registration();
                 let configuration = error.requires_configuration();
                 let delay = (!terminal && !rejected && !configuration)
-                    .then_some(exponential.clamp(60, MAX_RETRY_SECONDS).max(retry_after));
+                    .then_some(retry_delay(attempts, retry_after));
                 sqlx::query(
                     "UPDATE shipments SET last_error = ?, last_error_code = ?, last_provider_status = ?, last_provider_error_code = ?,
                          registration_state = ?, attempts = ?, last_attempt_at = unixepoch(),
@@ -481,5 +519,87 @@ mod tests {
         assert!(deferred.sync.next_attempt_at.is_some());
         assert_eq!(deferred.sync.attempts, 0);
         assert!(deferred.sync.last_error.is_none());
+    }
+    #[tokio::test]
+    async fn account_result_cannot_commit_after_disconnect() {
+        use crate::{
+            amazon::AmazonClient,
+            models::CarrierTracking,
+            shipping_api::{ShippingApi, types::Tracker},
+        };
+        use std::{io::Write, os::unix::fs::OpenOptionsExt, sync::Arc};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("amazon.json");
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&path)
+            .unwrap();
+        file.write_all(br#"{"refresh_token":"SYNTHETIC_REFRESH","device_serial":"SYNTHETIC_SERIAL","customer_id":"SYNTHETIC_CUSTOMER","generation":1,"imports_enabled":true}"#).unwrap();
+        let account = Arc::new(AmazonClient::new(path).unwrap());
+        let scoped = account.for_request("synthetic-read", None);
+        let store = Store::open(&dir.path().join("registry.sqlite3"))
+            .await
+            .unwrap();
+        let tracker = Tracker {
+            provider: ProviderId::AmazonAccount,
+            id: "synthetic-account:/progress-tracker/package?orderId=synthetic".into(),
+            tracking_code: "SYNTHETIC123456".into(),
+            carrier: crate::carrier::Carrier::Usps,
+            status: Status::InTransit,
+            public_url: None,
+            carrier_tracking: CarrierTracking::default(),
+        };
+        let saved = store
+            .create(
+                CreateShipment {
+                    title: "Verified product".into(),
+                    direction: crate::models::Direction::Inbound,
+                    merchant: None,
+                    order_reference: None,
+                    signature_required: None,
+                    tracking: InputTracking {
+                        number: tracker.tracking_code.clone(),
+                        carrier: Some(tracker.carrier),
+                        recipient_url: None,
+                    },
+                    source: None,
+                },
+                "amazon_account",
+                "synthetic-create",
+                Some(&tracker),
+            )
+            .await
+            .unwrap();
+        let claim = Claim {
+            id: saved.id.to_string(),
+            tracking_generation: 0,
+            tracking_number: tracker.tracking_code.clone(),
+            tracking_carrier: "usps".into(),
+            recipient_url: None,
+            tracker_id: Some(tracker.id.clone()),
+            lease_token: "synthetic-lease".into(),
+        };
+        sqlx::query("UPDATE shipments SET lease_token=?,lease_until=unixepoch()+60 WHERE id=?")
+            .bind(&claim.lease_token)
+            .bind(&claim.id)
+            .execute(store.pool())
+            .await
+            .unwrap();
+        let mut old_response = tracker;
+        old_response.status = Status::Delivered;
+        account.disconnect().await.unwrap();
+        let worker = SyncWorker::new(store.pool().clone(), account);
+        worker
+            .complete_observation(&claim, scoped.as_ref(), Ok(old_response))
+            .await
+            .unwrap();
+        let actual = store.get(saved.id).await.unwrap();
+        assert_eq!(actual.status, Status::InTransit);
+        assert_eq!(actual.revision, saved.revision);
+        let (events,lease):(i64,Option<String>) = sqlx::query_as("SELECT (SELECT count(*) FROM events WHERE shipment_id=?),lease_token FROM shipments WHERE id=?").bind(&claim.id).bind(&claim.id).fetch_one(store.pool()).await.unwrap();
+        assert_eq!(events, 1);
+        assert!(lease.is_none());
     }
 }

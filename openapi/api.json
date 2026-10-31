@@ -47,6 +47,92 @@
         ],
         "type": "object"
       },
+      "AmazonComplete": {
+        "additionalProperties": false,
+        "properties": {
+          "flow_id": {
+            "type": "string"
+          },
+          "landing_url": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "flow_id",
+          "landing_url"
+        ],
+        "type": "object"
+      },
+      "AmazonPreview": {
+        "properties": {
+          "deferred": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "shipments": {
+            "items": {
+              "$ref": "#/components/schemas/AmazonPreviewParcel"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "deferred",
+          "shipments"
+        ],
+        "type": "object"
+      },
+      "AmazonPreviewParcel": {
+        "properties": {
+          "order_reference": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "tracking": {
+            "$ref": "#/components/schemas/Tracking_for_Carrier"
+          }
+        },
+        "required": [
+          "order_reference",
+          "title",
+          "tracking"
+        ],
+        "type": "object"
+      },
+      "AmazonState": {
+        "enum": [
+          "disconnected",
+          "connected",
+          "auth_required"
+        ],
+        "type": "string"
+      },
+      "AmazonStatus": {
+        "properties": {
+          "imports_enabled": {
+            "type": "boolean"
+          },
+          "last_error_code": {
+            "nullable": true,
+            "type": "string"
+          },
+          "last_success_at": {
+            "nullable": true,
+            "type": "string"
+          },
+          "state": {
+            "$ref": "#/components/schemas/AmazonState"
+          }
+        },
+        "required": [
+          "imports_enabled",
+          "state"
+        ],
+        "type": "object"
+      },
       "BackupReport": {
         "additionalProperties": false,
         "properties": {
@@ -725,6 +811,7 @@
       "ProviderId": {
         "description": "Durable tracker ownership, separate from the package carrier. Add providers only when an implementation and configuration are available.",
         "enum": [
+          "amazon_account",
           "easypost",
           "doordash",
           "aftership"
@@ -999,6 +1086,21 @@
         ],
         "type": "object"
       },
+      "SignIn": {
+        "properties": {
+          "flow_id": {
+            "type": "string"
+          },
+          "url": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "flow_id",
+          "url"
+        ],
+        "type": "object"
+      },
       "Source": {
         "additionalProperties": false,
         "properties": {
@@ -1236,6 +1338,19 @@
       },
       "System": {
         "properties": {
+          "amazon": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/AmazonStatus"
+              }
+            ],
+            "default": {
+              "imports_enabled": false,
+              "last_error_code": null,
+              "last_success_at": null,
+              "state": "disconnected"
+            }
+          },
           "credential_role": {
             "type": "string"
           },
@@ -1380,13 +1495,31 @@
   "info": {
     "description": "Persistent local shipment records, manual corrections, and carrier synchronization. Use a Bearer owner or ingestion token. Creates require Idempotency-Key; writes to an existing shipment require its quoted revision in If-Match.",
     "title": "Shipments API",
-    "version": "0.6.13"
+    "version": "0.6.14"
   },
   "openapi": "3.0.3",
   "paths": {
     "/": {
       "get": {
         "operationId": "index",
+        "responses": {
+          "default": {
+            "content": {
+              "*/*": {
+                "schema": {}
+              }
+            },
+            "description": ""
+          }
+        },
+        "tags": [
+          "web"
+        ]
+      }
+    },
+    "/amazon-settings.js": {
+      "get": {
+        "operationId": "amazon_settings_script",
         "responses": {
           "default": {
             "content": {
@@ -1624,6 +1757,227 @@
         "summary": "Revoke one agent. Subsequent authentications consult the database directly.",
         "tags": [
           "agents"
+        ]
+      }
+    },
+    "/v1/amazon": {
+      "delete": {
+        "operationId": "amazon_disconnect",
+        "responses": {
+          "204": {
+            "description": "resource updated"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "tags": [
+          "amazon"
+        ]
+      },
+      "get": {
+        "operationId": "amazon_status",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AmazonStatus"
+                }
+              }
+            },
+            "description": "successful operation",
+            "headers": {
+              "cache-control": {
+                "required": true,
+                "schema": {
+                  "type": "string"
+                },
+                "style": "simple"
+              }
+            }
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "tags": [
+          "amazon"
+        ]
+      }
+    },
+    "/v1/amazon/complete": {
+      "post": {
+        "operationId": "amazon_complete",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AmazonComplete"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AmazonStatus"
+                }
+              }
+            },
+            "description": "successful operation",
+            "headers": {
+              "cache-control": {
+                "required": true,
+                "schema": {
+                  "type": "string"
+                },
+                "style": "simple"
+              }
+            }
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "tags": [
+          "amazon"
+        ]
+      }
+    },
+    "/v1/amazon/enable": {
+      "post": {
+        "operationId": "amazon_enable",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AmazonStatus"
+                }
+              }
+            },
+            "description": "successful operation",
+            "headers": {
+              "cache-control": {
+                "required": true,
+                "schema": {
+                  "type": "string"
+                },
+                "style": "simple"
+              }
+            }
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "tags": [
+          "amazon"
+        ]
+      }
+    },
+    "/v1/amazon/preview": {
+      "post": {
+        "operationId": "amazon_preview",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AmazonPreview"
+                }
+              }
+            },
+            "description": "successful operation",
+            "headers": {
+              "cache-control": {
+                "required": true,
+                "schema": {
+                  "type": "string"
+                },
+                "style": "simple"
+              }
+            }
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "tags": [
+          "amazon"
+        ]
+      }
+    },
+    "/v1/amazon/refresh": {
+      "post": {
+        "operationId": "amazon_refresh",
+        "responses": {
+          "204": {
+            "description": "resource updated"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "tags": [
+          "amazon"
+        ]
+      }
+    },
+    "/v1/amazon/sign-in": {
+      "post": {
+        "operationId": "amazon_sign_in",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SignIn"
+                }
+              }
+            },
+            "description": "successful operation",
+            "headers": {
+              "cache-control": {
+                "required": true,
+                "schema": {
+                  "type": "string"
+                },
+                "style": "simple"
+              }
+            }
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "tags": [
+          "amazon"
         ]
       }
     },
@@ -2615,6 +2969,9 @@
   "tags": [
     {
       "name": "agents"
+    },
+    {
+      "name": "amazon"
     },
     {
       "name": "shipments"

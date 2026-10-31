@@ -2,7 +2,7 @@ use crate::{
     installation::{Installation, InstallationReport, IntegrationPresence, valid_presence},
     models::*,
     shipping_api::{ShippingApi, types::ProviderId},
-    store::{Store, validate_create, validate_update},
+    store::{Store, validate_admission, validate_create, validate_update},
 };
 use anyhow::{Context as _, Result, anyhow};
 use dropshot::ClientErrorStatusCode as StatusCode;
@@ -25,6 +25,8 @@ use uuid::Uuid;
 #[derive(Clone)]
 pub struct Context {
     pub store: Store,
+    amazon: Option<Arc<crate::amazon::AmazonClient>>,
+    amazon_management: Arc<tokio::sync::Mutex<()>>,
     owner_digest: [u8; 32],
     integration_digest: Option<[u8; 32]>,
     ingress_peer: Option<IpAddr>,
@@ -41,6 +43,8 @@ impl Context {
     ) -> Self {
         Self {
             store,
+            amazon: None,
+            amazon_management: Arc::new(tokio::sync::Mutex::new(())),
             owner_digest: Sha256::digest(owner).into(),
             integration_digest: None,
             ingress_peer,
@@ -60,6 +64,11 @@ impl Context {
             self.providers.push(provider);
         }
         self
+    }
+
+    pub fn with_amazon(mut self, client: Arc<crate::amazon::AmazonClient>) -> Self {
+        self.amazon = Some(client.clone());
+        self.with_provider(client)
     }
 
     pub fn providers(&self) -> &[Arc<dyn ShippingApi>] {
@@ -504,25 +513,6 @@ async fn shipment_update(
     Ok(shipment_response(shipment))
 }
 
-fn validate_admission(tracking: &InputTracking) -> Result<(), crate::error::Error> {
-    let alphanumeric = tracking
-        .number
-        .bytes()
-        .filter(u8::is_ascii_alphanumeric)
-        .count();
-    if !(6..=100).contains(&alphanumeric)
-        || tracking.number.len() > 100
-        || !tracking
-            .number
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
-        || !tracking.number.bytes().any(|byte| byte.is_ascii_digit())
-    {
-        return Err(crate::error::Error::TrackingInvalid);
-    }
-    Ok(())
-}
-
 fn log_validation_error(
     request: &RequestContext<Arc<Context>>,
     error: crate::error::Error,
@@ -818,14 +808,225 @@ async fn system(
         "agent"
     }
     .into();
+    system.amazon = if let Some(amazon) = &request.context().amazon {
+        amazon.status().await
+    } else {
+        Default::default()
+    };
     system.enabled_providers = request
         .context()
         .providers
         .iter()
+        .filter(|provider| {
+            provider.id() != ProviderId::AmazonAccount
+                || system.amazon.state != crate::amazon::AmazonState::Disconnected
+        })
         .map(|provider| provider.id())
         .collect();
+    system.provider_enabled = !system.enabled_providers.is_empty();
     system.delivery_day = request.context().installation.delivery_day().await;
     Ok(HttpResponseOk(system))
+}
+
+fn amazon_client(
+    request: &RequestContext<Arc<Context>>,
+) -> Result<&Arc<crate::amazon::AmazonClient>, HttpError> {
+    request.context().amazon.as_ref().ok_or_else(|| {
+        HttpError::for_unavail(
+            Some("amazon_unavailable".into()),
+            "Amazon account access is unavailable".into(),
+        )
+    })
+}
+
+fn amazon_error(error: crate::shipping_api::error::Error) -> HttpError {
+    use crate::shipping_api::error::ErrorKind;
+    let code = Some(error.error_code().into());
+    let message = error.to_string();
+    let mut response = match &error.kind {
+        ErrorKind::AuthenticationRequired | ErrorKind::Rejected(_) | ErrorKind::InvalidResponse => {
+            HttpError::for_client_error(code, StatusCode::BAD_REQUEST, message)
+        }
+        ErrorKind::Http { status: 429, .. } | ErrorKind::Throttled { .. } => {
+            HttpError::for_client_error(code, StatusCode::TOO_MANY_REQUESTS, message)
+        }
+        _ => {
+            let mut result = HttpError::for_unavail(code, message.clone());
+            result.external_message = message;
+            result
+        }
+    };
+    if let Some(seconds) = error.retry_after() {
+        let mut headers = http::HeaderMap::new();
+        if let Ok(value) = HeaderValue::from_str(&seconds.max(1).to_string()) {
+            headers.insert(http::header::RETRY_AFTER, value);
+        }
+        response.headers = Some(Box::new(headers));
+    }
+    response
+}
+
+#[endpoint {method=GET,path="/v1/amazon",tags=["amazon"]}]
+async fn amazon_status(
+    request: RequestContext<Arc<Context>>,
+) -> Result<
+    HttpResponseHeaders<HttpResponseOk<crate::amazon::AmazonStatus>, PrivateHeaders>,
+    HttpError,
+> {
+    require_owner(&request).await?;
+    let status = if let Some(client) = &request.context().amazon {
+        client.status().await
+    } else {
+        Default::default()
+    };
+    Ok(HttpResponseHeaders::new(
+        HttpResponseOk(status),
+        private_headers(),
+    ))
+}
+
+#[endpoint {method=POST,path="/v1/amazon/sign-in",tags=["amazon"]}]
+async fn amazon_sign_in(
+    request: RequestContext<Arc<Context>>,
+) -> Result<HttpResponseHeaders<HttpResponseOk<crate::amazon::SignIn>, PrivateHeaders>, HttpError> {
+    require_owner(&request).await?;
+    let _management = request.context().amazon_management.lock().await;
+    let owner = authenticate(&request, false).await?.actor;
+    let result = amazon_client(&request)?
+        .begin_sign_in(&owner)
+        .await
+        .map_err(amazon_error)?;
+    Ok(HttpResponseHeaders::new(
+        HttpResponseOk(result),
+        private_headers(),
+    ))
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct AmazonComplete {
+    flow_id: String,
+    landing_url: String,
+}
+
+#[endpoint {method=POST,path="/v1/amazon/complete",tags=["amazon"]}]
+async fn amazon_complete(
+    request: RequestContext<Arc<Context>>,
+    body: TypedBody<AmazonComplete>,
+) -> Result<
+    HttpResponseHeaders<HttpResponseOk<crate::amazon::AmazonStatus>, PrivateHeaders>,
+    HttpError,
+> {
+    require_owner(&request).await?;
+    let _management = request.context().amazon_management.lock().await;
+    let owner = authenticate(&request, false).await?.actor;
+    let input = body.into_inner();
+    let client = amazon_client(&request)?;
+    let result = client
+        .complete_sign_in(&owner, &input.flow_id, &input.landing_url)
+        .await
+        .map_err(amazon_error)?;
+    if result.imports_enabled {
+        if let Some(scope) = client.tracking_scope().await {
+            request.context().store.resume_amazon(&scope).await?;
+        }
+        crate::amazon_sync::AmazonDiscoveryWorker::enabled(&request.context().store).await?;
+    }
+    Ok(HttpResponseHeaders::new(
+        HttpResponseOk(result),
+        private_headers(),
+    ))
+}
+
+#[derive(Serialize, JsonSchema)]
+struct AmazonPreview {
+    shipments: Vec<AmazonPreviewParcel>,
+    deferred: usize,
+}
+#[derive(Serialize, JsonSchema)]
+struct AmazonPreviewParcel {
+    title: String,
+    order_reference: String,
+    tracking: Tracking,
+}
+
+#[endpoint {method=POST,path="/v1/amazon/preview",tags=["amazon"]}]
+async fn amazon_preview(
+    request: RequestContext<Arc<Context>>,
+) -> Result<HttpResponseHeaders<HttpResponseOk<AmazonPreview>, PrivateHeaders>, HttpError> {
+    require_owner(&request).await?;
+    let result = amazon_client(&request)?
+        .discover()
+        .await
+        .map_err(amazon_error)?;
+    let shipments = result
+        .parcels
+        .into_iter()
+        .map(|p| AmazonPreviewParcel {
+            title: p.title,
+            order_reference: p.order_reference,
+            tracking: Tracking {
+                carrier: p.tracker.carrier,
+                number: p.tracker.tracking_code,
+                recipient_url: None,
+            },
+        })
+        .collect();
+    Ok(HttpResponseHeaders::new(
+        HttpResponseOk(AmazonPreview {
+            shipments,
+            deferred: result.deferred,
+        }),
+        private_headers(),
+    ))
+}
+
+#[endpoint {method=POST,path="/v1/amazon/enable",tags=["amazon"]}]
+async fn amazon_enable(
+    request: RequestContext<Arc<Context>>,
+) -> Result<
+    HttpResponseHeaders<HttpResponseOk<crate::amazon::AmazonStatus>, PrivateHeaders>,
+    HttpError,
+> {
+    require_owner(&request).await?;
+    let _management = request.context().amazon_management.lock().await;
+    let client = amazon_client(&request)?;
+    let was_enabled = client.status().await.imports_enabled;
+    let result = client.enable_imports().await.map_err(amazon_error)?;
+    if !was_enabled {
+        if let Some(scope) = client.tracking_scope().await {
+            request.context().store.resume_amazon(&scope).await?;
+        }
+        crate::amazon_sync::AmazonDiscoveryWorker::enabled(&request.context().store).await?;
+    }
+    Ok(HttpResponseHeaders::new(
+        HttpResponseOk(result),
+        private_headers(),
+    ))
+}
+
+#[endpoint {method=POST,path="/v1/amazon/refresh",tags=["amazon"]}]
+async fn amazon_refresh(
+    request: RequestContext<Arc<Context>>,
+) -> Result<HttpResponseUpdatedNoContent, HttpError> {
+    require_owner(&request).await?;
+    let _management = request.context().amazon_management.lock().await;
+    crate::amazon_sync::AmazonDiscoveryWorker::queue(&request.context().store).await?;
+    Ok(HttpResponseUpdatedNoContent())
+}
+
+#[endpoint {method=DELETE,path="/v1/amazon",tags=["amazon"]}]
+async fn amazon_disconnect(
+    request: RequestContext<Arc<Context>>,
+) -> Result<HttpResponseUpdatedNoContent, HttpError> {
+    require_owner(&request).await?;
+    let _management = request.context().amazon_management.lock().await;
+    amazon_client(&request)?
+        .disconnect()
+        .await
+        .map_err(amazon_error)?;
+    request.context().store.pause_amazon().await?;
+    Ok(HttpResponseUpdatedNoContent())
 }
 
 /// Read local installation checks without contacting EasyPost.
@@ -1038,6 +1239,16 @@ async fn parcel_links_script(
         "text/javascript; charset=utf-8",
     )
 }
+#[endpoint {method=GET,path="/amazon-settings.js",tags=["web"]}]
+async fn amazon_settings_script(
+    request: RequestContext<Arc<Context>>,
+) -> Result<Response<Body>, HttpError> {
+    ingress_access(&request)?;
+    static_response(
+        include_str!("../web/amazon-settings.js"),
+        "text/javascript; charset=utf-8",
+    )
+}
 #[endpoint {method=GET,path="/style.css",tags=["web"]}]
 async fn style(request: RequestContext<Arc<Context>>) -> Result<Response<Body>, HttpError> {
     ingress_access(&request)?;
@@ -1046,7 +1257,7 @@ async fn style(request: RequestContext<Arc<Context>>) -> Result<Response<Body>, 
 
 pub fn description() -> Result<ApiDescription<Arc<Context>>> {
     let mut api = ApiDescription::new();
-    let endpoints: [dropshot::ApiEndpoint<Arc<Context>>; 29] = [
+    let endpoints: [dropshot::ApiEndpoint<Arc<Context>>; 37] = [
         shipments_list.into(),
         carriers_list.into(),
         shipments_create.into(),
@@ -1063,6 +1274,14 @@ pub fn description() -> Result<ApiDescription<Arc<Context>>> {
         state_events.into(),
         summary.into(),
         system.into(),
+        amazon_status.into(),
+        amazon_sign_in.into(),
+        amazon_complete.into(),
+        amazon_preview.into(),
+        amazon_enable.into(),
+        amazon_refresh.into(),
+        amazon_disconnect.into(),
+        amazon_settings_script.into(),
         installation.into(),
         installation_check.into(),
         integration_presence.into(),

@@ -294,3 +294,25 @@ Home Assistant tokens grant access beyond this integration. Give agents the
 restricted shipment credential through a constrained tool boundary rather than
 giving them broad Home Assistant credentials. Use HTTPS or a trusted local
 transport when carrying bearer credentials beyond loopback.
+
+## Amazon account management
+
+All `/v1/amazon` management endpoints require the owner or an authenticated Home
+Assistant administrator. Agent and integration credentials cannot manage Amazon.
+Safe connection state is also included in the integration-readable `/v1/system`.
+
+- `GET /v1/amazon`: connection state, imports enabled, last success and safe error code.
+- `POST /v1/amazon/sign-in`: begin an owner-bound, expiring PKCE sign-in; returns
+  the one-time flow ID and the Amazon sign-in URL.
+- `POST /v1/amazon/complete`: submit `flow_id` and `landing_url` in the JSON body.
+  Only the expected HTTPS Amazon landing route is accepted. Never put the address
+  or authorization code in a URL or log.
+- `POST /v1/amazon/preview`: read verified candidate parcels and a deferred count.
+  This does not create or modify shipments or mark candidates imported.
+- `POST /v1/amazon/enable`: explicitly enable automatic imports after preview.
+- `POST /v1/amazon/refresh`: queue bounded discovery, respecting cooldown/backoff.
+- `DELETE /v1/amazon`: remove local account credentials; retain shipment data.
+
+Connection and preview responses use `Cache-Control: no-store`. No endpoint returns
+saved Amazon refresh tokens or website cookies. An expired Amazon sign-in is account
+health data, not a 401 rejection of the Home Assistant integration credential.
