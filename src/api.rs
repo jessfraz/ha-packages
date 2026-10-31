@@ -1078,8 +1078,14 @@ async fn shipment_use_amazon(
     })?;
     let client = amazon_client(&request)?;
     let started = std::time::Instant::now();
+    // The legacy AfterShip choice conflated consumer-account deliveries with
+    // MCF. Require the account parser's distinct carrier, exact order and number.
+    let expected = Tracking {
+        carrier: crate::carrier::Carrier::AmazonAccount,
+        ..current.tracking.clone()
+    };
     let verified = client
-        .verify_existing(order, &current.title, &current.tracking)
+        .verify_existing(order, &current.title, &expected)
         .await
         .map_err(|error| amazon_connection_error(&request, error, started.elapsed()))?;
     // Fence account replacement while the selected record's transaction commits.

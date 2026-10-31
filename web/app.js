@@ -1,7 +1,7 @@
 import { waitForConnection } from "./connection.js";
 import { ApiError } from "./api-error.js";
 import { calendarDate } from "./dates.js";
-import { providerNames, trackingLinks } from "./parcel-links.js";
+import { carrierLabel, carrierOptionLabel, providerNames, trackingLinks } from "./parcel-links.js";
 import { installAmazonSettings } from "./amazon-settings.js";
 
 const byId = (id) => document.getElementById(id);
@@ -293,20 +293,8 @@ async function connect(signal) {
   const carrierField = byId("edit-form").elements.namedItem("carrier");
   carrierField.replaceChildren(element("option", "Auto-detect"));
   carrierField.firstElementChild.value = "";
-  const carrierLabels = {
-    FedEx: "FedEx (EasyPost account)",
-    FedExAccount: "FedEx (your carrier account)",
-    FedExDefault: "FedEx Default (EasyPost account)",
-    DHLExpress: "DHL Express (your carrier account)",
-    DHLExpressDefault: "DHL Express Default (EasyPost account)",
-    AmazonMcf: "Amazon MCF / Logistics (AfterShip)",
-    SpeedX: "SpeedX (AfterShip)",
-    Sway: "Sway / Returnmates (AfterShip)",
-    Veho: "Veho (AfterShip)",
-    DoorDash: "DoorDash (original tracking link)",
-  };
   for (const carrier of [...carriers, "FedExAccount"]) {
-    const option = element("option", carrierLabels[carrier] || carrier);
+    const option = element("option", carrierOptionLabel(carrier));
     option.value = carrier;
     carrierField.append(option);
   }
@@ -530,7 +518,7 @@ async function load(append = false) {
         .join(" · ");
       copy.append(element("h2", shipment.title));
       if (description) copy.append(element("p", description));
-      copy.append(element("p", `${shipment.tracking.carrier || "Carrier not identified"} · ${shipment.tracking.number}`, "shipment-tracking"));
+      copy.append(element("p", `${carrierLabel(shipment.tracking.carrier)} · ${shipment.tracking.number}`, "shipment-tracking"));
       const delivered = shipment.status === "delivered" || view === "delivered_today";
       const deliveryDate = delivered
         ? deliveredDate(shipment)
@@ -1080,7 +1068,7 @@ async function show(id, preserveView = false, section = route().get("section")) 
   const badges = shipmentBadges(shipment, "detail-badges");
   hero.append(badges);
   const tracking = element("p", undefined, "detail-tracking");
-  tracking.append(element("strong", shipment.tracking.carrier || "Carrier not identified"),
+  tracking.append(element("strong", carrierLabel(shipment.tracking.carrier)),
     element("span", shipment.tracking.number));
   hero.append(tracking);
   const links = element("div", undefined, "tracking-links");
@@ -1193,7 +1181,7 @@ async function show(id, preserveView = false, section = route().get("section")) 
     button("Refresh tracking", () => mutate("refresh", "POST"));
   if (!shipment.archived && shipment.direction === "inbound" &&
       shipment.tracking?.carrier === "AmazonMcf" && shipment.sync.provider === "aftership")
-    button("Use Amazon tracking", () => mutate("amazon", "POST"), true);
+    button("Use Amazon Account tracking", () => mutate("amazon", "POST"), true);
   if (shipment.status_override)
     button("Clear correction", () => mutate("status-override", "DELETE"), true);
   button(shipment.archived ? "Restore" : "Archive", () =>
@@ -1234,7 +1222,8 @@ async function loadEvents() {
     const page = await api(`v1/shipments/${id}/events?${query}`);
     if (!currentDetail(id, generation)) return;
     for (const event of page.items) {
-      const item = element("li", `${event.detail} · ${event.actor_id}`);
+      const actor = Object.hasOwn(providerNames, event.actor_id) ? providerNames[event.actor_id] : event.actor_id;
+      const item = element("li", `${event.detail} · ${actor}`);
       const time = element("time", new Date(event.at).toLocaleString());
       time.dateTime = event.at;
       item.append(time);
@@ -1248,7 +1237,7 @@ async function loadEvents() {
           [
             "Tracking",
             snapshot.tracking
-              ? `${snapshot.tracking.carrier || "Auto-detect carrier"} · ${snapshot.tracking.number}`
+              ? `${carrierLabel(snapshot.tracking.carrier, "Auto-detect carrier")} · ${snapshot.tracking.number}`
               : "Not set",
           ],
           ["Merchant", snapshot.merchant || "Not set"],

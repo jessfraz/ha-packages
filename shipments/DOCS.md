@@ -320,7 +320,7 @@ rename an entity in Home Assistant.
 | Option | Purpose |
 | --- | --- |
 | `easypost_api_key` | Enables tracking verification before saving and background tracking updates. |
-| `aftership_api_key` | Enables Amazon MCF / Logistics, SpeedX, Sway / Returnmates, and Veho tracking through AfterShip. |
+| `aftership_api_key` | Enables Amazon MCF, SpeedX, Sway / Returnmates, and Veho tracking through AfterShip. |
 
 DoorDash requires its original recipient tracking link rather than an API key.
 Other carriers and automatic carrier detection use EasyPost. Provider keys
@@ -334,12 +334,12 @@ Existing records migrate to inbound. The default list shows active inbound
 shipments. Select **All** or **Outbound** to change the direction filter.
 Leave **Carrier** on **Auto-detect**, or
 choose its canonical EasyPost carrier when detection is ambiguous.
-Select **Amazon MCF / Logistics**, **SpeedX**, **Sway / Returnmates**, or **Veho** explicitly to use
+Select **Amazon MCF**, **SpeedX**, **Sway / Returnmates**, or **Veho** explicitly to use
 AfterShip.
-Use **Amazon MCF / Logistics** only when the original merchant evidence identifies
+Use **Amazon MCF** only when the original merchant evidence identifies
 Multi-Channel Fulfillment or supplies a matching Swiship parcel link. It uses
-AfterShip `amazon-mcf`, not `amazon-order` or the UK Swiship product. Existing
-**AmazonShipping** and **AmazonMws** choices retain their EasyPost routes. A
+AfterShip `amazon`, not `amazon-mcf`, `amazon-order`, or the UK Swiship product.
+Existing **AmazonShipping** and **AmazonMws** choices retain their EasyPost routes. A
 TBA prefix alone does not establish the carrier product. AfterShip account
 entitlements and tracking quotas still apply; this does not enable all carriers.
 Configure the AfterShip key in the app; these carriers do not fall back to
@@ -406,15 +406,27 @@ details and open settings have URL fragments for links and browser navigation.
 
 ## Existing Amazon shipments
 
+**Amazon Account** uses your connected consumer Amazon.com account. It is separate
+from **Amazon MCF** on AfterShip and **AmazonShipping** on EasyPost. Previously
+linked account shipments are corrected in place without losing their registration,
+status, sources, or history. Genuine MCF records are unchanged.
+
 With Amazon connected, open an existing inbound Amazon shipment on AfterShip
-and select **Use Amazon tracking**. Shipments checks that order on Amazon and
-requires the same carrier and tracking number before switching the existing
-record. Its ID, title, sources, corrections, and history stay intact.
+and select **Use Amazon Account tracking**. Shipments checks that order on Amazon and
+requires the exact order and tracking number and a verified Amazon Account carrier
+before replacing the legacy MCF label. Its ID, title, sources, corrections, and
+history stay intact.
 
 This action does not enable automatic imports or create other shipments. Linked
 shipments use normal tracking updates even while automatic imports are off.
 Archived records are not changed. A failed check leaves the original record
 untouched; a verification challenge pauses Amazon checks and retains sign-in.
+
+To find new shipments, enable **Automatic imports** under **Amazon Account**.
+Discovery runs every 30–33 minutes, even if all existing shipments are delivered.
+Only verified parcels are added; existing tracking numbers and parcel identities
+are deduplicated in place. Provider backoff and verification challenges pause
+requests rather than causing rapid retries.
 
 ## Agent access
 

@@ -299,8 +299,9 @@ transport when carrying bearer credentials beyond loopback.
 
 `POST /v1/shipments/{id}/amazon` switches one existing inbound AmazonMcf
 AfterShip record to verified Amazon-account tracking. It requires owner access
-and the record's current `If-Match` revision. Amazon must report that order's
-same carrier and tracking number. A mismatch, stale revision, archived record,
+and the record's current `If-Match` revision. Amazon must report the same order
+and tracking number with the Amazon Account carrier. The verified result
+replaces the old MCF label. A mismatch, stale revision, archived record,
 or failed check leaves the record unchanged. The action preserves its ID,
 metadata, manual correction, sources, and history. It never creates a record
 or enables automatic imports. Linked records continue normal tracking while

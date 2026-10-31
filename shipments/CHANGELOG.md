@@ -1,3 +1,9 @@
+## 0.6.23
+
+- Distinguish consumer Amazon Account tracking from Amazon MCF throughout the
+  parser, provider routing, API, and UI. Correct already-linked account records
+  in place without resetting their tracking state or history.
+
 ## 0.6.22
 
 - Request the desktop item-details and tracking layouts expected by their

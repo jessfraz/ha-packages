@@ -510,7 +510,12 @@ async fn existing_amazon_adoption_verifies_upstream_and_commits_the_same_record(
     let etag = response.headers()["etag"].to_str().unwrap().to_owned();
     let adopted: Shipment = response.json().await.unwrap();
     assert_eq!(adopted.id, before.id);
-    assert_eq!(adopted.tracking, before.tracking);
+    assert_eq!(adopted.tracking.carrier.as_str(), "AmazonAccount");
+    assert_eq!(adopted.tracking.number, before.tracking.number);
+    assert_eq!(
+        adopted.tracking.recipient_url,
+        before.tracking.recipient_url
+    );
     assert_eq!(adopted.title, before.title);
     assert_eq!(adopted.created_at, before.created_at);
     assert!(adopted.revision > before.revision);

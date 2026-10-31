@@ -17,7 +17,7 @@ the other app scripts.
 | FedEx, FedExDefault, FedexSmartPost | FedEx `/fedextrack/` `trknbr` route |
 | DHL Express, DHLExpressDefault | DHL `/us-en/home/tracking.html` with `tracking-id` and `submit=1`, opening results automatically |
 | Amazon MCF | [Amazon MCF documentation](https://supplychain.amazon.com/blog/how-to-track-your-mcf-orders) identifies Swiship for MCF; non-Logistics numbers use its `/track?id=` route |
-| Amazon Logistics (AmazonMcf TBA numbers), Amazon Shipping | [Amazon recipient tracker](https://track.amazon.com/) `/tracking/{number}` route |
+| Amazon Account, Amazon Shipping | [Amazon recipient tracker](https://track.amazon.com/) `/tracking/{number}` route |
 | SpeedX | [Official support form](https://speedx.io/customer-service-and-support/) builds `https://tracking.speedx.io/{number}` |
 | Sway / Returnmates | [Official tracking application](https://www.returnmates.com/tracking) accepts `/tracking/{number}` and resolves its current recipient link |
 | Veho | [Official homepage](https://www.shipveho.com/) form builds `https://track.shipveho.com/#/trackingid/{number}` |

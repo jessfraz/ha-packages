@@ -1,4 +1,5 @@
-//! EasyPost's documented tracking carriers, shared by the API and provider.
+//! Tracking products shared by the API and providers, including account-native
+//! integrations and EasyPost's documented carrier products.
 //!
 //! https://docs.easypost.com/docs/trackers#carrier-tracking-strings
 
@@ -33,6 +34,7 @@ macro_rules! carriers {
 
 carriers! {
     Accurate => "Accurate",
+    AmazonAccount => "AmazonAccount",
     AmazonMcf => "AmazonMcf",
     AmazonMws => "AmazonMws",
     AmazonShipping => "AmazonShipping",

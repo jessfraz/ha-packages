@@ -1881,7 +1881,7 @@ mod tests {
         assert_eq!(preview.deferred, 0);
         let tracker = &preview.parcels[0].tracker;
         assert_eq!(tracker.tracking_code, AMAZON_NUMBER);
-        assert_eq!(tracker.carrier, crate::carrier::Carrier::AmazonMcf);
+        assert_eq!(tracker.carrier, crate::carrier::Carrier::AmazonAccount);
         assert_eq!(tracker.status, crate::models::Status::Delivered);
         assert!(!client.status().await.imports_enabled);
         let requests = fixture.request_agents.lock().unwrap();
@@ -3232,7 +3232,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let client = configured(&dir, &fixture);
         let tracking = crate::models::Tracking {
-            carrier: crate::carrier::Carrier::AmazonMcf,
+            carrier: crate::carrier::Carrier::AmazonAccount,
             number: AMAZON_NUMBER.into(),
             recipient_url: None,
         };

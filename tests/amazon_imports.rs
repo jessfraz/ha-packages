@@ -112,6 +112,10 @@ fn parcel(package: &str, number: &str, carrier: Carrier) -> AmazonParcel {
     }
 }
 
+fn account_carrier() -> Carrier {
+    serde_json::from_str("\"AmazonAccount\"").unwrap()
+}
+
 async fn history(store: &Store, shipment: &Shipment) -> Vec<Event> {
     store.events(shipment.id, 0, 100).await.unwrap()
 }
@@ -128,13 +132,13 @@ fn assert_history_prefix(before: &[Event], after: &[Event]) {
 #[tokio::test]
 async fn repeated_import_and_reopened_store_reuse_one_parcel_without_extra_history() {
     let f = Fixture::new().await;
-    let p = parcel("1", "TBA000000000001", Carrier::AmazonMcf);
+    let p = parcel("1", "TBA000000000001", account_carrier());
     let first = f.store.import_amazon(&p, None).await.unwrap();
     let events = history(&f.store, &first).await;
     assert_eq!(first.title, p.title);
     assert_eq!(first.direction, Direction::Inbound);
     assert_eq!(first.sync.provider, ProviderId::AmazonAccount);
-    assert_eq!(first.tracking.carrier, Carrier::AmazonMcf);
+    assert_eq!(first.tracking.carrier, account_carrier());
     assert_eq!(
         first.sources,
         vec![Source {
@@ -210,6 +214,8 @@ async fn confirmed_amazon_fleet_adoption_merges_history_and_retains_manual_overr
     let original = f
         .existing("TBA000000000002", Carrier::AmazonMcf, Direction::Inbound)
         .await;
+    let p = parcel("2", &original.tracking.number, account_carrier());
+    let original = same_order(&f, original, &p).await;
     let before = f
         .store
         .set_override(
@@ -224,10 +230,11 @@ async fn confirmed_amazon_fleet_adoption_merges_history_and_retains_manual_overr
         .await
         .unwrap();
     let events = history(&f.store, &before).await;
-    let p = parcel("2", &before.tracking.number, Carrier::AmazonMcf);
     let linked = f.store.import_amazon(&p, None).await.unwrap();
     assert_eq!(linked.id, before.id);
     assert_eq!(linked.title, before.title);
+    assert_eq!(linked.tracking.carrier, account_carrier());
+    assert_eq!(linked.tracking.number, before.tracking.number);
     assert_eq!(linked.sync.provider, ProviderId::AmazonAccount);
     assert_eq!(
         linked.sync.tracker_id.as_deref(),
@@ -282,7 +289,7 @@ async fn reviewed_adoption_preserves_the_existing_record_and_history_after_resta
     let original = f
         .existing("TBA000000000021", Carrier::AmazonMcf, Direction::Inbound)
         .await;
-    let p = parcel("1", &original.tracking.number, Carrier::AmazonMcf);
+    let p = parcel("1", &original.tracking.number, account_carrier());
     let original = same_order(&f, original, &p).await;
     let before = f
         .store
@@ -306,7 +313,12 @@ async fn reviewed_adoption_preserves_the_existing_record_and_history_after_resta
         .unwrap();
 
     assert_eq!(adopted.id, before.id);
-    assert_eq!(adopted.tracking, before.tracking);
+    assert_eq!(adopted.tracking.carrier, account_carrier());
+    assert_eq!(adopted.tracking.number, before.tracking.number);
+    assert_eq!(
+        adopted.tracking.recipient_url,
+        before.tracking.recipient_url
+    );
     assert_eq!(adopted.title, before.title);
     assert_eq!(adopted.direction, before.direction);
     assert_eq!(adopted.merchant, before.merchant);
@@ -367,12 +379,101 @@ async fn reviewed_adoption_preserves_the_existing_record_and_history_after_resta
 }
 
 #[tokio::test]
+async fn account_carrier_correction_requires_matching_order_direction_and_provider() {
+    for (carrier, provider, direction, matching_order) in [
+        (
+            Carrier::AmazonMcf,
+            ProviderId::AfterShip,
+            Direction::Inbound,
+            false,
+        ),
+        (
+            Carrier::AmazonMcf,
+            ProviderId::EasyPost,
+            Direction::Inbound,
+            true,
+        ),
+        (
+            Carrier::Usps,
+            ProviderId::EasyPost,
+            Direction::Inbound,
+            true,
+        ),
+        (
+            Carrier::AmazonMcf,
+            ProviderId::AfterShip,
+            Direction::Outbound,
+            true,
+        ),
+    ] {
+        let f = Fixture::new().await;
+        let original = f.existing("TBA000000000027", carrier, direction).await;
+        let p = parcel("1", &original.tracking.number, account_carrier());
+        let original = if matching_order {
+            same_order(&f, original, &p).await
+        } else {
+            original
+        };
+        sqlx::query("UPDATE shipments SET tracking_provider=? WHERE id=?")
+            .bind(provider.as_str())
+            .bind(original.id.to_string())
+            .execute(f.store.pool())
+            .await
+            .unwrap();
+        let before = f.store.get(original.id).await.unwrap();
+        let before_events = history(&f.store, &before).await;
+        let counts = f.counts().await;
+        assert!(matches!(
+            f.store.import_amazon(&p, None).await,
+            Err(Error::Conflict(_))
+        ));
+        assert_eq!(f.counts().await, counts);
+        assert_eq!(
+            serde_json::to_string(&f.store.get(before.id).await.unwrap()).unwrap(),
+            serde_json::to_string(&before).unwrap()
+        );
+        assert_eq!(
+            serde_json::to_string(&history(&f.store, &before).await).unwrap(),
+            serde_json::to_string(&before_events).unwrap()
+        );
+    }
+}
+
+#[tokio::test]
+async fn merchant_mcf_cannot_be_recorded_as_a_new_account_observation() {
+    for saved in [false, true] {
+        let f = Fixture::new().await;
+        let before = if saved {
+            Some(
+                f.existing("TBA000000000028", Carrier::AmazonMcf, Direction::Inbound)
+                    .await,
+            )
+        } else {
+            None
+        };
+        let counts = f.counts().await;
+        let p = parcel("1", "TBA000000000028", Carrier::AmazonMcf);
+        assert!(matches!(
+            f.store.import_amazon(&p, None).await,
+            Err(Error::Invalid(_))
+        ));
+        assert_eq!(f.counts().await, counts);
+        if let Some(before) = before {
+            assert_eq!(
+                serde_json::to_string(&f.store.get(before.id).await.unwrap()).unwrap(),
+                serde_json::to_string(&before).unwrap()
+            );
+        }
+    }
+}
+
+#[tokio::test]
 async fn reviewed_adoption_cannot_create_a_record_or_retarget_another_tracking_number() {
     let f = Fixture::new().await;
     let original = f
         .existing("TBA000000000022", Carrier::AmazonMcf, Direction::Inbound)
         .await;
-    let p = parcel("1", &original.tracking.number, Carrier::AmazonMcf);
+    let p = parcel("1", &original.tracking.number, account_carrier());
     let before = same_order(&f, original, &p).await;
     let other = f
         .existing("TBA000000000023", Carrier::AmazonMcf, Direction::Inbound)
@@ -380,7 +481,7 @@ async fn reviewed_adoption_cannot_create_a_record_or_retarget_another_tracking_n
     let counts = f.counts().await;
     let before_json = serde_json::to_string(&before).unwrap();
     let other_json = serde_json::to_string(&other).unwrap();
-    let mut nonexistent_tracking = parcel("2", "TBA000000000024", Carrier::AmazonMcf);
+    let mut nonexistent_tracking = parcel("2", "TBA000000000024", account_carrier());
     nonexistent_tracking.order_reference = before.order_reference.clone().unwrap();
     for (id, revision, observation) in [
         (uuid::Uuid::now_v7(), before.revision, &p),
@@ -411,7 +512,7 @@ async fn reviewed_adoption_rejects_stale_review_without_any_partial_link() {
     let original = f
         .existing("TBA000000000025", Carrier::AmazonMcf, Direction::Inbound)
         .await;
-    let p = parcel("1", &original.tracking.number, Carrier::AmazonMcf);
+    let p = parcel("1", &original.tracking.number, account_carrier());
     let reviewed = same_order(&f, original, &p).await;
     let current = f
         .store
@@ -474,7 +575,12 @@ async fn reviewed_adoption_rejects_ineligible_existing_records_without_changes()
             Direction::Inbound
         };
         let original = f.existing(number, carrier, direction).await;
-        let p = parcel("1", number, carrier);
+        let observed_carrier = if carrier == Carrier::AmazonMcf {
+            account_carrier()
+        } else {
+            carrier
+        };
+        let p = parcel("1", number, observed_carrier);
         let mut before = if matches!(reason, Ineligible::DifferentOrder) {
             original
         } else {
@@ -507,7 +613,7 @@ async fn reviewed_adoption_rejects_ineligible_existing_records_without_changes()
 #[tokio::test]
 async fn split_packages_share_order_but_keep_distinct_items_numbers_and_sources() {
     let f = Fixture::new().await;
-    let a = parcel("1", "TBA000000000003", Carrier::AmazonMcf);
+    let a = parcel("1", "TBA000000000003", account_carrier());
     let b = parcel("2", "9400000000000000000002", Carrier::Usps);
     let first = f.store.import_amazon(&a, None).await.unwrap();
     let second = f.store.import_amazon(&b, None).await.unwrap();
@@ -523,7 +629,7 @@ async fn split_packages_share_order_but_keep_distinct_items_numbers_and_sources(
 #[tokio::test]
 async fn changed_number_for_same_package_is_deferred_without_creating_another_record() {
     let f = Fixture::new().await;
-    let mut p = parcel("1", "TBA000000000004", Carrier::AmazonMcf);
+    let mut p = parcel("1", "TBA000000000004", account_carrier());
     let first = f.store.import_amazon(&p, None).await.unwrap();
     p.tracker.tracking_code = "9400000000000000000003".into();
     p.tracker.carrier = Carrier::Usps;
@@ -544,17 +650,26 @@ async fn archived_matching_record_stays_archived_and_keeps_its_tracking_provider
     let original = f
         .existing("TBA000000000005", Carrier::AmazonMcf, Direction::Inbound)
         .await;
+    let p = parcel("1", &original.tracking.number, account_carrier());
+    let original = same_order(&f, original, &p).await;
     let archived = f
         .store
         .archive(original.id, original.revision, true, "owner")
         .await
         .unwrap();
-    let p = parcel("1", &archived.tracking.number, Carrier::AmazonMcf);
+    let events = history(&f.store, &archived).await;
     let linked = f.store.import_amazon(&p, None).await.unwrap();
     assert_eq!(linked.id, archived.id);
     assert!(linked.archived);
     assert_eq!(linked.sync.provider, ProviderId::AfterShip);
+    assert_eq!(linked.tracking, archived.tracking);
+    assert_eq!(linked.sync.tracker_id, archived.sync.tracker_id);
     assert_eq!(linked.carrier_tracking, archived.carrier_tracking);
+    assert!(linked.sources.contains(&Source {
+        namespace: "amazon-account".into(),
+        key: p.source_key
+    }));
+    assert_history_prefix(&events, &history(&f.store, &linked).await);
     let scheduled: Option<i64> =
         sqlx::query_scalar("SELECT next_attempt_at FROM shipments WHERE id=?")
             .bind(linked.id.to_string())
@@ -595,7 +710,7 @@ async fn public_source_provenance_alone_never_selects_the_amazon_account_provide
     let original = f
         .existing("TBA000000000006", Carrier::AmazonMcf, Direction::Inbound)
         .await;
-    let p = parcel("1", &original.tracking.number, Carrier::AmazonMcf);
+    let p = parcel("1", &original.tracking.number, account_carrier());
     let changed = f
         .store
         .add_source(
@@ -632,7 +747,7 @@ async fn public_source_provenance_alone_never_selects_the_amazon_account_provide
 #[tokio::test]
 async fn metadata_edits_and_unchanged_tracking_resubmissions_preserve_amazon_provider() {
     let f = Fixture::new().await;
-    let p = parcel("1", "TBA000000000007", Carrier::AmazonMcf);
+    let p = parcel("1", "TBA000000000007", account_carrier());
     let mut before = f.store.import_amazon(&p, None).await.unwrap();
     for resubmit in [false, true] {
         let edited = f
@@ -667,7 +782,7 @@ async fn metadata_edits_and_unchanged_tracking_resubmissions_preserve_amazon_pro
 #[tokio::test]
 async fn old_discovery_observation_cannot_recreate_tracking_replaced_by_the_owner() {
     let f = Fixture::new().await;
-    let p = parcel("1", "TBA000000000008", Carrier::AmazonMcf);
+    let p = parcel("1", "TBA000000000008", account_carrier());
     let original = f.store.import_amazon(&p, None).await.unwrap();
     let edited = f
         .store
@@ -703,7 +818,7 @@ async fn old_discovery_observation_cannot_recreate_tracking_replaced_by_the_owne
 #[tokio::test]
 async fn discovery_lease_fences_creation_and_import_replays() {
     let f = Fixture::new().await;
-    let p = parcel("1", "TBA000000000010", Carrier::AmazonMcf);
+    let p = parcel("1", "TBA000000000010", account_carrier());
     sqlx::query(
         "UPDATE amazon_discovery SET lease_token='stale',lease_until=unixepoch()-1 WHERE id=1",
     )
@@ -733,7 +848,7 @@ async fn discovery_lease_fences_creation_and_import_replays() {
 #[tokio::test]
 async fn concurrent_duplicate_imports_commit_one_record_and_one_created_event() {
     let f = Fixture::new().await;
-    let p = parcel("1", "TBA000000000011", Carrier::AmazonMcf);
+    let p = parcel("1", "TBA000000000011", account_carrier());
     let (first, second) = tokio::join!(
         f.store.import_amazon(&p, None),
         f.store.import_amazon(&p, None)
@@ -760,7 +875,7 @@ async fn import_identity_lookups_use_indexes_with_representative_saved_parcels()
         let p = parcel(
             &index.to_string(),
             &format!("TBA{index:012}"),
-            Carrier::AmazonMcf,
+            account_carrier(),
         );
         target = Some((
             p.source_key.clone(),
@@ -812,7 +927,7 @@ async fn import_identity_lookups_use_indexes_with_representative_saved_parcels()
 async fn unverified_or_oversized_observations_leave_no_partial_parcels_or_history() {
     for condition in ["provider", "status", "title", "source"] {
         let f = Fixture::new().await;
-        let mut p = parcel("1", "TBA000000000012", Carrier::AmazonMcf);
+        let mut p = parcel("1", "TBA000000000012", account_carrier());
         match condition {
             "provider" => p.tracker.provider = ProviderId::EasyPost,
             "status" => p.tracker.status = Status::Unknown,
@@ -840,7 +955,7 @@ async fn imported_numbers_obey_the_existing_shipment_admission_contract() {
         "SYNTHETIC_0001".to_owned(),
     ] {
         let f = Fixture::new().await;
-        let p = parcel("1", &number, Carrier::AmazonMcf);
+        let p = parcel("1", &number, account_carrier());
         assert!(
             matches!(
                 f.store.import_amazon(&p, None).await,
@@ -903,7 +1018,7 @@ async fn pausing_amazon_fences_both_accounts_and_discovery_without_touching_easy
         &current,
         "1",
         "TBA000000000021",
-        Carrier::AmazonMcf,
+        account_carrier(),
         Status::InTransit,
     )
     .await;
@@ -974,7 +1089,7 @@ async fn reconnect_resumes_only_current_effectively_active_parcels_and_rejects_b
                 scope,
                 package,
                 &format!("TBA{package:0>12}"),
-                Carrier::AmazonMcf,
+                account_carrier(),
                 status,
             )
             .await,

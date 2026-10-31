@@ -34,6 +34,7 @@ pub enum ProviderId {
 impl ProviderId {
     pub const fn for_carrier(carrier: Option<Carrier>) -> Self {
         match carrier {
+            Some(Carrier::AmazonAccount) => Self::AmazonAccount,
             Some(Carrier::DoorDash) => Self::DoorDash,
             Some(Carrier::AmazonMcf | Carrier::SpeedX | Carrier::Sway | Carrier::Veho) => {
                 Self::AfterShip
@@ -52,7 +53,7 @@ impl ProviderId {
 
     pub const fn name(self) -> &'static str {
         match self {
-            Self::AmazonAccount => "Amazon",
+            Self::AmazonAccount => "Amazon Account",
             Self::EasyPost => "EasyPost",
             Self::DoorDash => "DoorDash",
             Self::AfterShip => "AfterShip",
