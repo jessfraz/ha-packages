@@ -81,7 +81,7 @@ async fn main() -> Result<()> {
     };
     let workers: Vec<_> = providers.into_iter().map(|provider| {
         let discovery = (provider.id() == shipments::shipping_api::types::ProviderId::AmazonAccount)
-            .then(|| AmazonDiscoveryWorker::new(store.clone(), amazon.clone()));
+            .then(|| AmazonDiscoveryWorker::new(store.clone(), amazon.clone()).with_logger(log.clone()));
         let worker = SyncWorker::new(store.pool().clone(), provider);
         let log = log.clone();
         let mut worker_stop = stop_rx.clone();

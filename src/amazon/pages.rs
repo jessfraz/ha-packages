@@ -1,7 +1,7 @@
 //! Strict, bounded projections of Amazon's retail order and tracking pages.
 //! Incomplete identity is deferred, never turned into a synthetic shipment.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, btree_map::Entry};
 
 use reqwest::Url;
 use scraper::{Html, Selector};
@@ -77,9 +77,50 @@ pub(crate) fn signed_out(page: &str) -> bool {
         .is_some()
 }
 
+fn checkpoint_route(url: &Url, path: &str) -> bool {
+    url.scheme() == "https"
+        && url.host_str() == Some("www.amazon.com")
+        && url.username().is_empty()
+        && url.password().is_none()
+        && url.port().is_none()
+        && url.fragment().is_none()
+        && url.path() == path
+}
+
+pub(crate) fn checkpoint_redirect(url: &Url) -> bool {
+    checkpoint_route(url, "/checkpoint/continue")
+}
+
+fn checkpoint_form(page: &str) -> bool {
+    if !page.contains("/checkpoint/validate") {
+        return false;
+    }
+    let (Ok(forms), Ok(checkbox)) = (
+        Selector::parse("form[action]"),
+        Selector::parse("input[type=checkbox]"),
+    ) else {
+        return false;
+    };
+    Html::parse_document(page).select(&forms).any(|form| {
+        let Some(action) = form.value().attr("action") else {
+            return false;
+        };
+        // The attested form uses a root-relative action. Do not resolve an
+        // arbitrary document-relative action against a guessed page location.
+        (action.starts_with('/') || action.starts_with("https://"))
+            && Url::parse(ORIGIN)
+                .and_then(|base| base.join(action))
+                .is_ok_and(|url| checkpoint_route(&url, "/checkpoint/validate"))
+            && form.select(&checkbox).next().is_some()
+    })
+}
+
 // Fixed shape labels only. Never retain page contents, CSRF values or order data.
 pub(crate) fn orders_shape(page: &str) -> &'static str {
-    if page.contains("captchacharacters") || page.contains("/errors/validateCaptcha") {
+    if page.contains("captchacharacters")
+        || page.contains("/errors/validateCaptcha")
+        || checkpoint_form(page)
+    {
         "challenge"
     } else if page.contains("ab-your-orders-anticsrf-token") && page.contains("yourOrdersStateData")
     {
@@ -237,6 +278,7 @@ fn identity_part(value: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'))
 }
 
+#[derive(Clone)]
 struct ParcelIdentity {
     order: String,
     shipment: String,
@@ -260,6 +302,23 @@ impl ParcelIdentity {
                 .as_ref()
                 .zip(other.index.as_ref())
                 .is_some_and(|(a, b)| a != b)
+    }
+
+    fn conflicts_with(&self, other: &Self) -> bool {
+        let shared_id = self
+            .package
+            .as_ref()
+            .zip(other.package.as_ref())
+            .is_some_and(|(a, b)| a == b);
+        let shared_index = self
+            .index
+            .as_ref()
+            .zip(other.index.as_ref())
+            .is_some_and(|(a, b)| a == b);
+        self.order == other.order
+            && self.shipment == other.shipment
+            && (shared_id || shared_index)
+            && !self.compatible_with(other)
     }
 }
 
@@ -549,8 +608,10 @@ pub(crate) fn order_tracking_pages(page: &str, order: &str) -> Result<Vec<Parcel
     if !identity_part(order) {
         return Err(provider_error(ErrorKind::InvalidResponse));
     }
+    let html = Html::parse_document(page);
     let mut parcels = BTreeMap::new();
-    for node in Html::parse_document(page).select(&selector("a[href]")?) {
+    let mut identities = Vec::<ParcelIdentity>::new();
+    for node in html.select(&selector("a[href]")?) {
         let Some(path) = node
             .value()
             .attr("href")
@@ -567,23 +628,123 @@ pub(crate) fn order_tracking_pages(page: &str, order: &str) -> Result<Vec<Parcel
         }
         let Some(package) = identity
             .package
+            .clone()
             .map(PackageSlot::Id)
-            .or_else(|| identity.index.map(PackageSlot::Index))
+            .or_else(|| identity.index.clone().map(PackageSlot::Index))
         else {
             continue;
         };
-        parcels.entry(path.clone()).or_insert_with(|| ParcelPage {
-            order: identity.order,
-            shipment: identity.shipment,
-            package,
-            path,
-            titles: Vec::new(),
-        });
+        if let Entry::Vacant(entry) = parcels.entry(path.clone()) {
+            // A shared explicit ID or index identifies one slot within its
+            // shipment. Contradictory evidence cannot be resolved by URL order.
+            if identities
+                .iter()
+                .any(|previous| identity.conflicts_with(previous))
+            {
+                return Err(provider_error(ErrorKind::InvalidResponse));
+            }
+            identities.push(identity.clone());
+            entry.insert(ParcelPage {
+                order: identity.order,
+                shipment: identity.shipment,
+                package,
+                path,
+                titles: Vec::new(),
+            });
+        }
         if parcels.len() > 20 {
             return Err(provider_error(ErrorKind::ResponseTooLarge));
         }
     }
+    bind_shipment_titles(&html, &mut parcels)?;
     Ok(parcels.into_values().collect())
+}
+
+fn bind_shipment_titles(
+    html: &Html,
+    parcels: &mut BTreeMap<String, ParcelPage>,
+) -> Result<(), Error> {
+    // The grid row is the attested package boundary. Names elsewhere in the
+    // order, including unshipped rows, cannot label its tracking candidates.
+    let rows =
+        selector(r#"[data-component="shipments"] > .a-box-group .a-fixed-right-grid-inner"#)?;
+    let left_grid = selector(r#"[data-component="shipmentsLeftGrid"]"#)?;
+    let right_grid = selector(r#"[data-component="shipmentsRightGrid"]"#)?;
+    let connections = selector(r#"[data-component="shipmentConnections"] a[href]"#)?;
+    let product_titles =
+        selector(r#"[data-component="purchasedItems"] [data-component="itemTitle"] a"#)?;
+    let mut bindings = BTreeMap::<(String, String, PackageSlot), Option<Vec<String>>>::new();
+    for row in html.select(&rows) {
+        let left: Vec<_> = row.select(&left_grid).collect();
+        let right: Vec<_> = row.select(&right_grid).collect();
+        let ([left], [right]) = (left.as_slice(), right.as_slice()) else {
+            continue;
+        };
+        let mut packages = BTreeSet::new();
+        let mut unbound = false;
+        for anchor in right.select(&connections) {
+            let Some(path) = anchor
+                .value()
+                .attr("href")
+                .and_then(|href| allowed_path(href).ok())
+                .filter(|path| is_tracking(path))
+            else {
+                continue;
+            };
+            let Some(parcel) = parcels.get(&path) else {
+                unbound = true;
+                break;
+            };
+            packages.insert((
+                parcel.order.clone(),
+                parcel.shipment.clone(),
+                parcel.package.clone(),
+            ));
+        }
+        if unbound || packages.len() != 1 {
+            continue;
+        }
+        let Some(package) = packages.into_iter().next() else {
+            continue;
+        };
+        let mut titles = Vec::new();
+        for anchor in left.select(&product_titles) {
+            let title = anchor
+                .text()
+                .flat_map(str::split_whitespace)
+                .collect::<Vec<_>>()
+                .join(" ");
+            if !title.is_empty() && !title.chars().any(char::is_control) && !titles.contains(&title)
+            {
+                titles.push(title);
+            }
+        }
+        if titles.is_empty() {
+            continue;
+        }
+        match bindings.entry(package) {
+            Entry::Vacant(entry) => {
+                entry.insert(Some(titles));
+            }
+            // Duplicate presentation may agree; differing row contents cannot
+            // be resolved by choosing whichever row appeared first.
+            Entry::Occupied(mut entry) if entry.get().as_ref() != Some(&titles) => {
+                entry.insert(None);
+            }
+            Entry::Occupied(_) => {}
+        }
+    }
+    for parcel in parcels.values_mut() {
+        let key = (
+            parcel.order.clone(),
+            parcel.shipment.clone(),
+            parcel.package.clone(),
+        );
+        if let Some(Some(titles)) = bindings.get(&key) {
+            parcel.titles.clone_from(titles);
+        }
+    }
+    Ok(())
 }
 
 pub(crate) fn order_details_failure_shape(page: &str, expected_order: &str) -> &'static str {
@@ -712,12 +873,17 @@ fn page_state_blocks(html: &Html) -> Result<Vec<String>, Error> {
 
 fn header_carriers(html: &Html) -> Result<Vec<Carrier>, Error> {
     let mut carriers = Vec::new();
-    for header in html.select(&selector("h2, h3")?) {
-        let text = header.text().collect::<Vec<_>>().join(" ");
-        let text = text.trim();
+    for header in html.select(&selector("h1, h2, h3, h4, h5, h6, [role=heading]")?) {
+        let text = header
+            .text()
+            .flat_map(str::split_whitespace)
+            .collect::<Vec<_>>()
+            .join(" ")
+            .to_ascii_uppercase();
         if let Some(carrier) = text
-            .strip_prefix("Delivery By ")
-            .or_else(|| text.strip_prefix("Delivery facilitated by "))
+            .strip_prefix("DELIVERY BY ")
+            .or_else(|| text.strip_prefix("DELIVERY FACILITATED BY "))
+            .or_else(|| text.strip_prefix("SHIPPED WITH "))
             .and_then(carrier)
             && !carriers.contains(&carrier)
         {
@@ -1691,6 +1857,32 @@ mod tests {
     }
 
     #[test]
+    fn checkpoint_forms_require_same_origin_validation_and_a_checkbox() {
+        for action in [
+            "/checkpoint/validate",
+            "https://www.amazon.com/checkpoint/validate",
+        ] {
+            let page = format!(
+                r#"<form action="{action}"><input type="hidden" name="opaque" value="PRIVATE_CHECKPOINT_FIELD"><label><input type="checkbox" name="human">Check the box to continue. I am human.</label></form>"#
+            );
+            assert_eq!(pages::orders_shape(&page), "challenge");
+            assert_eq!(
+                pages::order_details_failure_shape(&page, "111-1234567-1234567"),
+                "challenge"
+            );
+        }
+        for page in [
+            r#"<form action="https://evil.example/checkpoint/validate"><input type="checkbox"></form>"#,
+            r#"<form action="http://www.amazon.com/checkpoint/validate"><input type="checkbox"></form>"#,
+            r#"<form action="/checkpoint/not-validation"><input type="checkbox"></form>"#,
+            r#"<form action="/checkpoint/validate"><input type="hidden" value="PRIVATE_CHECKPOINT_FIELD"></form>"#,
+            r#"<p>Service unavailable. /checkpoint/validate Check the box to continue.</p>"#,
+        ] {
+            assert_ne!(pages::orders_shape(page), "challenge");
+        }
+    }
+
+    #[test]
     fn positive_known_page_shapes_are_not_guessed_from_error_words() {
         for (html, expected) in [
             ("<input id=captchacharacters>", "challenge"),
@@ -1803,6 +1995,57 @@ mod tests {
     }
 
     #[test]
+    fn semantic_shipping_headings_verify_explicit_carriers_without_carrier_code() {
+        for (heading, number, expected) in [
+            (
+                "<h1>Delivery\n by   Amazon</h1>",
+                "TBA000000000020",
+                Carrier::AmazonAccount,
+            ),
+            (
+                "<h4>Shipped with <span>Amazon</span></h4>",
+                "TBA000000000020",
+                Carrier::AmazonAccount,
+            ),
+            (
+                "<div role=heading>delivery facilitated BY USPS</div>",
+                "9400111122223333444455",
+                Carrier::Usps,
+            ),
+            (
+                "<h6>shipped WITH FedEx</h6>",
+                "781234567890",
+                Carrier::FedExDefault,
+            ),
+        ] {
+            let html = page(number).replace("<h3>Delivery By USPS</h3>", heading);
+            let tracker = pages::tracking(&html, PATH, Some(number)).unwrap();
+            assert_eq!(tracker.carrier, expected);
+            assert_eq!(tracker.tracking_code, number);
+            assert_eq!(tracker.status, Status::InTransit);
+        }
+    }
+
+    #[test]
+    fn shipping_headings_do_not_guess_carriers_or_override_conflicting_evidence() {
+        for heading in [
+            "<h1>Shipped with Unknown carrier</h1>",
+            "<p>Shipped with Amazon</p>",
+            "<h4>Shipped with Amazon</h4><h6>Delivery by USPS</h6>",
+        ] {
+            let html = page("TBA000000000020").replace("<h3>Delivery By USPS</h3>", heading);
+            assert!(pages::tracking(&html, PATH, None).is_err());
+        }
+        let conflict = page("9400111122223333444455")
+            .replace("<h3>Delivery By USPS</h3>", "<h4>Shipped with Amazon</h4>")
+            .replace(
+                "\"trackingId\":",
+                "\"carrierCode\":\"USPS\",\"trackingId\":",
+            );
+        assert!(pages::tracking(&conflict, PATH, None).is_err());
+    }
+
+    #[test]
     fn facilitated_delivery_headers_must_agree_with_other_carrier_evidence() {
         for html in [
             page("9400111122223333444455")
@@ -1886,6 +2129,118 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn canonical_shipment_titles_stay_inside_one_uniquely_bound_grid_row() {
+        let order = "111-1234567-1234567";
+        let path = |shipment: &str, index: u8| {
+            format!(
+                "/progress-tracker/package?orderId={order}&shipmentId={shipment}&packageIndex={index}"
+            )
+        };
+        let first = path("SHIP1", 0);
+        let sibling = path("SHIP2", 0);
+        let unknown = path("SHIP3", 0);
+        let multiple_left = path("SHIP4", 0);
+        let shared_first = path("SHIP5", 0);
+        let shared_second = path("SHIP5", 1);
+        let html = format!(
+            r#"
+            <div data-component="itemTitle"><a>Whole-order title trap</a></div>
+            <a href="{unknown}">Unstructured package</a>
+            <div data-component="shipments"><div class="a-box-group">
+              <div class="a-fixed-right-grid-inner">
+                <div data-component="shipmentsLeftGrid"><div data-component="purchasedItems">
+                  <div data-component="itemTitle"><a>Adapter &amp; Cable</a></div>
+                  <div data-component="itemTitle"><a>Spare bracket</a></div>
+                </div></div>
+                <div data-component="shipmentsRightGrid"><div data-component="shipmentConnections">
+                  <a href="{first}">Track</a><a href="{first}&lineItemId=ITEM2">Same package</a>
+                </div></div>
+              </div>
+              <div class="a-fixed-right-grid-inner">
+                <div data-component="shipmentsLeftGrid"><div data-component="purchasedItems"><div data-component="itemTitle"><a>Sibling lamp</a></div></div></div>
+                <div data-component="shipmentsRightGrid"><div data-component="shipmentConnections"><a href="{sibling}">Track</a></div></div>
+              </div>
+              <div class="a-fixed-right-grid-inner">
+                <div data-component="shipmentsLeftGrid"><div data-component="purchasedItems"><div data-component="itemTitle"><a>Unshipped monitor</a></div></div></div>
+                <div data-component="shipmentsRightGrid">Not shipped</div>
+              </div>
+              <div class="a-fixed-right-grid-inner">
+                <div data-component="shipmentsLeftGrid"><div data-component="purchasedItems"><div data-component="itemTitle"><a>Ambiguous first item</a></div></div></div>
+                <div data-component="shipmentsLeftGrid"><div data-component="purchasedItems"><div data-component="itemTitle"><a>Ambiguous second item</a></div></div></div>
+                <div data-component="shipmentsRightGrid"><div data-component="shipmentConnections"><a href="{multiple_left}">Track</a></div></div>
+              </div>
+              <div class="a-fixed-right-grid-inner">
+                <div data-component="shipmentsLeftGrid"><div data-component="purchasedItems"><div data-component="itemTitle"><a>Do not copy onto two boxes</a></div></div></div>
+                <div data-component="shipmentsRightGrid"><div data-component="shipmentConnections"><a href="{shared_first}">Track</a><a href="{shared_second}">Track another</a></div></div>
+              </div>
+            </div></div>"#
+        );
+        let parcels = pages::order_tracking_pages(&html, order).unwrap();
+        let titles = |path: &str| {
+            &parcels
+                .iter()
+                .find(|parcel| parcel.path == path)
+                .unwrap()
+                .titles
+        };
+        assert_eq!(titles(&first), &["Adapter & Cable", "Spare bracket"]);
+        assert_eq!(titles(&format!("{first}&lineItemId=ITEM2")), titles(&first));
+        assert_eq!(titles(&sibling), &["Sibling lamp"]);
+        for path in [unknown, multiple_left, shared_first, shared_second] {
+            assert!(titles(&path).is_empty());
+        }
+    }
+
+    #[test]
+    fn canonical_shipment_titles_do_not_choose_between_conflicting_rows() {
+        let order = "111-1234567-1234567";
+        let path =
+            format!("/progress-tracker/package?orderId={order}&shipmentId=SHIP1&packageIndex=0");
+        let rows: String = ["First row product", "Conflicting row product"].iter().map(|name| format!(r#"<div class="a-fixed-right-grid-inner"><div data-component="shipmentsLeftGrid"><div data-component="purchasedItems"><div data-component="itemTitle"><a>{name}</a></div></div></div><div data-component="shipmentsRightGrid"><div data-component="shipmentConnections"><a href="{path}">Track</a></div></div></div>"#)).collect();
+        let html = format!(
+            r#"<div data-component="shipments"><div class="a-box-group">{rows}</div></div>"#
+        );
+        let parcels = pages::order_tracking_pages(&html, order).unwrap();
+        assert_eq!(parcels.len(), 1);
+        assert!(parcels[0].titles.is_empty());
+    }
+
+    #[test]
+    fn canonical_identity_sets_reject_conflicts_but_preserve_consistent_variants() {
+        let order = "111-1234567-1234567";
+        let first = format!(
+            "/progress-tracker/package?orderId={order}&shipmentId=SHIP1&packageId=BOX1&packageIndex=0"
+        );
+        for second in [
+            first.replace("packageIndex=0", "packageIndex=1"),
+            first.replace("packageId=BOX1", "packageId=BOX2"),
+        ] {
+            let html =
+                format!(r#"<a href="{first}">Track</a><a href="{second}">Conflicting package</a>"#);
+            assert!(
+                pages::order_tracking_pages(&html, order).is_err(),
+                "contradictory canonical package identities must not pick one URL"
+            );
+        }
+        for second in [
+            format!("{first}&lineItemId=ITEM2"),
+            first.replace(
+                "packageId=BOX1&packageIndex=0",
+                "packageId=BOX2&packageIndex=1",
+            ),
+            first.replace(
+                "shipmentId=SHIP1&packageId=BOX1",
+                "shipmentId=SHIP2&packageId=BOX2",
+            ),
+            first.replace("&packageId=BOX1", ""),
+        ] {
+            let html =
+                format!(r#"<a href="{first}">Track</a><a href="{second}">Consistent variant</a>"#);
+            assert_eq!(pages::order_tracking_pages(&html, order).unwrap().len(), 2);
+        }
     }
 
     #[test]

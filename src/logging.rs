@@ -26,6 +26,8 @@ struct JsonLog<W> {
 
 #[derive(Default, Serialize)]
 struct Fields {
+    #[serde(skip)]
+    discovery_batch: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     provider: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -55,6 +57,8 @@ struct Fields {
     #[serde(skip_serializing_if = "Option::is_none")]
     page_fingerprint: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    order_fingerprint: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     provider_error_code: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     provider_request_id: Option<Uuid>,
@@ -64,6 +68,18 @@ struct Fields {
     duration_ms: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     verified_parcels: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    committed_parcels: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    deferred_store: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    listing_pages: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    complete: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    has_more: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    next_delay_seconds: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     deferred_link: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -96,7 +112,10 @@ impl<W: Write + Send> Drain for JsonLog<W> {
         let Some(event) = record.msg().as_str().and_then(event_name) else {
             return Ok(());
         };
-        let mut fields = Fields::default();
+        let mut fields = Fields {
+            discovery_batch: event == "amazon_discovery_batch",
+            ..Default::default()
+        };
         let _ = values.serialize(record, &mut fields);
         let _ = record.kv().serialize(record, &mut fields);
         if event == "request_completed" {
@@ -160,6 +179,7 @@ fn event_name(message: &str) -> Option<&'static str> {
         "provider_request" => "provider_request",
         "amazon_connection" => "amazon_connection",
         "amazon_preview" => "amazon_preview",
+        "amazon_discovery_batch" => "amazon_discovery_batch",
         "tracking_verification" => "tracking_verification",
         "tracking_registration" => "tracking_registration",
         "tracking_sync" => "tracking_sync",
@@ -172,6 +192,9 @@ impl slog::Serializer for Fields {
     fn emit_arguments(&mut self, key: slog::Key, value: &fmt::Arguments<'_>) -> slog::Result {
         // Check the key before formatting it: ignored values can contain
         // secrets, addresses, body fragments, or provider error responses.
+        // Batch deferrals accumulate across up to 101 listing pages; previews
+        // retain their existing bounded-counter logging limit.
+        let deferred_limit = if self.discovery_batch { 50_500 } else { 500 };
         match key.as_str() {
             "provider" => {
                 self.provider = allowed(
@@ -191,21 +214,43 @@ impl slog::Serializer for Fields {
             "response_code" => self.response_code = http_status(&value.to_string()),
             "provider_status" => self.provider_status = http_status(&value.to_string()),
             "verified_parcels" => self.verified_parcels = bounded_number(&value.to_string(), 500),
-            "deferred_link" => self.deferred_link = bounded_number(&value.to_string(), 500),
-            "deferred_identity" => self.deferred_identity = bounded_number(&value.to_string(), 500),
-            "deferred_product" => self.deferred_product = bounded_number(&value.to_string(), 500),
-            "deferred_tracking" => self.deferred_tracking = bounded_number(&value.to_string(), 500),
-            "deferred_limit" => self.deferred_limit = bounded_number(&value.to_string(), 500),
+            "committed_parcels" => self.committed_parcels = bounded_number(&value.to_string(), 500),
+            "deferred_store" => self.deferred_store = bounded_number(&value.to_string(), 500),
+            "listing_pages" => self.listing_pages = bounded_number(&value.to_string(), 101),
+            "complete" => self.complete = value.to_string().parse().ok(),
+            "has_more" => self.has_more = value.to_string().parse().ok(),
+            "next_delay_seconds" => {
+                self.next_delay_seconds = bounded_number(&value.to_string(), 31_536_000)
+            }
+            "deferred_link" => {
+                self.deferred_link = bounded_number(&value.to_string(), deferred_limit)
+            }
+            "deferred_identity" => {
+                self.deferred_identity = bounded_number(&value.to_string(), deferred_limit)
+            }
+            "deferred_product" => {
+                self.deferred_product = bounded_number(&value.to_string(), deferred_limit)
+            }
+            "deferred_tracking" => {
+                self.deferred_tracking = bounded_number(&value.to_string(), deferred_limit)
+            }
+            "deferred_limit" => {
+                self.deferred_limit = bounded_number(&value.to_string(), deferred_limit)
+            }
             "page_kind" => {
                 self.page_kind = allowed(
                     &value.to_string(),
                     &["orders_listing", "item_details", "tracking_page"],
                 )
             }
-            "page_fingerprint" => {
+            "page_fingerprint" | "order_fingerprint" => {
                 let value = value.to_string();
                 if value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-                    self.page_fingerprint = Some(value);
+                    if key.as_str() == "page_fingerprint" {
+                        self.page_fingerprint = Some(value);
+                    } else {
+                        self.order_fingerprint = Some(value);
+                    }
                 }
             }
             "response_shape" => {
