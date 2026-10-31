@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { carrierTrackingUrl, providerTrackingUrl, trackingLinks } from "../web/parcel-links.js";
+import { carrierLabel, carrierTrackingUrl, providerTrackingUrl, trackingLinks } from "../web/parcel-links.js";
 
 const number = "SYNTHETIC123";
 const shipment = (carrier, provider = "aftership", tracking_url = null) => ({
@@ -14,16 +14,29 @@ test("Amazon MCF has official carrier tracking even without an AfterShip public 
   ]);
 });
 
-test("Amazon Account carrier uses its recipient fallback without relabeling MCF", () => {
+test("Amazon Account carrier uses its recipient fallback", () => {
   for (const number of ["TBA_SYNTHETIC123", "tba_synthetic123"]) {
     const links = trackingLinks({ tracking: { carrier: "AmazonAccount", number }, sync: { provider: "amazon_account" } });
     assert.deepEqual(links.map(([label, url]) => [label, url.href]), [
       ["Carrier tracking", `https://track.amazon.com/tracking/${number}`],
     ]);
-    assert.equal(carrierTrackingUrl({ carrier: "AmazonMcf", number }).href,
-      `https://www.swiship.com/track?id=${number}`);
   }
   assert.equal(carrierTrackingUrl({ carrier: "AmazonAccount", number }), null);
+});
+
+test("TBA-prefixed Amazon MCF keeps its public delivery link and AfterShip ownership", () => {
+  const providerUrl = "https://www.aftership.com/track/synthetic";
+  for (const number of ["TBA_SYNTHETIC123", "tba_synthetic123"]) {
+    const value = shipment("AmazonMcf", "aftership", providerUrl);
+    value.tracking.number = number;
+    assert.deepEqual(trackingLinks(value).map(([label, url]) => [label, url.href]), [
+      ["Carrier tracking", `https://track.amazon.com/tracking/${number}`],
+      ["AfterShip tracking", providerUrl],
+    ]);
+    assert.equal(value.tracking.carrier, "AmazonMcf");
+    assert.equal(value.sync.provider, "aftership");
+    assert.equal(carrierLabel(value.tracking.carrier), "Amazon MCF");
+  }
 });
 
 test("carrier labels distinguish Amazon Account from genuine MCF in all presentation contexts", async () => {

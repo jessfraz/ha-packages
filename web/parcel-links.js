@@ -56,10 +56,10 @@ export function carrierTrackingUrl(tracking) {
   if (carrier === "doordash") return recipientTrackingUrl(tracking.recipient_url);
   const number = tracking?.number;
   if (typeof number !== "string" || !number.trim() || [".", ".."].includes(number) || number.length > 256 || /[\u0000-\u001f\u007f]/.test(number)) return null;
-  // Account parcels may fall back to Amazon's public recipient tracker. MCF
-  // remains a separate carrier and must not be inferred from a number prefix.
   if (carrier === "amazonaccount" && !/^TBA/i.test(number)) return null;
-  const template = carrierTemplates.get(carrier);
+  // TBA deliveries also serve third-party MCF merchants. Select their public
+  // recipient route without changing the MCF carrier or tracking provider.
+  const template = carrierTemplates.get(carrier === "amazonmcf" && /^TBA/i.test(number) ? "amazonshipping" : carrier);
   if (!template) return null;
   const url = new URL(template.base);
   try {
