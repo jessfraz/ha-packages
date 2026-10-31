@@ -1,5 +1,8 @@
 ## 0.6.26
 
+- Discover independently identified packages from full order details when an
+  item-pop page has no tracking link. Keep item-specific labels only when their
+  package association is verified.
 - Read explicit carrier labels across semantic shipping headings, independent
   of heading level, capitalization and whitespace. Preserve carrier-conflict
   rejection and package identity checks.
