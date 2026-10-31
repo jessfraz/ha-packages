@@ -1541,7 +1541,7 @@
   "info": {
     "description": "Persistent local shipment records, manual corrections, and carrier synchronization. Use a Bearer owner or ingestion token. Creates require Idempotency-Key; writes to an existing shipment require its quoted revision in If-Match.",
     "title": "Shipments API",
-    "version": "0.6.19"
+    "version": "0.6.20"
   },
   "openapi": "3.0.3",
   "paths": {
@@ -2595,6 +2595,53 @@
         },
         "tags": [
           "shipments"
+        ]
+      }
+    },
+    "/v1/shipments/{id}/amazon": {
+      "post": {
+        "operationId": "shipment_use_amazon",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Shipment_for_Tracking_for_Carrier"
+                }
+              }
+            },
+            "description": "successful operation",
+            "headers": {
+              "etag": {
+                "required": true,
+                "schema": {
+                  "type": "string"
+                },
+                "style": "simple"
+              }
+            }
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Verify and adopt one existing Amazon shipment without enabling new imports.",
+        "tags": [
+          "amazon"
         ]
       }
     },

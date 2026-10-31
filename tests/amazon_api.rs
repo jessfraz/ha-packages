@@ -29,6 +29,36 @@ struct SignIn {
     url: String,
 }
 
+fn saved_account(path: &std::path::Path) {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    #[derive(serde::Serialize)]
+    struct SavedAccount {
+        refresh_token: &'static str,
+        device_serial: &'static str,
+        customer_id: &'static str,
+        generation: u64,
+        imports_enabled: bool,
+    }
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)
+        .unwrap();
+    serde_json::to_writer(
+        file,
+        &SavedAccount {
+            refresh_token: "SYNTHETIC_REFRESH",
+            device_serial: "SYNTHETIC_SERIAL",
+            customer_id: "SYNTHETIC_CUSTOMER",
+            generation: 1,
+            imports_enabled: false,
+        },
+    )
+    .unwrap();
+}
+
 #[tokio::test]
 async fn account_management_requires_owner_and_keeps_one_time_data_out_of_health_and_logs() {
     let directory = tempfile::tempdir().unwrap();
@@ -59,6 +89,10 @@ async fn account_management_requires_owner_and_keeps_one_time_data_out_of_health
         (Method::POST, "/v1/amazon/preview"),
         (Method::POST, "/v1/amazon/enable"),
         (Method::POST, "/v1/amazon/refresh"),
+        (
+            Method::POST,
+            "/v1/shipments/01930000-0000-7000-8000-000000000001/amazon",
+        ),
         (Method::DELETE, "/v1/amazon"),
     ];
     for (method, path) in paths {
@@ -224,6 +258,295 @@ async fn account_management_requires_owner_and_keeps_one_time_data_out_of_health
         );
     }
     assert!(!directory.path().join("amazon.json").exists());
+}
+
+#[tokio::test]
+async fn existing_amazon_adoption_checks_review_and_eligibility_before_upstream() {
+    use shipments::{
+        carrier::Carrier,
+        models::{CarrierTracking, CreateShipment, Direction, InputTracking, Status},
+        shipping_api::types::{ProviderId, Tracker},
+    };
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::io::AsyncWriteExt;
+
+    let directory = tempfile::tempdir().unwrap();
+    let credential_path = directory.path().join("amazon.json");
+    saved_account(&credential_path);
+    let credential_before = std::fs::read(&credential_path).unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint =
+        reqwest::Url::parse(&format!("http://{}/", listener.local_addr().unwrap())).unwrap();
+    let upstream_calls = Arc::new(AtomicUsize::new(0));
+    let calls = upstream_calls.clone();
+    let upstream = tokio::spawn(async move {
+        loop {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            calls.fetch_add(1, Ordering::SeqCst);
+            stream
+                .write_all(
+                    b"HTTP/1.1 503 fixture\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                )
+                .await
+                .unwrap();
+        }
+    });
+    let amazon = Arc::new(AmazonClient::for_test(credential_path.clone(), endpoint).unwrap());
+    let store = Store::open(&directory.path().join("registry.sqlite3"))
+        .await
+        .unwrap();
+    let mut records = Vec::new();
+    for (carrier, number) in [
+        (Carrier::AmazonMcf, "TBA000000000031"),
+        (Carrier::Ups, "1Z000000000000032"),
+    ] {
+        let verified = Tracker {
+            provider: ProviderId::for_carrier(Some(carrier)),
+            id: "synthetic-original-tracker".into(),
+            tracking_code: number.into(),
+            carrier,
+            status: Status::Unknown,
+            public_url: None,
+            carrier_tracking: CarrierTracking::default(),
+        };
+        records.push(
+            store
+                .create(
+                    CreateShipment {
+                        title: "Owner's existing shipment".into(),
+                        direction: Direction::Inbound,
+                        merchant: Some("Amazon".into()),
+                        order_reference: Some("111-0000000-0000001".into()),
+                        signature_required: None,
+                        tracking: InputTracking {
+                            carrier: Some(carrier),
+                            number: number.into(),
+                            recipient_url: None,
+                        },
+                        source: None,
+                    },
+                    "owner",
+                    number,
+                    Some(&verified),
+                )
+                .await
+                .unwrap(),
+        );
+    }
+    let server = api::start(
+        "127.0.0.1:0".parse().unwrap(),
+        Arc::new(api::Context::new(store.clone(), OWNER, None, None).with_amazon(amazon.clone())),
+    )
+    .unwrap();
+    let base = format!("http://{}", server.local_addr());
+    let client = Client::new();
+    for (record, revision, status) in [
+        (&records[0], None, StatusCode::PRECONDITION_REQUIRED),
+        (
+            &records[0],
+            Some(records[0].revision + 1),
+            StatusCode::PRECONDITION_FAILED,
+        ),
+        (&records[1], Some(records[1].revision), StatusCode::CONFLICT),
+    ] {
+        let mut request = client
+            .post(format!("{base}/v1/shipments/{}/amazon", record.id))
+            .bearer_auth(OWNER);
+        if let Some(revision) = revision {
+            request = request.header("If-Match", format!("\"{revision}\""));
+        }
+        assert_eq!(request.send().await.unwrap().status(), status);
+        assert_eq!(
+            serde_json::to_string(&store.get(record.id).await.unwrap()).unwrap(),
+            serde_json::to_string(record).unwrap()
+        );
+    }
+    assert_eq!(upstream_calls.load(Ordering::SeqCst), 0);
+    assert!(!amazon.status().await.imports_enabled);
+    assert_eq!(std::fs::read(&credential_path).unwrap(), credential_before);
+    let mappings: i64 = sqlx::query_scalar("SELECT count(*) FROM amazon_parcels")
+        .fetch_one(store.pool())
+        .await
+        .unwrap();
+    assert_eq!(mappings, 0);
+    upstream.abort();
+    server.close().await.unwrap();
+    store.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn existing_amazon_adoption_verifies_upstream_and_commits_the_same_record() {
+    use shipments::{
+        carrier::Carrier,
+        models::{
+            CarrierEvent, CarrierTracking, CreateShipment, Direction, InputTracking, Shipment,
+            Source, Status,
+        },
+        shipping_api::types::{ProviderId, Tracker},
+    };
+    use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+
+    const NUMBER: &str = "TBA000000000041";
+    const ORDER: &str = "111-1234567-1234567";
+    const DETAILS: &str = "/your-orders/order-details?orderID=111-1234567-1234567";
+    const TRACK: &str =
+        "/progress-tracker/package?orderId=111-1234567-1234567&shipmentId=SHIP1&packageIndex=0";
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint =
+        reqwest::Url::parse(&format!("http://{}/", listener.local_addr().unwrap())).unwrap();
+    let upstream = tokio::spawn(async move {
+        let mut paths = Vec::new();
+        for _ in 0..4 {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let path = {
+                let mut reader = BufReader::new(&mut stream);
+                let mut line = String::new();
+                reader.read_line(&mut line).await.unwrap();
+                let path = line.split_whitespace().nth(1).unwrap().to_owned();
+                let mut length = 0;
+                loop {
+                    line.clear();
+                    assert!(reader.read_line(&mut line).await.unwrap() > 0);
+                    if line == "\r\n" {
+                        break;
+                    }
+                    if let Some((name, value)) = line.split_once(':')
+                        && name.eq_ignore_ascii_case("content-length")
+                    {
+                        length = value.trim().parse::<usize>().unwrap();
+                    }
+                }
+                assert!(length < 16 * 1024);
+                reader.read_exact(&mut vec![0; length]).await.unwrap();
+                path
+            };
+            let body = match path.as_str() {
+                "/auth/token" => r#"{"access_token":"SYNTHETIC_ACCESS"}"#.to_owned(),
+                "/ap/exchangetoken/cookies" => r#"{"response":{"tokens":{"cookies":{".amazon.com":[{"Name":"session-id","Value":"SYNTHETIC_COOKIE","Path":"/"}]}}}}"#.to_owned(),
+                DETAILS => format!(r#"<a href="{TRACK}">Track package</a>"#),
+                TRACK => format!(r#"<h3>Delivery facilitated by Amazon</h3><script id="page-state">{{"trackingId":"{NUMBER}","orderId":"{ORDER}","shipmentId":"SHIP1","packageIndex":"0","shortStatus":"DELIVERED","progressTracker":{{"lastReachedMilestone":"DELIVERED"}}}}</script>"#),
+                other => panic!("Unexpected synthetic upstream path: {other}"),
+            };
+            let response = format!(
+                "HTTP/1.1 200 fixture\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            stream.write_all(response.as_bytes()).await.unwrap();
+            paths.push(path);
+        }
+        paths
+    });
+    let directory = tempfile::tempdir().unwrap();
+    let credential_path = directory.path().join("amazon.json");
+    saved_account(&credential_path);
+    let amazon = Arc::new(AmazonClient::for_test(credential_path, endpoint).unwrap());
+    let store = Store::open(&directory.path().join("registry.sqlite3"))
+        .await
+        .unwrap();
+    let previous = Tracker {
+        provider: ProviderId::AfterShip,
+        id: "synthetic-original-tracker".into(),
+        tracking_code: NUMBER.into(),
+        carrier: Carrier::AmazonMcf,
+        status: Status::Unknown,
+        public_url: None,
+        carrier_tracking: CarrierTracking {
+            events: vec![CarrierEvent {
+                status: Some(Status::InTransit),
+                datetime: Some("2026-10-01T12:00:00Z".into()),
+                message: Some("Existing provider scan".into()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        },
+    };
+    let before = store
+        .create(
+            CreateShipment {
+                title: "Owner's existing parcel title".into(),
+                direction: Direction::Inbound,
+                merchant: Some("Amazon".into()),
+                order_reference: Some(ORDER.into()),
+                signature_required: Some(true),
+                tracking: InputTracking {
+                    carrier: Some(Carrier::AmazonMcf),
+                    number: NUMBER.into(),
+                    recipient_url: None,
+                },
+                source: Some(Source {
+                    namespace: "fixture-mail".into(),
+                    key: "synthetic-source-message".into(),
+                }),
+            },
+            "owner",
+            NUMBER,
+            Some(&previous),
+        )
+        .await
+        .unwrap();
+    let before_events = store.events(before.id, 0, 100).await.unwrap();
+    let server = api::start_with_logger(
+        "127.0.0.1:0".parse().unwrap(),
+        Arc::new(api::Context::new(store.clone(), OWNER, None, None).with_amazon(amazon.clone())),
+        logging::with_writer(Capture::default()),
+    )
+    .unwrap();
+    let response = Client::new()
+        .post(format!(
+            "http://{}/v1/shipments/{}/amazon",
+            server.local_addr(),
+            before.id
+        ))
+        .bearer_auth(OWNER)
+        .header("If-Match", format!("\"{}\"", before.revision))
+        .send()
+        .await
+        .unwrap();
+    if response.status() != StatusCode::OK {
+        let status = response.status();
+        let error: dropshot::HttpErrorResponseBody = response.json().await.unwrap();
+        panic!("Unexpected adoption response {status}: {error:?}");
+    }
+    let etag = response.headers()["etag"].to_str().unwrap().to_owned();
+    let adopted: Shipment = response.json().await.unwrap();
+    assert_eq!(adopted.id, before.id);
+    assert_eq!(adopted.tracking, before.tracking);
+    assert_eq!(adopted.title, before.title);
+    assert_eq!(adopted.created_at, before.created_at);
+    assert!(adopted.revision > before.revision);
+    assert_eq!(etag, format!("\"{}\"", adopted.revision));
+    assert_eq!(adopted.sync.provider, ProviderId::AmazonAccount);
+    assert_eq!(adopted.status, Status::Delivered);
+    assert_eq!(adopted.carrier_tracking, before.carrier_tracking);
+    assert!(before.sources.iter().all(|s| adopted.sources.contains(s)));
+    assert!(
+        adopted
+            .sources
+            .iter()
+            .any(|s| s.namespace == "amazon-account")
+    );
+    let after_events = store.events(before.id, 0, 100).await.unwrap();
+    assert_eq!(after_events.len(), before_events.len() + 1);
+    assert_eq!(
+        serde_json::to_string(&after_events[..before_events.len()]).unwrap(),
+        serde_json::to_string(&before_events).unwrap()
+    );
+    assert_eq!(
+        serde_json::to_string(&store.get(before.id).await.unwrap()).unwrap(),
+        serde_json::to_string(&adopted).unwrap()
+    );
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM shipments")
+        .fetch_one(store.pool())
+        .await
+        .unwrap();
+    assert_eq!(count, 1);
+    assert!(!amazon.status().await.imports_enabled);
+    assert_eq!(
+        upstream.await.unwrap(),
+        ["/auth/token", "/ap/exchangetoken/cookies", DETAILS, TRACK]
+    );
+    server.close().await.unwrap();
+    store.close().await.unwrap();
 }
 
 #[tokio::test]

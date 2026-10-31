@@ -1,6 +1,6 @@
 [project]
 name = "shipments-home-assistant"
-version = "0.6.19"
+version = "0.6.20"
 description = "Home Assistant adapter for the Shipments service"
 requires-python = ">=3.14.2"
 license = "MIT"

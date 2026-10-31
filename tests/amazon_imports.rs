@@ -257,6 +257,253 @@ async fn confirmed_amazon_fleet_adoption_merges_history_and_retains_manual_overr
     assert_eq!(next, None);
 }
 
+async fn same_order(fixture: &Fixture, shipment: Shipment, parcel: &AmazonParcel) -> Shipment {
+    fixture
+        .store
+        .update(
+            shipment.id,
+            shipment.revision,
+            UpdateShipment {
+                order_reference: Patch {
+                    value: Some(Some(parcel.order_reference.clone())),
+                },
+                ..Default::default()
+            },
+            "owner",
+            None,
+        )
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn reviewed_adoption_preserves_the_existing_record_and_history_after_restart() {
+    let f = Fixture::new().await;
+    let original = f
+        .existing("TBA000000000021", Carrier::AmazonMcf, Direction::Inbound)
+        .await;
+    let p = parcel("1", &original.tracking.number, Carrier::AmazonMcf);
+    let original = same_order(&f, original, &p).await;
+    let before = f
+        .store
+        .set_override(
+            original.id,
+            original.revision,
+            Some(SetOverride {
+                status: Status::Delivered,
+                reason: "Owner confirmed delivery".into(),
+            }),
+            "owner",
+        )
+        .await
+        .unwrap();
+    let events = history(&f.store, &before).await;
+    let counts = f.counts().await;
+    let adopted = f
+        .store
+        .adopt_amazon(before.id, before.revision, &p)
+        .await
+        .unwrap();
+
+    assert_eq!(adopted.id, before.id);
+    assert_eq!(adopted.tracking, before.tracking);
+    assert_eq!(adopted.title, before.title);
+    assert_eq!(adopted.direction, before.direction);
+    assert_eq!(adopted.merchant, before.merchant);
+    assert_eq!(adopted.order_reference, before.order_reference);
+    assert_eq!(adopted.signature_required, before.signature_required);
+    assert_eq!(adopted.archived, before.archived);
+    assert_eq!(adopted.created_at, before.created_at);
+    assert_eq!(
+        serde_json::to_string(&adopted.status_override).unwrap(),
+        serde_json::to_string(&before.status_override).unwrap()
+    );
+    assert_eq!(adopted.status, Status::Delivered);
+    assert_eq!(adopted.carrier_status, Some(p.tracker.status));
+    assert_eq!(adopted.sync.provider, ProviderId::AmazonAccount);
+    assert_eq!(
+        adopted.sync.tracker_id.as_deref(),
+        Some(p.tracker.id.as_str())
+    );
+    assert!(
+        before
+            .sources
+            .iter()
+            .all(|source| adopted.sources.contains(source))
+    );
+    assert!(adopted.sources.contains(&Source {
+        namespace: "amazon-account".into(),
+        key: p.source_key.clone(),
+    }));
+    assert!(
+        before
+            .carrier_tracking
+            .events
+            .iter()
+            .all(|scan| adopted.carrier_tracking.events.contains(scan))
+    );
+    assert!(
+        p.tracker
+            .carrier_tracking
+            .events
+            .iter()
+            .all(|scan| adopted.carrier_tracking.events.contains(scan))
+    );
+    let after_events = history(&f.store, &adopted).await;
+    assert_history_prefix(&events, &after_events);
+    assert_eq!(after_events.len(), events.len() + 1);
+    assert_eq!(f.counts().await, (counts.0, counts.1 + 1, counts.2 + 1));
+
+    f.store.close().await.unwrap();
+    let reopened = Store::open(&f._directory.path().join("shipments.sqlite3"))
+        .await
+        .unwrap();
+    let durable = reopened.get(before.id).await.unwrap();
+    assert_eq!(
+        serde_json::to_string(&durable).unwrap(),
+        serde_json::to_string(&adopted).unwrap()
+    );
+    assert_history_prefix(&after_events, &history(&reopened, &durable).await);
+}
+
+#[tokio::test]
+async fn reviewed_adoption_cannot_create_a_record_or_retarget_another_tracking_number() {
+    let f = Fixture::new().await;
+    let original = f
+        .existing("TBA000000000022", Carrier::AmazonMcf, Direction::Inbound)
+        .await;
+    let p = parcel("1", &original.tracking.number, Carrier::AmazonMcf);
+    let before = same_order(&f, original, &p).await;
+    let other = f
+        .existing("TBA000000000023", Carrier::AmazonMcf, Direction::Inbound)
+        .await;
+    let counts = f.counts().await;
+    let before_json = serde_json::to_string(&before).unwrap();
+    let other_json = serde_json::to_string(&other).unwrap();
+    let mut nonexistent_tracking = parcel("2", "TBA000000000024", Carrier::AmazonMcf);
+    nonexistent_tracking.order_reference = before.order_reference.clone().unwrap();
+    for (id, revision, observation) in [
+        (uuid::Uuid::now_v7(), before.revision, &p),
+        (other.id, other.revision, &p),
+        (before.id, before.revision, &nonexistent_tracking),
+    ] {
+        assert!(
+            f.store
+                .adopt_amazon(id, revision, observation)
+                .await
+                .is_err()
+        );
+        assert_eq!(f.counts().await, counts);
+        assert_eq!(
+            serde_json::to_string(&f.store.get(before.id).await.unwrap()).unwrap(),
+            before_json
+        );
+        assert_eq!(
+            serde_json::to_string(&f.store.get(other.id).await.unwrap()).unwrap(),
+            other_json
+        );
+    }
+}
+
+#[tokio::test]
+async fn reviewed_adoption_rejects_stale_review_without_any_partial_link() {
+    let f = Fixture::new().await;
+    let original = f
+        .existing("TBA000000000025", Carrier::AmazonMcf, Direction::Inbound)
+        .await;
+    let p = parcel("1", &original.tracking.number, Carrier::AmazonMcf);
+    let reviewed = same_order(&f, original, &p).await;
+    let current = f
+        .store
+        .update(
+            reviewed.id,
+            reviewed.revision,
+            UpdateShipment {
+                title: Some("Owner edited this after review".into()),
+                ..Default::default()
+            },
+            "owner",
+            None,
+        )
+        .await
+        .unwrap();
+    let counts = f.counts().await;
+    assert!(matches!(
+        f.store
+            .adopt_amazon(reviewed.id, reviewed.revision, &p)
+            .await,
+        Err(Error::Precondition)
+    ));
+    assert_eq!(f.counts().await, counts);
+    assert_eq!(
+        serde_json::to_string(&f.store.get(current.id).await.unwrap()).unwrap(),
+        serde_json::to_string(&current).unwrap()
+    );
+}
+
+#[tokio::test]
+async fn reviewed_adoption_rejects_ineligible_existing_records_without_changes() {
+    enum Ineligible {
+        Outbound,
+        OtherCarrier,
+        Archived,
+        DifferentOrder,
+        AlreadyAmazon,
+    }
+    for reason in [
+        Ineligible::Outbound,
+        Ineligible::OtherCarrier,
+        Ineligible::Archived,
+        Ineligible::DifferentOrder,
+        Ineligible::AlreadyAmazon,
+    ] {
+        let f = Fixture::new().await;
+        let carrier = if matches!(reason, Ineligible::OtherCarrier) {
+            Carrier::Usps
+        } else {
+            Carrier::AmazonMcf
+        };
+        let number = if carrier == Carrier::Usps {
+            "9400000000000000000026"
+        } else {
+            "TBA000000000026"
+        };
+        let direction = if matches!(reason, Ineligible::Outbound) {
+            Direction::Outbound
+        } else {
+            Direction::Inbound
+        };
+        let original = f.existing(number, carrier, direction).await;
+        let p = parcel("1", number, carrier);
+        let mut before = if matches!(reason, Ineligible::DifferentOrder) {
+            original
+        } else {
+            same_order(&f, original, &p).await
+        };
+        if matches!(reason, Ineligible::Archived) {
+            before = f
+                .store
+                .archive(before.id, before.revision, true, "owner")
+                .await
+                .unwrap();
+        } else if matches!(reason, Ineligible::AlreadyAmazon) {
+            before = f.store.import_amazon(&p, None).await.unwrap();
+        }
+        let counts = f.counts().await;
+        assert!(
+            f.store
+                .adopt_amazon(before.id, before.revision, &p)
+                .await
+                .is_err()
+        );
+        assert_eq!(f.counts().await, counts);
+        assert_eq!(
+            serde_json::to_string(&f.store.get(before.id).await.unwrap()).unwrap(),
+            serde_json::to_string(&before).unwrap()
+        );
+    }
+}
+
 #[tokio::test]
 async fn split_packages_share_order_but_keep_distinct_items_numbers_and_sources() {
     let f = Fixture::new().await;

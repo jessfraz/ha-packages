@@ -688,6 +688,25 @@ impl Store {
         parcel: &crate::amazon::AmazonParcel,
         discovery_lease: Option<&str>,
     ) -> Result<Shipment, Error> {
+        self.store_amazon(parcel, discovery_lease, None).await
+    }
+
+    /// Owner-reviewed adoption cannot create a shipment or race a tracking edit.
+    pub async fn adopt_amazon(
+        &self,
+        id: Uuid,
+        revision: i64,
+        parcel: &crate::amazon::AmazonParcel,
+    ) -> Result<Shipment, Error> {
+        self.store_amazon(parcel, None, Some((id, revision))).await
+    }
+
+    async fn store_amazon(
+        &self,
+        parcel: &crate::amazon::AmazonParcel,
+        discovery_lease: Option<&str>,
+        expected: Option<(Uuid, i64)>,
+    ) -> Result<Shipment, Error> {
         if parcel.tracker.provider != ProviderId::AmazonAccount
             || parcel.tracker.status == Status::Unknown
         {
@@ -740,6 +759,13 @@ impl Store {
                 .bind(&input.tracking.number)
                 .fetch_optional(&mut *tx)
                 .await?;
+        if let Some((id, _)) = expected
+            && existing.as_deref() != Some(id.to_string().as_str())
+        {
+            return Err(Error::Conflict(
+                "Verified Amazon tracking does not match the selected shipment".into(),
+            ));
+        }
         if let Some((id, number)) = &mapped
             && (number != &input.tracking.number || existing.as_ref() != Some(id))
         {
@@ -750,6 +776,18 @@ impl Store {
         let shipment = if let Some(id) = existing {
             let id = parse_id(&id)?;
             let current = Self::get_in(&mut tx, id).await?;
+            if let Some((_, revision)) = expected {
+                Self::check_revision(&current, revision)?;
+                if current.archived
+                    || current.sync.provider != ProviderId::AfterShip
+                    || current.tracking.carrier != Carrier::AmazonMcf
+                    || current.order_reference.as_deref() != Some(&parcel.order_reference)
+                {
+                    return Err(Error::Conflict(
+                        "Select an active AfterShip Amazon shipment with its matching order".into(),
+                    ));
+                }
+            }
             if current.direction != Direction::Inbound
                 || current.tracking.carrier != parcel.tracker.carrier
             {
