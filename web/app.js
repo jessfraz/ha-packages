@@ -1191,6 +1191,9 @@ async function show(id, preserveView = false, section = route().get("section")) 
   button("Edit", () => openEditor(shipment));
   if (shipment.tracking && !shipment.archived)
     button("Refresh tracking", () => mutate("refresh", "POST"));
+  if (!shipment.archived && shipment.direction === "inbound" &&
+      shipment.tracking?.carrier === "AmazonMcf" && shipment.sync.provider === "aftership")
+    button("Use Amazon tracking", () => mutate("amazon", "POST"), true);
   if (shipment.status_override)
     button("Clear correction", () => mutate("status-override", "DELETE"), true);
   button(shipment.archived ? "Restore" : "Archive", () =>

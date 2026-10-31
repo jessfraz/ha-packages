@@ -115,6 +115,18 @@ async fn http_logs_correlate_failures_and_mutations_without_private_request_data
         ),
         (
             client
+                .post(format!(
+                    "{base}/v1/shipments/PATH_PRIVATE_SENTINEL/amazon?key=QUERY_PRIVATE_SENTINEL"
+                ))
+                .bearer_auth(OWNER)
+                .send()
+                .await
+                .unwrap(),
+            StatusCode::BAD_REQUEST,
+            "/v1/shipments/{id}/amazon",
+        ),
+        (
+            client
                 .get(format!(
                     "{base}/UNMATCHED_PRIVATE_SENTINEL?key=QUERY_PRIVATE_SENTINEL"
                 ))

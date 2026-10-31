@@ -297,6 +297,15 @@ transport when carrying bearer credentials beyond loopback.
 
 ## Amazon account management
 
+`POST /v1/shipments/{id}/amazon` switches one existing inbound AmazonMcf
+AfterShip record to verified Amazon-account tracking. It requires owner access
+and the record's current `If-Match` revision. Amazon must report that order's
+same carrier and tracking number. A mismatch, stale revision, archived record,
+or failed check leaves the record unchanged. The action preserves its ID,
+metadata, manual correction, sources, and history. It never creates a record
+or enables automatic imports. Linked records continue normal tracking while
+imports are off. The returned shipment includes its new `ETag`.
+
 All `/v1/amazon` management endpoints require the owner or an authenticated Home
 Assistant administrator. Agent and integration credentials cannot manage Amazon.
 Safe connection state is also included in the integration-readable `/v1/system`.

@@ -440,6 +440,7 @@ fn route_template(uri: &str) -> &'static str {
                         Some("status-override") => "/v1/shipments/{id}/status-override",
                         Some("archive") => "/v1/shipments/{id}/archive",
                         Some("refresh") => "/v1/shipments/{id}/refresh",
+                        Some("amazon") => "/v1/shipments/{id}/amazon",
                         Some("events") => "/v1/shipments/{id}/events",
                         _ => "unmatched",
                     }

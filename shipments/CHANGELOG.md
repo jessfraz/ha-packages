@@ -1,3 +1,13 @@
+## 0.6.20
+
+- Read current Amazon carrier headings and indexed parcel links. Validate the
+  package index reported by tracking pages without inventing package IDs.
+- Add **Use Amazon tracking** for existing AfterShip Amazon shipments. Verify
+  the selected order and exact number, then retain its ID, history, sources,
+  metadata, and corrections without creating or automatically importing orders.
+- Keep linked Amazon tracking active when automatic imports are off. Retain
+  account-generation fencing, request backoff, and verification pauses.
+
 ## 0.6.19
 
 - Reuse Amazon website sessions and serialize account checks. Apply longer

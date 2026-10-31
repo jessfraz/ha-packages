@@ -34,6 +34,7 @@ use uuid::Uuid;
 use crate::{
     amazon::connection::{ConnectionError, ConnectionReason, ConnectionStage},
     carrier::Carrier,
+    models::Tracking,
     shipping_api::{
         PreparedRegistration, ShippingApi,
         error::{Error, ErrorKind},
@@ -81,6 +82,11 @@ pub struct AmazonParcel {
     pub order_reference: String,
     pub source_key: String,
     pub tracker: Tracker,
+}
+
+pub struct VerifiedAmazonParcel {
+    pub generation: u64,
+    pub parcel: AmazonParcel,
 }
 #[derive(Clone, Debug, Default, Serialize, JsonSchema, PartialEq, Eq)]
 pub struct DeferredCounts {
@@ -214,7 +220,7 @@ impl AmazonClient {
         let generation = credential.as_ref().map_or(0, |value| value.generation);
         let paused = credential
             .as_ref()
-            .is_none_or(|c| c.auth_required || c.challenge_required || !c.imports_enabled);
+            .is_none_or(|c| c.auth_required || c.challenge_required);
         let http = Client::builder().connect_timeout(Duration::from_secs(10)).timeout(Duration::from_secs(45)).redirect(reqwest::redirect::Policy::none())
             .user_agent("Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1")
             .build().map_err(|_| provider_error(ErrorKind::Configuration))?;
@@ -300,12 +306,26 @@ impl AmazonClient {
             .map(|credential| format!("{}:", account_key(&credential.customer_id)))
     }
     pub async fn commit_guard(&self, generation: u64) -> Result<AmazonGuard<'_>, Error> {
+        let guard = self.tracking_guard(generation).await?;
+        if guard
+            ._state
+            .credential
+            .as_ref()
+            .is_none_or(|c| !c.imports_enabled)
+        {
+            return Err(provider_error(ErrorKind::AuthenticationRequired));
+        }
+        Ok(guard)
+    }
+
+    // Existing-record tracking stays available without permitting discovery commits.
+    pub(crate) async fn tracking_guard(&self, generation: u64) -> Result<AmazonGuard<'_>, Error> {
         let state = self.state.lock().await;
         if state.generation != generation
             || state
                 .credential
                 .as_ref()
-                .is_none_or(|c| c.auth_required || c.challenge_required || !c.imports_enabled)
+                .is_none_or(|c| c.auth_required || c.challenge_required)
         {
             return Err(provider_error(ErrorKind::AuthenticationRequired));
         }
@@ -449,7 +469,7 @@ impl AmazonClient {
         *session = None;
         self.clear_cookies()
             .map_err(|e| ConnectionError::new(ConnectionStage::Cookies, e))?;
-        self.paused.store(!imports_enabled, Ordering::Release);
+        self.paused.store(false, Ordering::Release);
         drop(state);
         Ok(self.status().await)
     }
@@ -506,6 +526,121 @@ impl AmazonClient {
 
     pub async fn preview(&self) -> Result<Discovery, ConnectionError> {
         self.check_account(AccountCheck::Preview).await
+    }
+
+    /// Verify a selected existing record without discovering or importing new orders.
+    pub async fn verify_existing(
+        &self,
+        order: &str,
+        title: &str,
+        expected: &Tracking,
+    ) -> Result<VerifiedAmazonParcel, ConnectionError> {
+        let invalid = || {
+            ConnectionError::new(
+                ConnectionStage::Orders,
+                provider_error(ErrorKind::InvalidResponse),
+            )
+        };
+        let parts: Vec<_> = order.split('-').collect();
+        if parts.len() != 3
+            || parts.iter().zip([3, 7, 7]).any(|(part, len)| {
+                part.len() != len || !part.bytes().all(|byte| byte.is_ascii_digit())
+            })
+        {
+            return Err(invalid());
+        }
+        let _work = self.account_work.try_lock().map_err(|_| {
+            let mut error = ConnectionError::new(
+                ConnectionStage::Orders,
+                provider_error(ErrorKind::Throttled { retry_after: 5 }),
+            );
+            error.reason = ConnectionReason::InProgress;
+            error
+        })?;
+        let (generation, customer) = {
+            let state = self.state.lock().await;
+            let credential = state
+                .credential
+                .as_ref()
+                .filter(|credential| !credential.auth_required)
+                .ok_or_else(|| {
+                    ConnectionError::new(
+                        ConnectionStage::AccessToken,
+                        provider_error(ErrorKind::AuthenticationRequired),
+                    )
+                })?;
+            if credential.challenge_required {
+                return Err(ConnectionError::new(
+                    ConnectionStage::Orders,
+                    provider_error(ErrorKind::ProviderChallenge {
+                        status: None,
+                        retry_after: None,
+                    }),
+                ));
+            }
+            (state.generation, credential.customer_id.clone())
+        };
+        let verify = async {
+            let page = self
+                .fetch_page_detailed(&format!("/your-orders/order-details?orderID={order}"))
+                .await?;
+            let candidates = pages::order_tracking_pages(&page, order).map_err(|_| invalid())?;
+            for candidate in candidates.into_iter().take(MAX_TRACK_LOADS) {
+                let page = self.fetch_page_detailed(&candidate.path).await?;
+                let mut tracker = match pages::tracking_parcel(&page, &candidate.path, &candidate) {
+                    Ok(tracker) => tracker,
+                    Err(error) if matches!(error.kind, ErrorKind::InvalidResponse) => continue,
+                    Err(error) => return Err(ConnectionError::new(ConnectionStage::Orders, error)),
+                };
+                if tracker.tracking_code != expected.number || tracker.carrier != expected.carrier {
+                    continue;
+                }
+                tracker.id = format!("{}:{}", account_key(&customer), tracker.id);
+                return Ok(AmazonParcel {
+                    title: title.into(),
+                    order_reference: order.into(),
+                    source_key: source_key(&customer, &candidate),
+                    tracker,
+                });
+            }
+            Err(invalid())
+        };
+        let result = match tokio::time::timeout(self.operation_timeout, verify).await {
+            Ok(result) => result,
+            Err(_) => Err(ConnectionError::new(
+                ConnectionStage::Orders,
+                self.requests.lock().await.failure(ErrorKind::Timeout),
+            )),
+        };
+        let parcel = match result {
+            Ok(parcel) => parcel,
+            Err(error) => {
+                self.record_error(generation, error.provider_error())
+                    .await
+                    .map_err(|error| ConnectionError::new(ConnectionStage::Credentials, error))?;
+                return Err(error);
+            }
+        };
+        let mut state = self.state.lock().await;
+        if state.generation != generation {
+            return Err(ConnectionError::failure(
+                ConnectionStage::Account,
+                ConnectionReason::SessionChanged,
+            ));
+        }
+        if let Some(credential) = &mut state.credential {
+            credential.last_success_at = Some(
+                now().map_err(|error| ConnectionError::new(ConnectionStage::Credentials, error))?,
+            );
+            save(&self.path, credential)
+                .map_err(|error| ConnectionError::new(ConnectionStage::Credentials, error))?;
+        }
+        state.last_error = None;
+        drop(state);
+        let mut requests = self.requests.lock().await;
+        requests.failures = 0;
+        requests.cooldown = None;
+        Ok(VerifiedAmazonParcel { generation, parcel })
     }
 
     async fn check_account(&self, check: AccountCheck) -> Result<Discovery, ConnectionError> {
@@ -656,7 +791,7 @@ impl AmazonClient {
             c.challenge_required = false;
             save(&self.path, c)
                 .map_err(|e| ConnectionError::new(ConnectionStage::Credentials, e))?;
-            self.paused.store(!c.imports_enabled, Ordering::Release);
+            self.paused.store(false, Ordering::Release);
         }
         state.last_error = None;
         drop(state);
@@ -1192,12 +1327,13 @@ fn account_key(customer: &str) -> String {
 }
 fn source_key(customer: &str, parcel: &pages::ParcelPage) -> String {
     let mut hash = Sha256::new();
+    let package = parcel.package.source_component();
     for part in [
         "amazon.com",
         customer,
         &parcel.order,
         &parcel.shipment,
-        &parcel.package,
+        &package,
     ] {
         hash.update(part.as_bytes());
         hash.update([0]);
@@ -1323,9 +1459,9 @@ impl ShippingApi for AmazonClient {
                 .request_generation
                 .ok_or_else(|| provider_error(ErrorKind::Configuration))?;
             let state = self.state.lock().await;
-            if state.generation != captured
-                || state.credential.as_ref().is_none_or(|c| !c.imports_enabled)
-            {
+            // Same-account auth errors must still reach durable shipment state.
+            // Flags pause later work; an account epoch change invalidates this one.
+            if state.generation != captured || state.credential.is_none() {
                 return Err(provider_error(ErrorKind::AuthenticationRequired));
             }
             Ok(Box::new(AmazonGuard { _state: state })
@@ -2926,5 +3062,132 @@ mod tests {
             *fixture.calls.lock().unwrap(),
             vec!["/auth/token", "/ap/exchangetoken/cookies"]
         );
+    }
+
+    #[tokio::test]
+    async fn selected_legacy_order_is_verified_without_enabling_discovery() {
+        const INDEXED: &str =
+            "/progress-tracker/package?orderId=111-1234567-1234567&shipmentId=SHIP1&packageIndex=0";
+        const AMAZON_NUMBER: &str = "TBA000000000001";
+        let fixture = Fixture::new(|path| match path {
+            "/auth/token" => (200, ACCESS.into()),
+            "/ap/exchangetoken/cookies" => (200, COOKIES.into()),
+            "/your-orders/order-details?orderID=111-1234567-1234567" => {
+                (200, format!(r#"<a href="{INDEXED}">Track package</a>"#))
+            }
+            INDEXED => (
+                200,
+                format!(
+                    r#"<h3 class="a-spacing-small">Delivery facilitated by Amazon</h3><script type="a-state" data-a-state='{{"key":"page-state"}}'>{{"orderId":"111-1234567-1234567","shipmentId":"SHIP1","packageIndex":"0","trackingId":"{AMAZON_NUMBER}","shortStatus":"DELIVERED","progressTracker":{{"lastReachedMilestone":"DELIVERED"}}}}</script>"#
+                ),
+            ),
+            _ => (404, String::new()),
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let client = configured(&dir, &fixture);
+        let tracking = crate::models::Tracking {
+            carrier: crate::carrier::Carrier::AmazonMcf,
+            number: AMAZON_NUMBER.into(),
+            recipient_url: None,
+        };
+        let verified = client
+            .verify_existing("111-1234567-1234567", "Owner's title", &tracking)
+            .await
+            .unwrap();
+        assert_eq!(verified.parcel.title, "Owner's title");
+        assert_eq!(
+            verified.parcel.tracker.status,
+            crate::models::Status::Delivered
+        );
+        assert_eq!(verified.parcel.tracker.tracking_code, AMAZON_NUMBER);
+        assert!(!client.status().await.imports_enabled);
+        assert!(
+            !client.blocked(),
+            "Imports off must not pause linked-record tracking"
+        );
+        assert!(client.commit_guard(verified.generation).await.is_err());
+        assert!(client.tracking_guard(verified.generation).await.is_ok());
+        let updated = client
+            .retrieve(&verified.parcel.tracker.id, AMAZON_NUMBER)
+            .await
+            .unwrap();
+        assert_eq!(updated.status, crate::models::Status::Delivered);
+        let scoped = client.for_request("test", None);
+        assert!(scoped.observation_guard().await.is_ok());
+        {
+            let calls = fixture.calls.lock().unwrap();
+            assert_eq!(calls.len(), 5);
+            assert_eq!(
+                calls
+                    .iter()
+                    .filter(|path| path.as_str() == "/auth/token")
+                    .count(),
+                1
+            );
+            assert!(!calls.iter().any(|path| path == "/your-orders/orders"));
+        }
+        let restored = AmazonClient::new(dir.path().join("amazon-account.json")).unwrap();
+        assert!(!restored.status().await.imports_enabled);
+        assert!(!restored.blocked());
+    }
+
+    #[tokio::test]
+    async fn selected_order_never_accepts_another_tracking_number_or_a_challenge() {
+        for challenged in [false, true] {
+            let fixture = Fixture::new(move |path| match path {
+                "/auth/token" => (200, ACCESS.into()),
+                "/ap/exchangetoken/cookies" => (200, COOKIES.into()),
+                "/your-orders/order-details?orderID=111-1234567-1234567" if challenged => {
+                    (503, "<input id=captchacharacters>".into())
+                }
+                "/your-orders/order-details?orderID=111-1234567-1234567" => {
+                    (200, format!(r#"<a href="{PATH}">Track package</a>"#))
+                }
+                PATH => (200, tracking()),
+                _ => (404, String::new()),
+            });
+            let dir = tempfile::tempdir().unwrap();
+            let client = configured(&dir, &fixture);
+            let expected = crate::models::Tracking {
+                carrier: crate::carrier::Carrier::Usps,
+                number: "9400111122223333444466".into(),
+                recipient_url: None,
+            };
+            let error = client
+                .verify_existing("111-1234567-1234567", "Owner's title", &expected)
+                .await
+                .err()
+                .unwrap();
+            assert_eq!(client.status().await.state, AmazonState::Connected);
+            assert!(!client.status().await.imports_enabled);
+            if challenged {
+                assert_eq!(
+                    error.reason,
+                    crate::amazon::connection::ConnectionReason::ChallengePage
+                );
+                assert!(client.status().await.challenge_required);
+                let calls = fixture.calls.lock().unwrap().len();
+                assert!(
+                    client
+                        .verify_existing("111-1234567-1234567", "Owner's title", &expected)
+                        .await
+                        .is_err()
+                );
+                assert_eq!(fixture.calls.lock().unwrap().len(), calls);
+                assert!(
+                    AmazonClient::new(dir.path().join("amazon-account.json"))
+                        .unwrap()
+                        .status()
+                        .await
+                        .challenge_required
+                );
+            } else {
+                assert_eq!(
+                    error.reason,
+                    crate::amazon::connection::ConnectionReason::UnexpectedResponse
+                );
+                assert!(!client.status().await.challenge_required);
+            }
+        }
     }
 }

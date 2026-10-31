@@ -404,6 +404,18 @@ shipments, while preserving carrier history and tracker ownership.
 Sources are collapsed at the bottom. Direction, status filters, search, shipment
 details and open settings have URL fragments for links and browser navigation.
 
+## Existing Amazon shipments
+
+With Amazon connected, open an existing inbound Amazon shipment on AfterShip
+and select **Use Amazon tracking**. Shipments checks that order on Amazon and
+requires the same carrier and tracking number before switching the existing
+record. Its ID, title, sources, corrections, and history stay intact.
+
+This action does not enable automatic imports or create other shipments. Linked
+shipments use normal tracking updates even while automatic imports are off.
+Archived records are not changed. A failed check leaves the original record
+untouched; a verification challenge pauses Amazon checks and retains sign-in.
+
 ## Agent access
 
 Open **Agent access** in the app dashboard. Enter an **Agent name** and select

@@ -1045,6 +1045,55 @@ async fn amazon_preview(
     ))
 }
 
+/// Verify and adopt one existing Amazon shipment without enabling new imports.
+#[endpoint {method=POST,path="/v1/shipments/{id}/amazon",tags=["amazon"]}]
+async fn shipment_use_amazon(
+    request: RequestContext<Arc<Context>>,
+    path: Path<ShipmentPath>,
+) -> Result<ShipmentResponse, HttpError> {
+    require_owner(&request).await?;
+    let expected_revision = revision(&request)?;
+    let context = request.context();
+    let _management = context.amazon_management.lock().await;
+    let current = context.store.get(path.into_inner().id).await?;
+    if current.revision != expected_revision {
+        return Err(crate::error::Error::Precondition.into());
+    }
+    if current.archived
+        || current.direction != Direction::Inbound
+        || current.tracking.carrier != crate::carrier::Carrier::AmazonMcf
+        || current.sync.provider != ProviderId::AfterShip
+    {
+        return Err(crate::error::Error::Conflict(
+            "Select an active inbound AfterShip Amazon shipment".into(),
+        )
+        .into());
+    }
+    let order = current.order_reference.as_deref().ok_or_else(|| {
+        client_error(
+            StatusCode::BAD_REQUEST,
+            "An Amazon order reference is required",
+        )
+    })?;
+    let client = amazon_client(&request)?;
+    let started = std::time::Instant::now();
+    let verified = client
+        .verify_existing(order, &current.title, &current.tracking)
+        .await
+        .map_err(|error| amazon_connection_error(&request, error, started.elapsed()))?;
+    // Fence account replacement while the selected record's transaction commits.
+    let _guard = client
+        .tracking_guard(verified.generation)
+        .await
+        .map_err(amazon_error)?;
+    Ok(shipment_response(
+        context
+            .store
+            .adopt_amazon(current.id, expected_revision, &verified.parcel)
+            .await?,
+    ))
+}
+
 #[endpoint {method=POST,path="/v1/amazon/enable",tags=["amazon"]}]
 async fn amazon_enable(
     request: RequestContext<Arc<Context>>,
@@ -1331,7 +1380,7 @@ async fn style(request: RequestContext<Arc<Context>>) -> Result<Response<Body>, 
 
 pub fn description() -> Result<ApiDescription<Arc<Context>>> {
     let mut api = ApiDescription::new();
-    let endpoints: [dropshot::ApiEndpoint<Arc<Context>>; 38] = [
+    let endpoints: [dropshot::ApiEndpoint<Arc<Context>>; 39] = [
         shipments_list.into(),
         carriers_list.into(),
         shipments_create.into(),
@@ -1352,6 +1401,7 @@ pub fn description() -> Result<ApiDescription<Arc<Context>>> {
         amazon_sign_in.into(),
         amazon_complete.into(),
         amazon_preview.into(),
+        shipment_use_amazon.into(),
         amazon_enable.into(),
         amazon_refresh.into(),
         amazon_disconnect.into(),

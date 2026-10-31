@@ -19,11 +19,34 @@ use crate::{
 
 pub(crate) const ORIGIN: &str = "https://www.amazon.com";
 
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum PackageSlot {
+    // Opaque package IDs and zero-based slot indices are different identities.
+    Id(String),
+    Index(String),
+}
+
+impl PackageSlot {
+    pub(crate) fn source_component(&self) -> String {
+        match self {
+            Self::Id(value) => value.clone(),
+            Self::Index(value) => format!("index:{value}"),
+        }
+    }
+
+    fn package_id(&self) -> Option<&str> {
+        match self {
+            Self::Id(value) => Some(value),
+            Self::Index(_) => None,
+        }
+    }
+}
+
 #[derive(Clone)]
 pub(crate) struct ParcelPage {
     pub order: String,
     pub shipment: String,
-    pub package: String,
+    pub package: PackageSlot,
     pub path: String,
     pub titles: Vec<String>,
 }
@@ -94,6 +117,7 @@ pub(crate) fn allowed_path(input: &str) -> Result<String, Error> {
             "/gp/your-account/ship-track",
             "/progress-tracker/package",
             "/gp/your-account/order-details",
+            "/your-orders/order-details",
             "/your-orders/pop",
         ]
         .iter()
@@ -115,9 +139,11 @@ pub(crate) fn allowed_path(input: &str) -> Result<String, Error> {
     }
     let mut canonical = Url::parse(ORIGIN).map_err(|_| provider_error(ErrorKind::Configuration))?;
     canonical.set_path(path.split("/ref=").next().unwrap_or(path));
+    let order_details = retail.split("/ref=").next() == Some("/your-orders/order-details");
     let mut seen = BTreeSet::new();
     for (name, value) in url.query_pairs() {
         let key = match name.to_ascii_lowercase().as_str() {
+            "orderid" if order_details => "orderID",
             "orderid" => "orderId",
             "shipmentid" => "shipmentId",
             "packageid" => "packageId",
@@ -225,7 +251,7 @@ pub(crate) fn same_parcel_identity(original: &str, destination: &str) -> bool {
 
 pub(crate) fn listing(page: &str) -> Result<Listing, Error> {
     let html = Html::parse_document(page);
-    let mut groups: BTreeMap<(String, String, String), ParcelPage> = BTreeMap::new();
+    let mut groups: BTreeMap<(String, String, PackageSlot), ParcelPage> = BTreeMap::new();
     let mut reasons = DeferredCounts::default();
     let mut found = false;
     for (index, node) in html
@@ -245,9 +271,14 @@ pub(crate) fn listing(page: &str) -> Result<Listing, Error> {
             reasons.unsupported_link += 1;
             continue;
         };
-        let Some(identity) = query_identity(&path)
-            .ok()
-            .filter(|value| value.package.is_some())
+        let Ok(identity) = query_identity(&path) else {
+            reasons.missing_identity += 1;
+            continue;
+        };
+        let Some(package) = identity
+            .package
+            .map(PackageSlot::Id)
+            .or_else(|| identity.index.map(PackageSlot::Index))
         else {
             reasons.missing_identity += 1;
             continue;
@@ -263,9 +294,6 @@ pub(crate) fn listing(page: &str) -> Result<Listing, Error> {
         else {
             reasons.missing_product += 1;
             continue;
-        };
-        let Some(package) = identity.package else {
-            return Err(provider_error(ErrorKind::InvalidResponse));
         };
         let parcel = groups
             .entry((
@@ -295,6 +323,47 @@ pub(crate) fn listing(page: &str) -> Result<Listing, Error> {
         deferred: reasons.total(),
         deferred_reasons: reasons,
     })
+}
+
+pub(crate) fn order_tracking_pages(page: &str, order: &str) -> Result<Vec<ParcelPage>, Error> {
+    if !identity_part(order) {
+        return Err(provider_error(ErrorKind::InvalidResponse));
+    }
+    let mut parcels = BTreeMap::new();
+    for node in Html::parse_document(page).select(&selector("a[href]")?) {
+        let Some(path) = node
+            .value()
+            .attr("href")
+            .and_then(|href| allowed_path(href).ok())
+            .filter(|path| is_tracking(path))
+        else {
+            continue;
+        };
+        let Ok(identity) = query_identity(&path) else {
+            continue;
+        };
+        if identity.order != order {
+            continue;
+        }
+        let Some(package) = identity
+            .package
+            .map(PackageSlot::Id)
+            .or_else(|| identity.index.map(PackageSlot::Index))
+        else {
+            continue;
+        };
+        parcels.entry(path.clone()).or_insert_with(|| ParcelPage {
+            order: identity.order,
+            shipment: identity.shipment,
+            package,
+            path,
+            titles: Vec::new(),
+        });
+        if parcels.len() > 20 {
+            return Err(provider_error(ErrorKind::ResponseTooLarge));
+        }
+    }
+    Ok(parcels.into_values().collect())
 }
 
 pub(crate) fn tracking_link(page: &str, parcel: &ParcelPage) -> Result<String, Error> {
@@ -338,6 +407,7 @@ struct PageState {
     order_id: Option<String>,
     shipment_id: Option<String>,
     package_id: Option<String>,
+    package_index: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -393,7 +463,7 @@ pub(crate) fn tracking_parcel(
     if !query_identity(&parcel.path)?.compatible_with(&query_identity(path)?) {
         return Err(provider_error(ErrorKind::InvalidResponse));
     }
-    tracking_with_package(page, path, None, Some(&parcel.package))
+    tracking_with_package(page, path, None, parcel.package.package_id())
 }
 
 fn tracking_with_package(
@@ -438,6 +508,7 @@ fn tracking_with_package(
                 Some(identity.shipment.as_str()),
             ),
             (state.package_id.as_deref(), expected_package),
+            (state.package_index.as_deref(), identity.index.as_deref()),
         ]
         .into_iter()
         .any(|(observed, expected)| observed.zip(expected).is_some_and(|(a, b)| a != b))
@@ -449,7 +520,11 @@ fn tracking_with_package(
     let mut header_carriers = Vec::new();
     for header in html.select(&selector("h2, h3")?) {
         let text = header.text().collect::<Vec<_>>().join(" ");
-        if let Some(carrier) = text.trim().strip_prefix("Delivery By ").and_then(carrier)
+        let text = text.trim();
+        if let Some(carrier) = text
+            .strip_prefix("Delivery By ")
+            .or_else(|| text.strip_prefix("Delivery facilitated by "))
+            .and_then(carrier)
             && !header_carriers.contains(&carrier)
         {
             header_carriers.push(carrier);
@@ -545,6 +620,131 @@ mod tests {
         assert!(listing.parcels.is_empty());
         assert_eq!(listing.deferred, 1);
     }
+
+    #[test]
+    fn mobile_listing_keeps_real_indexed_packages_distinct() {
+        let first =
+            "/progress-tracker/package?orderId=111-1234567-1234567&shipmentId=SHIP1&packageIndex=0";
+        let second = first.replace("packageIndex=0", "packageIndex=1");
+        let listing = pages::listing(&format!(
+            r#"<a class="item-card__link" href="{first}" aria-label="Widget, Order placed 1 October 2026, Shipped"></a><a class="item-card__link" href="{first}" aria-label="Cable, Order placed 1 October 2026, Shipped"></a><a class="item-card__link" href="{second}" aria-label="Book, Order placed 1 October 2026, Shipped"></a>"#
+        ))
+        .unwrap();
+        assert_eq!(listing.deferred, 0);
+        assert_eq!(listing.parcels.len(), 2);
+        assert_eq!(listing.parcels[0].path, first);
+        assert_eq!(listing.parcels[0].titles, ["Widget", "Cable"]);
+        assert_eq!(listing.parcels[1].path, second);
+        assert_eq!(listing.parcels[1].titles, ["Book"]);
+    }
+
+    #[test]
+    fn package_ids_and_indexes_are_separate_listing_identities() {
+        let path = "/progress-tracker/package?orderId=111-1234567-1234567&shipmentId=SHIP1";
+        let listing = pages::listing(&format!(
+            r#"<a class="item-card__link" href="{path}&packageId=0" aria-label="Opaque-ID parcel, Order placed 1 October 2026, Shipped"></a><a class="item-card__link" href="{path}&packageIndex=0" aria-label="Indexed parcel, Order placed 1 October 2026, Shipped"></a><a class="item-card__link" href="{path}&packageId=0&packageIndex=9" aria-label="Same ID extra item, Order placed 1 October 2026, Shipped"></a>"#
+        ))
+        .unwrap();
+        assert_eq!(listing.deferred, 0);
+        assert_eq!(listing.parcels.len(), 2);
+        assert_eq!(
+            listing.parcels[0].titles,
+            ["Opaque-ID parcel", "Same ID extra item"]
+        );
+        assert_eq!(listing.parcels[1].titles, ["Indexed parcel"]);
+    }
+
+    #[test]
+    fn indexed_package_tracking_rejects_a_different_page_state_slot() {
+        let path =
+            "/progress-tracker/package?orderId=111-1234567-1234567&shipmentId=SHIP1&packageIndex=0";
+        let matching = page("9400111122223333444455")
+            .replace("\"trackingId\":", "\"packageIndex\":\"0\",\"trackingId\":");
+        assert!(pages::tracking(&matching, path, None).is_ok());
+        let different = matching.replace("\"packageIndex\":\"0\"", "\"packageIndex\":\"1\"");
+        assert!(pages::tracking(&different, path, None).is_err());
+    }
+
+    #[test]
+    fn facilitated_amazon_delivery_header_verifies_the_observed_tracking_structure() {
+        let path =
+            "/progress-tracker/package?orderId=111-1234567-1234567&shipmentId=SHIP1&packageIndex=0";
+        let html = r#"<h3 class="a-spacing-small">Delivery facilitated by Amazon</h3><div class="a-row tracking-event-carrier-header"><h2>Delivery facilitated by Amazon</h2></div><script id="page-state">{"trackingId":"TBA000000000020","orderId":"111-1234567-1234567","shipmentId":"SHIP1","packageIndex":"0","shortStatus":"DELIVERED","progressTracker":{"lastReachedMilestone":"DELIVERED"}}</script>"#;
+        let tracker = pages::tracking(html, path, Some("TBA000000000020")).unwrap();
+        assert_eq!(tracker.carrier, Carrier::AmazonMcf);
+        assert_eq!(tracker.status, Status::Delivered);
+        assert_eq!(tracker.tracking_code, "TBA000000000020");
+    }
+
+    #[test]
+    fn facilitated_delivery_headers_must_agree_with_other_carrier_evidence() {
+        for html in [
+            page("9400111122223333444455")
+                .replace("Delivery By USPS", "Delivery facilitated by Amazon")
+                .replace(
+                    "\"trackingId\":",
+                    "\"carrierCode\":\"USPS\",\"trackingId\":",
+                ),
+            page("9400111122223333444455") + "<h3>Delivery facilitated by Amazon</h3>",
+        ] {
+            assert!(pages::tracking(&html, PATH, None).is_err());
+        }
+    }
+
+    #[test]
+    fn current_order_details_route_keeps_its_order_id_query_spelling() {
+        let path = "/your-orders/order-details?orderID=111-1234567-1234567&ref=fixture";
+        assert_eq!(
+            pages::allowed_path(path).unwrap(),
+            "/your-orders/order-details?orderID=111-1234567-1234567"
+        );
+    }
+
+    #[test]
+    fn order_details_tracking_candidates_require_exact_order_and_real_package_identity() {
+        let order = "111-1234567-1234567";
+        let indexed =
+            format!("/progress-tracker/package?orderId={order}&shipmentId=SHIP1&packageIndex=0");
+        let identified =
+            format!("/gp/your-account/ship-track?orderId={order}&shipmentId=SHIP2&packageId=1");
+        let html = format!(
+            r#"<a href="{indexed}">Track package</a><a href="{indexed}">Track package</a><a href="{identified}">Track package</a><a href="/progress-tracker/package?orderId=111-1234567-7654321&shipmentId=SHIP1&packageIndex=0">Other order</a><a href="/progress-tracker/package?orderId={order}&packageIndex=0">Missing shipment</a><a href="/progress-tracker/package?orderId={order}&shipmentId=SHIP1">Missing package slot</a><a href="/progress-tracker/package/delivery-information/delivery-feedback?orderId={order}&shipmentId=SHIP1&packageIndex=0">Delivery feedback</a>"#
+        );
+        let parcels = pages::order_tracking_pages(&html, order).unwrap();
+        assert_eq!(parcels.len(), 2);
+        assert!(parcels.iter().all(|parcel| parcel.order == order));
+        assert!(parcels.iter().all(|parcel| parcel.titles.is_empty()));
+        assert!(parcels.iter().any(|parcel| parcel.path == indexed));
+        assert!(parcels.iter().any(|parcel| parcel.path == identified));
+        assert!(
+            pages::order_tracking_pages(&html, "111-0000000-0000000")
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn order_details_tracking_candidates_are_bounded_after_deduplication() {
+        let order = "111-1234567-1234567";
+        let link = |index: usize| {
+            format!(
+                r#"<a href="/progress-tracker/package?orderId={order}&shipmentId=SHIP1&packageIndex={index}">Track package</a>"#
+            )
+        };
+        let maximum = (0..20).map(link).collect::<String>();
+        assert_eq!(
+            pages::order_tracking_pages(&maximum, order).unwrap().len(),
+            20
+        );
+        assert!(pages::order_tracking_pages(&(maximum + &link(20)), order).is_err());
+        assert_eq!(
+            pages::order_tracking_pages(&link(0).repeat(21), order)
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
     #[test]
     fn localized_pop_preserves_item_identity_and_checks_tracking_package_state() {
         let pop = "/-/en/your-orders/pop/ref=fixture?orderId=111-1234567-1234567&shipmentId=SHIP1&packageId=1&lineItemId=ITEM1";
