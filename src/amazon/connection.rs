@@ -50,6 +50,8 @@ pub enum ConnectionReason {
     UpstreamHttp,
     Persistence,
     Configuration,
+    UnsupportedOrdersLayout,
+    ChallengePage,
 }
 impl ConnectionReason {
     pub fn as_str(self) -> &'static str {
@@ -67,6 +69,8 @@ impl ConnectionReason {
             Self::UpstreamHttp => "upstream_http",
             Self::Persistence => "persistence",
             Self::Configuration => "configuration",
+            Self::UnsupportedOrdersLayout => "unsupported_orders_layout",
+            Self::ChallengePage => "challenge_page",
         }
     }
 }
@@ -77,6 +81,7 @@ pub struct ConnectionError {
     pub reason: ConnectionReason,
     pub upstream_status: Option<u16>,
     source: Error,
+    pub response_shape: Option<&'static str>,
 }
 impl ConnectionError {
     pub(crate) fn new(stage: ConnectionStage, source: Error) -> Self {
@@ -97,6 +102,7 @@ impl ConnectionError {
             reason,
             upstream_status,
             source,
+            response_shape: None,
         }
     }
     pub(crate) fn with_status(stage: ConnectionStage, source: Error, status: u16) -> Self {
@@ -108,6 +114,7 @@ impl ConnectionError {
             reason,
             upstream_status: None,
             source: provider_error(ErrorKind::InvalidResponse),
+            response_shape: None,
         }
     }
     pub(crate) fn with_upstream_status(mut self, status: u16) -> Self {
@@ -120,6 +127,13 @@ impl ConnectionError {
             self.stage.as_str(),
             self.reason.as_str()
         )
+    }
+    pub(crate) fn provider_error(&self) -> &Error {
+        &self.source
+    }
+    pub(crate) fn with_shape(mut self, shape: &'static str) -> Self {
+        self.response_shape = Some(shape);
+        self
     }
     pub fn retry_after(&self) -> Option<i64> {
         self.source.retry_after()

@@ -314,6 +314,7 @@ impl<'a> Token<'a> {
 #[derive(Deserialize)]
 struct Access {
     access_token: String,
+    refresh_token: Option<String>,
 }
 #[derive(Deserialize)]
 struct CookieBody {
@@ -336,10 +337,12 @@ struct WebsiteCookie {
     path: Option<String>,
 }
 
-pub(crate) async fn authenticate(
+/// Check the access token and surface an optional provider-issued refresh-token
+/// replacement. Saved sessions must persist that replacement before later I/O.
+pub(crate) async fn refresh_access_token(
     client: &AmazonClient,
     token: &str,
-) -> Result<(), ConnectionError> {
+) -> Result<Option<String>, ConnectionError> {
     let access: Access = client
         .json(
             ConnectionStage::AccessToken,
@@ -349,13 +352,29 @@ pub(crate) async fn authenticate(
                 .form(&Token::new(token, "access_token", None)),
         )
         .await?;
-    if access.access_token.is_empty() {
+    rotation(access)
+}
+
+fn rotation(access: Access) -> Result<Option<String>, ConnectionError> {
+    if access.access_token.is_empty()
+        || access
+            .refresh_token
+            .as_ref()
+            .is_some_and(|token| token.is_empty() || token.len() > 8192)
+    {
         return Err(ConnectionError::with_status(
             ConnectionStage::AccessToken,
             provider_error(ErrorKind::InvalidResponse),
             200,
         ));
     }
+    Ok(access.refresh_token)
+}
+
+pub(crate) async fn exchange_cookies(
+    client: &AmazonClient,
+    token: &str,
+) -> Result<(), ConnectionError> {
     let response: CookieBody = client
         .json(
             ConnectionStage::Cookies,
@@ -430,6 +449,8 @@ pub(crate) async fn authenticate(
     Ok(())
 }
 
+/// Convenience for a new grant. Existing credentials use the two steps above
+/// so refresh-token replacement is durable even if cookie exchange fails.
 fn cookie_path(path: Option<&str>) -> Result<&str, ConnectionError> {
     let path = path.filter(|path| !path.is_empty()).unwrap_or("/");
     if path.len() > 2048
@@ -546,5 +567,39 @@ mod tests {
             assert_eq!(error.upstream_status, Some(200));
         }
         assert!(auth::cookie_path(Some(&format!("/{}", "a".repeat(2048)))).is_err());
+    }
+    #[test]
+    fn refresh_response_keeps_absent_rotation_and_validates_an_explicit_replacement() {
+        for (body, expected) in [
+            (r#"{"access_token":"SYNTHETIC_ACCESS"}"#, None),
+            (
+                r#"{"access_token":"SYNTHETIC_ACCESS","refresh_token":"SYNTHETIC_ROTATED"}"#,
+                Some("SYNTHETIC_ROTATED"),
+            ),
+        ] {
+            let wire: crate::amazon::auth::Access = serde_json::from_str(body).unwrap();
+            assert_eq!(auth::rotation(wire).unwrap().as_deref(), expected);
+        }
+        for refresh_token in [Some(String::new()), Some("x".repeat(8193))] {
+            let wire = crate::amazon::auth::Access {
+                access_token: "SYNTHETIC_ACCESS".into(),
+                refresh_token,
+            };
+            let error = auth::rotation(wire).unwrap_err();
+            assert_eq!(
+                error.stage,
+                crate::amazon::connection::ConnectionStage::AccessToken
+            );
+            assert_eq!(
+                error.reason,
+                crate::amazon::connection::ConnectionReason::UnexpectedResponse
+            );
+            assert_eq!(error.upstream_status, Some(200));
+            assert!(!error.to_string().contains("SYNTHETIC"));
+        }
+        let empty_access: crate::amazon::auth::Access =
+            serde_json::from_str(r#"{"access_token":"","refresh_token":"SYNTHETIC_ROTATED"}"#)
+                .unwrap();
+        assert!(auth::rotation(empty_access).is_err());
     }
 }

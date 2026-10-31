@@ -113,7 +113,7 @@ test("landing address is cleared before submission finishes and never becomes a 
   assert.deepEqual(JSON.parse(ui.calls[1].body), { flow_id: signIn.flow_id, landing_url: landing });
   resolve(connected);
   await settle();
-  assert.equal(ui.node("state").textContent, "Connected · preview ready");
+  assert.equal(ui.node("state").textContent, "Signed in · preview required");
   assert.equal(ui.node("message").textContent.includes("SYNTHETIC_SECRET"), false);
   assert.equal(ui.node("preview").hidden, false);
   assert.equal(ui.node("enable").hidden, true);
@@ -329,5 +329,128 @@ test("recognized errors reject malicious request IDs while keeping useful fixed 
     assert.match(ui.node("error").textContent, /Opening the Amazon website session/);
     assert.equal(ui.node("error").textContent.includes("Request ID:"), false);
     assert.equal(ui.node("error").textContent.includes("https:"), false);
+  }
+});
+
+test("unsupported Amazon orders pages retain the saved sign-in without requesting another login", async () => {
+  const ui = setup(connected);
+  const requestId = "fbf22920-3494-4f72-833f-dd34eb2e323b";
+  ui.replies.push(new ApiError(`DO_NOT_DISPLAY ${landing}`, 502, {
+    error_code: "amazon_preview_orders_unsupported_orders_layout", request_id: requestId,
+  }));
+  await ui.click("preview");
+  assert.match(ui.node("error").textContent, /does not yet support this orders-page layout/);
+  assert.match(ui.node("error").textContent, /saved sign-in/);
+  assert.match(ui.node("error").textContent, /no unverified shipments were imported/);
+  assert.match(ui.node("error").textContent, /compatibility update/);
+  assert.ok(ui.node("error").textContent.includes(requestId));
+  assert.doesNotMatch(ui.node("error").textContent, /new sign-in|reuse|Reconnect Amazon|SYNTHETIC_SECRET|DO_NOT_DISPLAY/i);
+  assert.equal(ui.node("state").textContent, "Signed in · preview required");
+  assert.equal(ui.node("enable").hidden, true);
+  assert.equal(ui.node("preview").hidden, false);
+  assert.equal(ui.node("sign-in").hidden, true);
+  assert.equal(ui.calls.length, 1);
+});
+
+async function failPreview(body) {
+  const ui = setup(connected);
+  ui.replies.push(new ApiError(`DO_NOT_DISPLAY ${landing}`, 502, body));
+  await ui.click("preview");
+  assert.equal(ui.node("enable").hidden, true);
+  assert.equal(ui.node("preview").hidden, false);
+  assert.equal(ui.node("sign-in").hidden, true);
+  assert.equal(ui.node("state").textContent, "Signed in · preview required");
+  assert.equal(ui.node("error").textContent.includes("SYNTHETIC_SECRET"), false);
+  assert.equal(ui.node("error").textContent.includes("DO_NOT_DISPLAY"), false);
+  assert.equal(ui.calls.length, 1, "preview does not trigger a new sign-in or another request");
+  return ui;
+}
+
+test("preview transport and layout failures keep the connection and recommend preview recovery", async () => {
+  for (const [error_code, recovery] of [
+    ["amazon_preview_access_token_timeout", /internet connection/],
+    ["amazon_preview_cookies_unexpected_response", /app logs/],
+    ["amazon_preview_orders_connection", /could not reach Amazon/],
+    ["amazon_preview_orders_rate_limited", /Wait before retrying Preview/],
+    ["amazon_preview_orders_upstream_http", /retry Preview shipments later/i],
+    ["amazon_preview_orders_configuration", /app configuration and logs/],
+    ["amazon_preview_credentials_persistence", /data storage and free space/],
+    ["amazon_preview_credentials_configuration", /permissions and logs/],
+    ["amazon_preview_credentials_session_changed", /check its current state/],
+  ]) {
+    const ui = await failPreview({ error_code, message: landing });
+    assert.match(ui.node("error").textContent, recovery, error_code);
+    assert.match(ui.node("error").textContent, /Preview|preview/, error_code);
+    assert.doesNotMatch(ui.node("error").textContent, /new sign-in|reuse|Reconnect Amazon/i, error_code);
+  }
+});
+
+test("a website challenge offers only the fixed Amazon orders link and a manual preview retry", async () => {
+  const ui = await failPreview({
+    error_code: "amazon_preview_orders_challenge_page", message: landing,
+    url: "https://evil.test/?token=SYNTHETIC_SECRET",
+  });
+  assert.match(ui.node("error").textContent, /website challenge/);
+  assert.match(ui.node("error").textContent, /complete the requested check, then retry Preview shipments/);
+  assert.doesNotMatch(ui.node("error").textContent, /new sign-in|reuse|Reconnect Amazon/i);
+  assert.equal(ui.node("error").children.length, 1);
+  const link = ui.node("error").children[0];
+  assert.equal(link.tagName, "a");
+  assert.equal(link.href, "https://www.amazon.com/your-orders/orders");
+  assert.equal(link.target, "_blank");
+  assert.equal(link.rel, "noopener noreferrer");
+  ui.replies.push({ shipments: [{ title: "Synthetic parcel", tracking: { carrier: "USPS", number: "SYNTHETIC" } }], deferred: 0 });
+  await ui.click("preview");
+  assert.equal(ui.node("error").children.length, 0, "the old challenge link is cleared on the next action");
+  assert.equal(ui.node("state").textContent, "Signed in · preview checked");
+  assert.equal(ui.node("enable").hidden, false);
+  assert.deepEqual(ui.calls.map(call => call.path), ["v1/amazon/preview", "v1/amazon/preview"]);
+});
+
+test("only confirmed authentication rejection recommends reconnecting during a preview", async () => {
+  for (const stage of ["access_token", "cookies", "orders"]) {
+    const ui = await failPreview({ error_code: `amazon_preview_${stage}_upstream_rejected` });
+    assert.match(ui.node("error").textContent, /no longer accepts the saved sign-in/);
+    assert.match(ui.node("error").textContent, /Reconnect Amazon, then retry Preview shipments/);
+    assert.equal(ui.node("start").textContent, "Reconnect Amazon");
+    assert.equal(ui.calls.length, 1);
+  }
+});
+
+test("a failed preview invalidates previous preview permission to enable imports", async () => {
+  const ui = setup(connected);
+  ui.replies.push({ shipments: [{ title: "Synthetic parcel", tracking: { carrier: "USPS", number: "SYNTHETIC" } }], deferred: 0 });
+  await ui.click("preview");
+  assert.equal(ui.node("enable").hidden, false);
+  ui.replies.push(new ApiError("Private provider text", 502, { error_code: "amazon_preview_orders_unsupported_orders_layout" }));
+  await ui.click("preview");
+  assert.equal(ui.node("enable").hidden, true);
+  assert.equal(ui.node("preview-list").children.length, 0);
+  assert.equal(ui.node("state").textContent, "Signed in · preview required");
+  await ui.click("enable");
+  assert.deepEqual(ui.calls.map(call => call.path), ["v1/amazon/preview", "v1/amazon/preview"]);
+});
+
+test("unknown-only candidates cannot enable imports while a recognized empty account can", async () => {
+  const ui = setup(connected);
+  ui.replies.push({ shipments: [], deferred: 2 });
+  await ui.click("preview");
+  assert.equal(ui.node("enable").hidden, true);
+  assert.match(ui.node("message").textContent, /Automatic imports remain off/);
+  assert.equal(ui.node("state").textContent, "Signed in · preview required");
+  await ui.click("enable");
+  assert.equal(ui.calls.length, 1);
+  ui.replies.push({ shipments: [], deferred: 0 });
+  await ui.click("preview");
+  assert.equal(ui.node("enable").hidden, false);
+  assert.equal(ui.node("state").textContent, "Signed in · preview checked");
+});
+
+test("unsupported preview pairs and unsafe metadata never display provider text or login blame", async () => {
+  for (const error_code of ["amazon_preview_registration_upstream_rejected", "amazon_preview_credentials_upstream_rejected", "amazon_preview_access_token_unsupported_orders_layout", "amazon_preview_orders_unknown_reason", `amazon_preview_orders_challenge_page ${landing}`]) {
+    const ui = await failPreview({ error_code, request_id: landing, message: landing });
+    assert.equal(ui.node("error").textContent, "Could not read a preview. Your saved shipments have not been changed.");
+    assert.equal(ui.node("error").children.length, 0);
+    assert.doesNotMatch(ui.node("error").textContent, /new sign-in|reuse|Reconnect Amazon/i);
   }
 });

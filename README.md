@@ -51,13 +51,19 @@ tracked before its first scan.
 
 ### Amazon account imports
 
-Amazon account support is under development and has not yet been validated
-against a live Amazon.com account. Existing Amazon MCF tracking remains separate.
+Amazon.com shipment discovery is under development and still needs a
+user-connected live preview to validate its website compatibility. Existing Amazon MCF tracking remains separate.
 
 Administrators can connect one Amazon.com retail account from the dashboard's
 **Amazon** settings. Open the generated Amazon sign-in link, complete any
 verification on Amazon, and paste the final landing address back into Shipments.
 The flow uses Amazon's device sign-in, so Amazon may show an Alexa sign-in page.
+Verified account identity and a successful token grant are saved before website
+requests. Cookie, layout and preview failures retain that sign-in; retry Preview
+without registering another device. A replacement refresh token, when returned,
+is saved atomically before cookie requests. The private app-data file survives
+app and Home Assistant restarts; routine refresh does not require signing in.
+
 
 If connecting fails, the error names the failed step and includes a request ID.
 The matching `amazon_connection` app log records a fixed error category, upstream
