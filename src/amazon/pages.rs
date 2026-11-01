@@ -1165,6 +1165,11 @@ fn provider_delivery_date(
             false,
         )
     };
+    let body = if delivered {
+        body
+    } else {
+        promise_date_body(body)?
+    };
     let value = if let Some((start, end)) = body.split_once(" - ") {
         if delivered {
             return None;
@@ -1196,6 +1201,59 @@ fn provider_delivery_date(
         }
     };
     ProviderDeliveryDate::new(value, observed_at, timezone.into())
+}
+
+fn promise_date_body(body: &str) -> Option<&str> {
+    // Clock precision is optional metadata, not an inferred appointment. Only
+    // remove a complete, validated qualifier before parsing the explicit date.
+    if let Some((date, deadline)) = body.split_once(" by ") {
+        promise_clock(deadline)?;
+        return Some(date);
+    }
+    if let Some((start, end)) = body.rsplit_once(" - ") {
+        let Some((before_period, _)) = start.rsplit_once(' ') else {
+            return Some(body);
+        };
+        let Some((date, _)) = before_period.rsplit_once(' ') else {
+            return Some(body);
+        };
+        let start = promise_clock(start.get(date.len() + 1..)?)?;
+        let end = promise_clock(end)?;
+        return (end > start).then_some(date);
+    }
+    Some(body)
+}
+
+fn promise_clock(value: &str) -> Option<u16> {
+    let (clock, period) = value.split_once(' ')?;
+    let afternoon = if period.eq_ignore_ascii_case("PM") {
+        true
+    } else if period.eq_ignore_ascii_case("AM") {
+        false
+    } else {
+        return None;
+    };
+    let (hour, minute) = match clock.split_once(':') {
+        Some((hour, minute))
+            if minute.len() == 2 && minute.bytes().all(|byte| byte.is_ascii_digit()) =>
+        {
+            (hour, minute.parse::<u16>().ok()?)
+        }
+        Some(_) => return None,
+        None => (clock, 0),
+    };
+    if hour.is_empty()
+        || hour.len() > 2
+        || !hour.bytes().all(|byte| byte.is_ascii_digit())
+        || minute > 59
+    {
+        return None;
+    }
+    let hour = hour.parse::<u16>().ok()?;
+    if !(1..=12).contains(&hour) {
+        return None;
+    }
+    Some((hour % 12 + if afternoon { 12 } else { 0 }) * 60 + minute)
 }
 
 fn month_day(value: &str) -> Option<(time::Month, u8)> {
@@ -1506,6 +1564,112 @@ mod tests {
     }
 
     #[test]
+    fn timed_delivery_promises_keep_valid_civil_dates_without_inventing_instants() {
+        use crate::models::DeliveryDateValue;
+        for (message, short_status, at, expected) in [
+            (
+                "Now arriving today 1:30 PM - 5:30 PM",
+                "OUT_FOR_DELIVERY",
+                "2026-11-01T20:00:00Z",
+                "2026-11-01",
+            ),
+            // UTC is Nov1, but the provider's pre-DST local day is still Oct31.
+            (
+                "Now arriving today 1:30 PM - 5:30 PM",
+                "OUT_FOR_DELIVERY",
+                "2026-11-01T06:30:00Z",
+                "2026-10-31",
+            ),
+            (
+                "Arriving tomorrow by 10 PM",
+                "IN_TRANSIT",
+                "2026-12-31T23:30:00Z",
+                "2027-01-01",
+            ),
+            (
+                "Arriving today by 10 PM",
+                "IN_TRANSIT",
+                "2026-03-08T09:30:00Z",
+                "2026-03-08",
+            ),
+            (
+                "Arriving November 1 11:30 AM - 1:30 PM",
+                "IN_TRANSIT",
+                "2026-11-01T20:00:00Z",
+                "2026-11-01",
+            ),
+        ] {
+            let html = promise_page(message, short_status, r#""America/Los_Angeles""#);
+            let tracker =
+                pages::tracking_with_package(&html, PATH, None, None, observed(at)).unwrap();
+            let date = tracker
+                .carrier_tracking
+                .delivery_date
+                .as_ref()
+                .expect("valid clock qualifiers must not discard an explicit civil date");
+            assert_eq!(
+                date.value,
+                DeliveryDateValue::Estimated {
+                    date: civil(expected)
+                },
+                "{message}"
+            );
+            assert_eq!(date.observed_at, observed(at));
+            assert_eq!(date.timezone, "America/Los_Angeles");
+            assert!(tracker.carrier_tracking.delivered_at.is_none());
+            assert!(tracker.carrier_tracking.estimated_delivery_at.is_none());
+            assert!(tracker.carrier_tracking.estimated_delivery_window.is_none());
+            assert!(tracker.carrier_tracking.events.is_empty());
+        }
+        for message in [
+            "Now arriving today 5:30 PM - 1:30 PM",
+            "Now arriving today 1:30 PM - 1:30 PM",
+            "Now arriving today 13:30 PM - 5:30 PM",
+            "Now arriving today 1:75 PM - 5:30 PM",
+            "Now arriving today 1:3 PM - 5:30 PM",
+            "Now arriving today 1:30 PM - 5:30 PM tomorrow",
+            "Arriving tomorrow by 10 PM garbage",
+            "Arriving Saturday by 10 PM",
+            "Arriving February 30 by 10 PM",
+        ] {
+            let html = promise_page(message, "OUT_FOR_DELIVERY", r#""America/Los_Angeles""#);
+            let tracker = pages::tracking_with_package(
+                &html,
+                PATH,
+                None,
+                None,
+                observed("2026-11-01T20:00:00Z"),
+            )
+            .unwrap();
+            assert!(
+                tracker.carrier_tracking.delivery_date.is_none(),
+                "{message}"
+            );
+            assert!(tracker.carrier_tracking.delivered_at.is_none());
+            assert!(tracker.carrier_tracking.estimated_delivery_at.is_none());
+        }
+        for (short_status, timezone) in [
+            ("DELIVERED", "America/Los_Angeles"),
+            ("OUT_FOR_DELIVERY", "Not/A_Real_Zone"),
+        ] {
+            let html = promise_page(
+                "Now arriving today 1:30 PM - 5:30 PM",
+                short_status,
+                &serde_json::to_string(timezone).unwrap(),
+            );
+            let tracker = pages::tracking_with_package(
+                &html,
+                PATH,
+                None,
+                None,
+                observed("2026-11-01T20:00:00Z"),
+            )
+            .unwrap();
+            assert!(tracker.carrier_tracking.delivery_date.is_none());
+        }
+    }
+
+    #[test]
     fn malformed_optional_promise_metadata_keeps_valid_tracking() {
         let valid = promise_page(
             "Delivered October 25",
@@ -1542,7 +1706,7 @@ mod tests {
             ("Arriving February 29", Status::InTransit),
             ("Now arriving November 8 - November 3", Status::InTransit),
             ("Arriving sometime soon", Status::InTransit),
-            ("Arriving tomorrow by 10 PM", Status::InTransit),
+            ("Arriving tomorrow by 13 PM", Status::InTransit),
             ("Arriving October 25 2026", Status::InTransit),
             ("Delivered October 25\nPRIVATE", Status::Delivered),
         ] {
