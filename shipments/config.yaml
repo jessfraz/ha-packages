@@ -1,5 +1,5 @@
 name: Shipments
-version: "0.6.26"
+version: "0.6.27"
 slug: shipments
 description: A local shipment registry with a Home Assistant dashboard
 url: https://github.com/jessfraz/ha-packages

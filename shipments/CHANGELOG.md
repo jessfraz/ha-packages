@@ -1,3 +1,9 @@
+## 0.6.27
+
+- Keep Amazon's explicit delivery date when its promise includes a clock
+  window or deadline. Validate the clock qualifier without turning date-only
+  evidence into an invented timestamp.
+
 ## 0.6.26
 
 - Restore the public Amazon tracking link for genuine MCF shipments with TBA
