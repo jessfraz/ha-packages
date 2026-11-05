@@ -10,7 +10,7 @@ dependencies = []
 dev = [
   "gazetteer-matcher==1.2.0",
   "hassil==3.12.1",
-  "home-assistant-frontend==20260930.5",
+  "home-assistant-frontend==20261028.2",
   "home-assistant-intents==2026.10.27",
   "pytest-homeassistant-custom-component==0.13.375",
   "ruff==0.17.3",
