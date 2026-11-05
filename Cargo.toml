@@ -8,7 +8,7 @@ repository = "https://github.com/jessfraz/ha-packages"
 
 [dependencies]
 anyhow = "1"
-base64 = "0.22"
+base64 = "0.23"
 clap = { version = "4", features = ["derive", "env"] }
 dropshot = "0.18"
 getrandom = "0.4"
