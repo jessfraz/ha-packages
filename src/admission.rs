@@ -10,6 +10,7 @@ use sqlx::FromRow;
 use uuid::Uuid;
 
 use crate::{
+    carrier::Carrier,
     models::{InputTracking, Source},
     shipping_api::{
         ShippingApi,
@@ -85,6 +86,61 @@ impl Failure {
             )])));
         }
         error
+    }
+}
+
+pub(crate) fn provider_failure(error: &ProviderError) -> HttpError {
+    Failure::from_provider(error).http(error.retry_after().unwrap_or(60))
+}
+
+pub(crate) fn missing_provider(provider: ProviderId) -> HttpError {
+    Failure {
+        code: "tracking_provider_unconfigured".into(),
+        message: format!("Tracking cannot be verified because {} is not configured. Enable this provider and retry. No shipment was saved.", provider.name()),
+        rejected: false,
+    }.http(60)
+}
+
+pub(crate) struct RegistrationRoute {
+    pub provider: ProviderId,
+    pub carrier: Option<Carrier>,
+}
+
+/// Called under the global number claim, before automatic provider discovery.
+/// A tracker or an unresolved write retains its provider even if a previous
+/// default-provider rejection has expired or configuration has changed.
+pub(crate) async fn resume_tracking(
+    store: &Store,
+    number: &str,
+) -> Result<Option<RegistrationRoute>, HttpError> {
+    let routes: Vec<(ProviderId, Option<String>)> = sqlx::query_as(
+        "SELECT provider,requested_carrier FROM tracking_verifications
+         WHERE tracking_number=?
+           AND (tracker IS NOT NULL OR failure IS NULL
+             OR json_extract(failure, '$.code') IS NOT ?
+             OR json_extract(failure, '$.rejected') IS NOT 1)
+         LIMIT 2",
+    )
+    .bind(number)
+    .bind(crate::shipping_api::error::Rejection::NoCarrierForCode.error_code())
+    .fetch_all(store.pool())
+    .await
+    .map_err(crate::error::Error::from)?;
+    match routes.as_slice() {
+        [] => Ok(None),
+        [(provider, carrier)] => Ok(Some(RegistrationRoute {
+            provider: *provider,
+            carrier: carrier
+                .as_deref()
+                .map(str::parse)
+                .transpose()
+                .map_err(|error| crate::error::Error::Database(sqlx::Error::Decode(Box::new(error))))?,
+        })),
+        _ => Err(Failure {
+            code: "tracking_verification_pending".into(),
+            message: "Previous registration attempts exist with multiple providers. Reconcile those trackers before retrying. No provider was contacted and no shipment was saved.".into(),
+            rejected: false,
+        }.http(60)),
     }
 }
 
@@ -237,9 +293,7 @@ pub async fn verify(
     request_id: &str,
 ) -> Result<Tracker, HttpError> {
     let Some(provider) = provider else {
-        let expected = ProviderId::for_carrier(tracking.carrier);
-        return Err(Failure { code: "tracking_provider_unconfigured".into(),
-            message: format!("Tracking cannot be verified because {} is not configured. Enable this provider and retry. No shipment was saved.", expected.name()), rejected: false }.http(60));
+        return Err(missing_provider(ProviderId::for_carrier(tracking.carrier)));
     };
     let provider = provider.for_request(request_id, None);
     let provider_id = provider.id().as_str();
@@ -400,6 +454,13 @@ mod tests {
     }
 
     impl crate::shipping_api::ShippingApi for QueueFixture {
+        fn detect_carrier<'a>(
+            &'a self,
+            _: &'a crate::models::InputTracking,
+        ) -> crate::shipping_api::types::ApiFuture<'a, Option<crate::carrier::Carrier>> {
+            Box::pin(async { Ok(None) })
+        }
+
         fn id(&self) -> crate::shipping_api::types::ProviderId {
             crate::shipping_api::types::ProviderId::EasyPost
         }

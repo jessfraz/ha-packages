@@ -36,6 +36,15 @@ pub trait ShippingApi: Send + Sync {
     fn for_request(&self, request_id: &str, shipment_id: Option<&str>) -> Arc<dyn ShippingApi>;
     fn check_connection(&self) -> ApiFuture<'_, ()>;
 
+    /// Read-only carrier discovery for an otherwise unrecognized number.
+    /// None means this adapter found no supported match. Unavailable or
+    /// ambiguous discovery is an error, never permission to register elsewhere.
+    /// Admission verifies a unique match through the ordinary durable path.
+    fn detect_carrier<'a>(
+        &'a self,
+        tracking: &'a crate::models::InputTracking,
+    ) -> ApiFuture<'a, Option<crate::carrier::Carrier>>;
+
     /// Identify the endpoint and credentials for a saved connection diagnostic.
     /// Return only a one-way digest, never credentials. None disables persistence.
     fn connection_fingerprint(&self) -> Option<[u8; 32]> {

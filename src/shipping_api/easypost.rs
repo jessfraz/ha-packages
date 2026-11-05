@@ -798,6 +798,15 @@ fn shift_calendar_months(timestamp: i64, months: i32) -> Result<i64, SyncError> 
 }
 
 impl ShippingApi for EasyPostClient {
+    fn detect_carrier<'a>(
+        &'a self,
+        _tracking: &'a crate::models::InputTracking,
+    ) -> ApiFuture<'a, Option<crate::carrier::Carrier>> {
+        // EasyPost detects during registration, which admission has already
+        // attempted. It has no separate read-only detection endpoint.
+        Box::pin(async { Ok(None) })
+    }
+
     fn connection_fingerprint(&self) -> Option<[u8; 32]> {
         let mut digest = Sha256::new();
         digest.update(b"shipments:easypost:connection:v1\0");

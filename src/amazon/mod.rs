@@ -1739,6 +1739,23 @@ fn save(path: &std::path::Path, credential: &Credential) -> Result<(), Error> {
 }
 
 impl ShippingApi for AmazonClient {
+    fn detect_carrier<'a>(
+        &'a self,
+        tracking: &'a crate::models::InputTracking,
+    ) -> ApiFuture<'a, Option<Carrier>> {
+        Box::pin(async move {
+            // Only already verified account observations can identify a parcel.
+            // Arbitrary incoming numbers never trigger an account-wide scrape.
+            Ok(self
+                .state
+                .lock()
+                .await
+                .observed
+                .get(&tracking.number)
+                .map(|tracker| tracker.carrier))
+        })
+    }
+
     fn operation_budget(&self) -> Option<Duration> {
         Some(self.operation_timeout)
     }

@@ -1,7 +1,11 @@
 use crate::{
     installation::{Installation, InstallationReport, IntegrationPresence, valid_presence},
     models::*,
-    shipping_api::{ShippingApi, types::ProviderId},
+    shipping_api::{
+        ShippingApi,
+        error::Rejection,
+        types::{ProviderId, Tracker},
+    },
     store::{Store, validate_admission, validate_create, validate_update},
 };
 use anyhow::{Context as _, Result, anyhow};
@@ -80,6 +84,106 @@ impl Context {
             .iter()
             .find(|provider| provider.id() == id)
             .cloned()
+    }
+
+    async fn verify_tracking(
+        &self,
+        claim: &crate::admission::TrackingClaim,
+        tracking: &InputTracking,
+        log: &slog::Logger,
+        request_id: &str,
+    ) -> Result<Tracker, HttpError> {
+        if tracking.carrier.is_none()
+            && let Some(route) =
+                crate::admission::resume_tracking(&self.store, &tracking.number).await?
+        {
+            let provider = self
+                .provider(route.provider)
+                .ok_or_else(|| crate::admission::missing_provider(route.provider))?;
+            let tracking = InputTracking {
+                carrier: route.carrier,
+                ..tracking.clone()
+            };
+            return crate::admission::verify(
+                &self.store,
+                claim,
+                Some(provider),
+                &tracking,
+                log,
+                request_id,
+            )
+            .await;
+        }
+        let result = crate::admission::verify(
+            &self.store,
+            claim,
+            self.provider(ProviderId::for_carrier(tracking.carrier)),
+            tracking,
+            log,
+            request_id,
+        )
+        .await;
+        match result {
+            Err(error)
+                if tracking.carrier.is_none()
+                    && ((error.status_code == http::StatusCode::BAD_REQUEST
+                        && error.error_code.as_deref()
+                            == Some(Rejection::NoCarrierForCode.error_code()))
+                        || error.error_code.as_deref()
+                            == Some("tracking_provider_unconfigured")) =>
+            {
+                // Discovery is read-only. Every configured adapter participates;
+                // only a unique match can proceed to durable registration under
+                // the original number/source claims and request identity.
+                let mut matched = None;
+                for provider in self
+                    .providers
+                    .iter()
+                    .filter(|provider| provider.id() != ProviderId::EasyPost)
+                {
+                    let provider = provider.for_request(request_id, None);
+                    let Some(carrier) = provider
+                        .detect_carrier(tracking)
+                        .await
+                        .map_err(|error| crate::admission::provider_failure(&error))?
+                    else {
+                        continue;
+                    };
+                    let rejection = if !provider.supports_carrier(carrier) {
+                        Some(crate::shipping_api::error::ErrorKind::InvalidResponse)
+                    } else if matched.is_some() {
+                        Some(crate::shipping_api::error::ErrorKind::Rejected(
+                            Rejection::MultipleCarriersForCode,
+                        ))
+                    } else {
+                        None
+                    };
+                    if let Some(kind) = rejection {
+                        return Err(crate::admission::provider_failure(
+                            &crate::shipping_api::error::Error::new(provider.id(), kind),
+                        ));
+                    }
+                    matched = Some((provider, carrier));
+                }
+                let Some((provider, carrier)) = matched else {
+                    return Err(error);
+                };
+                let tracking = InputTracking {
+                    carrier: Some(carrier),
+                    ..tracking.clone()
+                };
+                crate::admission::verify(
+                    &self.store,
+                    claim,
+                    Some(provider),
+                    &tracking,
+                    log,
+                    request_id,
+                )
+                .await
+            }
+            result => result,
+        }
     }
 
     pub fn with_integration(mut self, token: &str) -> Self {
@@ -370,17 +474,15 @@ async fn shipments_create(
                 )
                 .await?;
                 let result = async {
-                    let verified = crate::admission::verify(
-                        store,
-                        &tracking_claim,
-                        request
-                            .context()
-                            .provider(ProviderId::for_carrier(input.tracking.carrier)),
-                        &input.tracking,
-                        &request.log,
-                        &request.request_id,
-                    )
-                    .await?;
+                    let verified = request
+                        .context()
+                        .verify_tracking(
+                            &tracking_claim,
+                            &input.tracking,
+                            &request.log,
+                            &request.request_id,
+                        )
+                        .await?;
                     crate::admission::renew_tracking(store, &tracking_claim).await?;
                     store
                         .create(input, &principal.actor, key, Some(&verified))
@@ -473,17 +575,10 @@ async fn shipment_update(
                 .preflight_update(id, expected_revision, tracking)
                 .await?;
             Some(
-                crate::admission::verify(
-                    store,
-                    claim,
-                    request
-                        .context()
-                        .provider(ProviderId::for_carrier(tracking.carrier)),
-                    tracking,
-                    &request.log,
-                    &request.request_id,
-                )
-                .await?,
+                request
+                    .context()
+                    .verify_tracking(claim, tracking, &request.log, &request.request_id)
+                    .await?,
             )
         } else {
             None

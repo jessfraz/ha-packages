@@ -12,8 +12,8 @@ use uuid::Uuid;
 use crate::{
     carrier::Carrier,
     models::{
-        CarrierEvent, CarrierTracking, EstimatedDeliveryWindow, ProviderValue, Status,
-        TrackingLocation, provider_optional,
+        CarrierEvent, CarrierTracking, EstimatedDeliveryWindow, InputTracking, ProviderValue,
+        Status, TrackingLocation, provider_optional,
     },
     shipping_api::{
         PreparedRegistration, ShippingApi,
@@ -364,7 +364,7 @@ impl ProviderTracker {
 #[derive(Serialize)]
 struct Detection<'a> {
     tracking_number: &'a str,
-    slug: [Courier; 1],
+    slug: &'a [Courier],
 }
 
 #[derive(Serialize)]
@@ -706,23 +706,35 @@ impl AfterShipClient {
         Err(provider_error(ErrorKind::RegistrationAmbiguous))
     }
 
-    async fn detect(&self, number: &str, courier: Courier) -> Result<(), SyncError> {
+    async fn detect_couriers(
+        &self,
+        number: &str,
+        couriers: &[Courier],
+    ) -> Result<(ProviderResponse, Vec<Courier>), SyncError> {
         let request = self.authenticated(self.client.post(self.url("couriers/detect")?).json(
             &Detection {
                 tracking_number: number,
-                slug: [courier],
+                slug: couriers,
             },
         ));
         let body = self.send(request).await?;
         let detected: Couriers = Self::decode(&body)?;
-        if detected.total != detected.couriers.len() || detected.total > 1 {
-            return Err(provider_error(ErrorKind::InvalidResponse));
+        if detected.total != detected.couriers.len() || detected.total > couriers.len() {
+            return Err(body.attach(provider_error(ErrorKind::InvalidResponse)));
         }
-        if detected
-            .couriers
-            .first()
-            .is_none_or(|detected| detected.slug != courier)
-        {
+        let mut matches = Vec::with_capacity(detected.total);
+        for detected in detected.couriers {
+            if !couriers.contains(&detected.slug) || matches.contains(&detected.slug) {
+                return Err(body.attach(provider_error(ErrorKind::InvalidResponse)));
+            }
+            matches.push(detected.slug);
+        }
+        Ok((body, matches))
+    }
+
+    async fn detect(&self, number: &str, courier: Courier) -> Result<(), SyncError> {
+        let (body, matches) = self.detect_couriers(number, &[courier]).await?;
+        if matches.first() != Some(&courier) {
             return Err(body.attach(provider_error(ErrorKind::Rejected(
                 Rejection::CarrierCodeMismatch,
             ))));
@@ -870,6 +882,31 @@ impl ShippingApi for AfterShipClient {
                 return Err(provider_error(ErrorKind::InvalidConnectionResponse));
             }
             Ok(())
+        }))
+    }
+    fn detect_carrier<'a>(&'a self, tracking: &'a InputTracking) -> ApiFuture<'a, Option<Carrier>> {
+        Box::pin(self.observe("detect", async {
+            let couriers: Vec<_> = Carrier::ALL
+                .iter()
+                .filter_map(|carrier| Courier::for_carrier(Some(*carrier)).ok())
+                .collect();
+            let (body, matches) = match self.detect_couriers(&tracking.number, &couriers).await {
+                Ok(detected) => detected,
+                Err(error)
+                    if error.rejects_registration()
+                        && error.error_code() == Rejection::NoCarrierForCode.error_code() =>
+                {
+                    return Ok(None);
+                }
+                Err(error) => return Err(error),
+            };
+            match matches.as_slice() {
+                [] => Ok(None),
+                [courier] => Ok(Some(courier.carrier())),
+                _ => Err(body.attach(provider_error(ErrorKind::Rejected(
+                    Rejection::MultipleCarriersForCode,
+                )))),
+            }
         }))
     }
     fn reconcile_registration<'a>(
@@ -1337,6 +1374,130 @@ mod tests {
         let mut body = vec![0; length];
         stream.read_exact(&mut body).ok()?;
         Some((method, target, body))
+    }
+
+    #[tokio::test]
+    async fn carrier_discovery_identifies_each_supported_courier_without_registering() {
+        for (slug, carrier) in [
+            ("amazon", Carrier::AmazonMcf),
+            ("speedx", Carrier::SpeedX),
+            ("sway-webhook", Carrier::Sway),
+            ("veho", Carrier::Veho),
+        ] {
+            let mut server = Server::new();
+            let client = server.client();
+            let task = tokio::spawn(async move {
+                client
+                    .detect_carrier(&crate::models::InputTracking {
+                        number: NUMBER.into(),
+                        ..Default::default()
+                    })
+                    .await
+            });
+            let request = server.request("POST", "couriers/detect").await;
+            let input: RequestedDetection = serde_json::from_slice(&request.body).unwrap();
+            assert_eq!(input.tracking_number, NUMBER);
+            assert_eq!(input.slug, ["amazon", "speedx", "sway-webhook", "veho"]);
+            request.respond(200, &format!(r#"{{"meta":{{"code":200}},"data":{{"total":1,"couriers":[{{"slug":"{slug}"}}]}}}}"#));
+            assert_eq!(task.await.unwrap().unwrap(), Some(carrier));
+            server.no_request();
+        }
+    }
+
+    #[tokio::test]
+    async fn carrier_discovery_distinguishes_absence_from_ambiguity_without_registering() {
+        for (response, expected) in [
+            (
+                r#"{"meta":{"code":200},"data":{"total":0,"couriers":[]}}"#,
+                Ok(None),
+            ),
+            (
+                r#"{"meta":{"code":200},"data":{"total":2,"couriers":[{"slug":"amazon"},{"slug":"speedx"}]}}"#,
+                Err("tracking_carrier_ambiguous"),
+            ),
+        ] {
+            let mut server = Server::new();
+            let client = server.client();
+            let task = tokio::spawn(async move {
+                client
+                    .detect_carrier(&crate::models::InputTracking {
+                        number: NUMBER.into(),
+                        ..Default::default()
+                    })
+                    .await
+            });
+            server
+                .request("POST", "couriers/detect")
+                .await
+                .respond(200, response);
+            assert_eq!(
+                task.await.unwrap().map_err(|error| error.error_code()),
+                expected
+            );
+            server.no_request();
+        }
+    }
+
+    #[tokio::test]
+    async fn carrier_discovery_only_treats_definite_no_carrier_errors_as_absence() {
+        for (status, response, expected) in [
+            (400, r#"{"meta":{"code":4010}}"#, Ok(None)),
+            (503, r#"{"meta":{"code":4010}}"#, Err("provider_http")),
+            (
+                401,
+                r#"{"meta":{"code":401}}"#,
+                Err("tracking_provider_credentials"),
+            ),
+        ] {
+            let mut server = Server::new();
+            let client = server.client();
+            let task = tokio::spawn(async move {
+                client
+                    .detect_carrier(&crate::models::InputTracking {
+                        number: NUMBER.into(),
+                        ..Default::default()
+                    })
+                    .await
+            });
+            server
+                .request("POST", "couriers/detect")
+                .await
+                .respond(status, response);
+            assert_eq!(
+                task.await.unwrap().map_err(|error| error.error_code()),
+                expected
+            );
+            server.no_request();
+        }
+    }
+
+    #[tokio::test]
+    async fn carrier_discovery_rejects_incomplete_duplicate_and_unknown_couriers() {
+        for response in [
+            r#"{"meta":{"code":200},"data":{"total":2,"couriers":[{"slug":"amazon"}]}}"#,
+            r#"{"meta":{"code":200},"data":{"total":2,"couriers":[{"slug":"amazon"},{"slug":"amazon"}]}}"#,
+            r#"{"meta":{"code":200},"data":{"total":1,"couriers":[{"slug":"unconfigured-courier"}]}}"#,
+        ] {
+            let mut server = Server::new();
+            let client = server.client();
+            let task = tokio::spawn(async move {
+                client
+                    .detect_carrier(&crate::models::InputTracking {
+                        number: NUMBER.into(),
+                        ..Default::default()
+                    })
+                    .await
+            });
+            server
+                .request("POST", "couriers/detect")
+                .await
+                .respond(200, response);
+            assert_eq!(
+                task.await.unwrap().unwrap_err().error_code(),
+                "provider_invalid_response"
+            );
+            server.no_request();
+        }
     }
 
     #[tokio::test]

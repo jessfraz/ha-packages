@@ -55,6 +55,13 @@ impl ContractApi {
 }
 
 impl ShippingApi for ContractApi {
+    fn detect_carrier<'a>(
+        &'a self,
+        _: &'a shipments::models::InputTracking,
+    ) -> ApiFuture<'a, Option<shipments::carrier::Carrier>> {
+        Box::pin(async { Ok(None) })
+    }
+
     fn id(&self) -> ProviderId {
         ProviderId::EasyPost
     }
