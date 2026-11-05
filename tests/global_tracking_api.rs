@@ -3,7 +3,7 @@ use std::{
     net::{TcpListener, TcpStream},
     sync::{
         Arc,
-        atomic::{AtomicBool, AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicU16, AtomicUsize, Ordering},
         mpsc,
     },
     thread,
@@ -35,6 +35,7 @@ struct Calls {
 struct Provider {
     base: String,
     calls: Arc<Calls>,
+    registration_status: Arc<AtomicU16>,
     started: Option<oneshot::Receiver<()>>,
     release: Option<mpsc::Sender<()>>,
     hold_registration: Arc<AtomicBool>,
@@ -49,6 +50,8 @@ impl Provider {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let base = format!("http://{}/", listener.local_addr().unwrap());
         let calls = Arc::new(Calls::default());
+        let registration_status = Arc::new(AtomicU16::new(200));
+        let response_status = registration_status.clone();
         let stop = Arc::new(AtomicBool::new(false));
         let observed = calls.clone();
         let stopping = stop.clone();
@@ -99,10 +102,21 @@ impl Provider {
                 if stopping.load(Ordering::Acquire) {
                     break;
                 }
-                let body = provider_response(id, &method, path, &body);
+                let status = if method == "POST" && path == "/trackers" {
+                    response_status.swap(200, Ordering::SeqCst)
+                } else {
+                    200
+                };
+                let body = if status == 200 {
+                    provider_response(id, &method, path, &body)
+                } else {
+                    // Real EasyPost error envelope, including a misleading
+                    // rejection code on 503 to exercise uncertain outcomes.
+                    r#"{"error":{"code":"TRACKER.NO_CARRIER_FOR_CODE","message":"No carrier found"}}"#.into()
+                };
                 let _ = write!(
                     stream,
-                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    "HTTP/1.1 {status} Test\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                     body.len()
                 );
             }
@@ -110,6 +124,7 @@ impl Provider {
         Self {
             base,
             calls,
+            registration_status,
             started: Some(incoming),
             release: Some(release),
             hold_registration,
@@ -247,6 +262,12 @@ struct AfterShipTracking {
     slug: String,
 }
 
+#[derive(Deserialize)]
+struct AfterShipDetection {
+    tracking_number: String,
+    slug: Vec<String>,
+}
+
 #[derive(Serialize)]
 struct AfterShipReply {
     id: String,
@@ -300,10 +321,28 @@ fn provider_response(provider: ProviderId, method: &str, path: &str, body: &[u8]
             },
             trackings: Vec::new(),
         }),
-        (ProviderId::AfterShip, "POST", "/couriers/detect") => aftership(DetectedCouriers {
-            total: 1,
-            couriers: vec![Courier { slug: "speedx" }],
-        }),
+        (ProviderId::AfterShip, "POST", "/couriers/detect") => {
+            let request: AfterShipDetection = serde_json::from_slice(body).unwrap();
+            let slug = if request.slug.len() == 1 {
+                match request.slug[0].as_str() {
+                    "speedx" => Some("speedx"),
+                    "amazon" => Some("amazon"),
+                    other => panic!("Unexpected AfterShip courier: {other}"),
+                }
+            } else {
+                assert!(request.slug.iter().any(|slug| slug == "amazon"));
+                assert!(request.slug.iter().any(|slug| slug == "speedx"));
+                match request.tracking_number.as_str() {
+                    "TBA000000000001" | "TBA000000000002" => Some("amazon"),
+                    "DISCOVERY000001" => Some("speedx"),
+                    _ => None,
+                }
+            };
+            aftership(DetectedCouriers {
+                total: usize::from(slug.is_some()),
+                couriers: slug.into_iter().map(|slug| Courier { slug }).collect(),
+            })
+        }
         (ProviderId::AfterShip, "POST", "/trackings") => {
             let request: AfterShipTracking = serde_json::from_slice(body).unwrap();
             aftership(AfterShipReply {
@@ -697,6 +736,238 @@ async fn preparation_renews_live_leases_and_fences_lost_number_claims_before_reg
             }
         }
         assert_eq!(app.aftership.calls(), 0);
+        app.close().await;
+    }
+}
+
+#[tokio::test]
+async fn amazon_auto_tracking_uses_aftership_after_definite_rejection_and_replays_once() {
+    let app = App::new(false).await;
+    app.easypost
+        .registration_status
+        .store(400, Ordering::SeqCst);
+    let input = input("TBA000000000001", None, Direction::Inbound);
+    let response = app.create(&input, "amazon-auto").send().await.unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let saved: Shipment = response.json().await.unwrap();
+    assert_eq!(saved.tracking.carrier, Carrier::AmazonMcf);
+    assert_eq!(saved.sync.provider, ProviderId::AfterShip);
+    assert_eq!(app.easypost.registrations(), 1);
+    assert_eq!(app.aftership.registrations(), 1);
+    assert_eq!(app.count().await, 1);
+
+    let calls = app.calls();
+    let replay: Shipment = app
+        .create(&input, "amazon-auto")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(replay.id, saved.id);
+    assert_eq!(app.calls(), calls);
+    duplicate(
+        app.create(&input, "another-amazon-request")
+            .send()
+            .await
+            .unwrap(),
+        saved.id,
+    )
+    .await;
+    assert_eq!(app.calls(), calls);
+    app.close().await;
+}
+
+#[tokio::test]
+async fn amazon_auto_tracking_resolves_replacement_tracking_through_the_same_path() {
+    let app = App::new(false).await;
+    let original = app.seed(NUMBER, false).await;
+    app.easypost
+        .registration_status
+        .store(400, Ordering::SeqCst);
+    let response = app
+        .patch(
+            &original,
+            input("TBA000000000002", None, Direction::Inbound).tracking,
+        )
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let updated: Shipment = response.json().await.unwrap();
+    assert_eq!(updated.id, original.id);
+    assert_eq!(updated.tracking.carrier, Carrier::AmazonMcf);
+    assert_eq!(updated.sync.provider, ProviderId::AfterShip);
+    assert_eq!(app.aftership.registrations(), 1);
+    assert_eq!(app.count().await, 1);
+    app.close().await;
+}
+
+#[tokio::test]
+async fn automatic_discovery_uses_the_same_trait_path_for_non_amazon_carriers() {
+    let app = App::new(false).await;
+    app.easypost
+        .registration_status
+        .store(400, Ordering::SeqCst);
+    let response = app
+        .create(
+            &input("DISCOVERY000001", None, Direction::Inbound),
+            "discovery",
+        )
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let saved: Shipment = response.json().await.unwrap();
+    assert_eq!(saved.tracking.carrier, Carrier::SpeedX);
+    assert_eq!(saved.sync.provider, ProviderId::AfterShip);
+    assert_eq!(app.aftership.registrations(), 1);
+    app.close().await;
+}
+
+#[tokio::test]
+async fn configured_provider_discovers_without_easypost_but_retains_its_uncertain_intents() {
+    for previous_uncertain in [false, true] {
+        let app = App::new(false).await;
+        let input = input("TBA000000000001", None, Direction::Inbound);
+        if previous_uncertain {
+            app.easypost
+                .registration_status
+                .store(503, Ordering::SeqCst);
+            assert_eq!(
+                app.create(&input, "default-removed")
+                    .send()
+                    .await
+                    .unwrap()
+                    .status(),
+                StatusCode::SERVICE_UNAVAILABLE,
+            );
+        }
+        // A second real server consumes the same durable state after its
+        // configuration removes EasyPost. No fake admission state is seeded.
+        let context =
+            api::Context::new(app.store.clone(), OWNER, None, None).with_provider(Arc::new(
+                AfterShipClient::for_loopback("local-aftership-key", &app.aftership.base).unwrap(),
+            ));
+        let server = api::start("127.0.0.1:0".parse().unwrap(), Arc::new(context)).unwrap();
+        let response = app
+            .client
+            .post(format!("http://{}/v1/shipments", server.local_addr()))
+            .bearer_auth(OWNER)
+            .header("Idempotency-Key", "default-removed")
+            .json(&input)
+            .send()
+            .await
+            .unwrap();
+        if previous_uncertain {
+            assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+            let failure: Failure = response.json().await.unwrap();
+            assert_eq!(
+                failure.error_code.as_deref(),
+                Some("tracking_provider_unconfigured")
+            );
+            assert_eq!(app.aftership.calls(), 0);
+            assert_eq!(app.count().await, 0);
+        } else {
+            assert_eq!(response.status(), StatusCode::CREATED);
+            let saved: Shipment = response.json().await.unwrap();
+            assert_eq!(saved.tracking.carrier, Carrier::AmazonMcf);
+            assert_eq!(saved.sync.provider, ProviderId::AfterShip);
+            assert_eq!(app.aftership.registrations(), 1);
+            assert_eq!(app.easypost.calls(), 0);
+        }
+        server.close().await.unwrap();
+        app.close().await;
+    }
+}
+
+#[tokio::test]
+async fn automatic_retry_resumes_the_registered_provider_after_the_shipment_commit_fails() {
+    let app = App::new(false).await;
+    app.easypost
+        .registration_status
+        .store(400, Ordering::SeqCst);
+    sqlx::query("CREATE TRIGGER fail_shipment_insert BEFORE INSERT ON shipments BEGIN SELECT RAISE(FAIL, 'injected shipment commit failure'); END")
+        .execute(app.store.pool()).await.unwrap();
+    let input = input("TBA000000000001", None, Direction::Inbound);
+    assert_eq!(
+        app.create(&input, "recover-provider")
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::INTERNAL_SERVER_ERROR,
+    );
+    assert_eq!(app.count().await, 0);
+    assert_eq!(app.easypost.registrations(), 1);
+    assert_eq!(app.aftership.registrations(), 1);
+    sqlx::query("DROP TRIGGER fail_shipment_insert")
+        .execute(app.store.pool())
+        .await
+        .unwrap();
+    sqlx::query("UPDATE tracking_verifications SET next_attempt_at=0 WHERE provider='easypost'")
+        .execute(app.store.pool())
+        .await
+        .unwrap();
+    let calls = app.calls();
+    let response = app.create(&input, "recover-provider").send().await.unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let saved: Shipment = response.json().await.unwrap();
+    assert_eq!(saved.tracking.carrier, Carrier::AmazonMcf);
+    assert_eq!(saved.sync.provider, ProviderId::AfterShip);
+    assert_eq!(app.calls(), calls);
+    assert_eq!(app.aftership.registrations(), 1);
+    assert_eq!(app.count().await, 1);
+    app.close().await;
+}
+
+#[tokio::test]
+async fn amazon_auto_tracking_preserves_uncertainty_and_explicit_carriers() {
+    for (status, carrier, number, expected) in [
+        (
+            503,
+            None,
+            "TBA000000000003",
+            StatusCode::SERVICE_UNAVAILABLE,
+        ),
+        (
+            400,
+            Some(Carrier::Usps),
+            "TBA000000000003",
+            StatusCode::BAD_REQUEST,
+        ),
+        (400, None, "OTHER000000000003", StatusCode::BAD_REQUEST),
+        (400, None, "TBA00000000000X", StatusCode::BAD_REQUEST),
+    ] {
+        let app = App::new(false).await;
+        app.easypost
+            .registration_status
+            .store(status, Ordering::SeqCst);
+        let input = input(number, carrier, Direction::Inbound);
+        assert_eq!(
+            app.create(&input, "rejected-or-uncertain")
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            expected,
+        );
+        let calls = app.calls();
+        assert_eq!(
+            app.create(&input, "rejected-or-uncertain")
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            expected,
+        );
+        assert_eq!(app.easypost.calls(), calls.0);
+        let discovery_reads = usize::from(status == 400 && carrier.is_none());
+        assert_eq!(app.aftership.calls(), discovery_reads * 2);
+        assert_eq!(app.aftership.registrations(), 0);
+        assert_eq!(app.easypost.registrations(), 1);
+        assert_eq!(app.count().await, 0);
         app.close().await;
     }
 }

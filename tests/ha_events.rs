@@ -298,6 +298,13 @@ async fn successful_point_only_refresh_withdraws_stored_window_without_losing_de
     #[derive(Clone)]
     struct PointSnapshot(Tracker);
     impl ShippingApi for PointSnapshot {
+        fn detect_carrier<'a>(
+            &'a self,
+            _: &'a shipments::models::InputTracking,
+        ) -> ApiFuture<'a, Option<shipments::carrier::Carrier>> {
+            Box::pin(async { panic!("refresh must not discover carriers") })
+        }
+
         fn id(&self) -> ProviderId {
             ProviderId::EasyPost
         }

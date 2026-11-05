@@ -26,8 +26,11 @@ There is no hard-delete endpoint; archive unwanted records.
 Create returns `201` only after provider verification and an atomic commit of
 the shipment, history and idempotency response. The response has
 `sync.registration_state: "registered"` and a canonical, required carrier.
-Omitting the input carrier requests auto-detection; failed detection saves
-nothing. Unknown and pre-transit statuses are accepted without scans.
+Omitting the input carrier requests auto-detection across configured providers.
+A definite default-provider rejection permits read-only discovery by the other
+adapters; one unique match is verified before saving. Ambiguous matches and
+uncertain registrations stop admission. Failed detection saves nothing.
+Unknown and pre-transit statuses are accepted without scans.
 Tracking-number edits use the same verification, preserving the original
 shipment and history if verification fails.
 

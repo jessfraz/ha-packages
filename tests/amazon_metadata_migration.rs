@@ -690,6 +690,13 @@ struct SavedPageFixture {
 }
 
 impl ShippingApi for SavedPageFixture {
+    fn detect_carrier<'a>(
+        &'a self,
+        _: &'a shipments::models::InputTracking,
+    ) -> ApiFuture<'a, Option<shipments::carrier::Carrier>> {
+        Box::pin(async { panic!("saved enrichment must not discover carriers") })
+    }
+
     fn id(&self) -> ProviderId {
         ProviderId::AmazonAccount
     }

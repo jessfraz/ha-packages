@@ -12,6 +12,13 @@ tracker validation, shared request pacing and registration recovery. Shared
 observations and errors live in `types.rs` and `error.rs`. The worker uses the
 trait and stores provider ownership with each tracking identity.
 
+Each adapter implements read-only `detect_carrier` discovery. After a definite
+automatic-detection rejection, admission asks every other configured adapter
+and verifies one unique match through the existing registration path. The same
+resolver handles creates and tracking edits. An absent default provider permits
+discovery only when it has no unresolved registration for that number. New
+adapters join this path through the trait, without adding API routing branches.
+
 Reconciliation must establish a confirmed match or authoritative absence.
 Before a provider write, the implementation reserves its request slot, the
 worker verifies the shipment's lease and generation, and the reservation

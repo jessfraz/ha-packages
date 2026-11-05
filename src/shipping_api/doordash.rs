@@ -678,6 +678,23 @@ fn parse_page(body: &[u8], code: &str, tracking_number: &str) -> Result<Tracker,
 }
 
 impl ShippingApi for DoorDashClient {
+    fn detect_carrier<'a>(
+        &'a self,
+        tracking: &'a crate::models::InputTracking,
+    ) -> ApiFuture<'a, Option<crate::carrier::Carrier>> {
+        Box::pin(async move {
+            tracking
+                .recipient_url
+                .as_deref()
+                .map(normalize_recipient_url)
+                .transpose()?;
+            Ok(tracking
+                .recipient_url
+                .as_ref()
+                .map(|_| crate::carrier::Carrier::DoorDash))
+        })
+    }
+
     fn id(&self) -> ProviderId {
         ProviderId::DoorDash
     }

@@ -1,3 +1,11 @@
+## 0.6.28
+
+- Discover unrecognized tracking through every configured provider's trait
+  implementation. Creates and tracking edits share the same path, preserving
+  explicit carriers, duplicate protection and uncertain registration recovery.
+- Let AfterShip identify supported carriers during automatic admission,
+  including Amazon MCF, instead of stopping at EasyPost's unsupported result.
+
 ## 0.6.27
 
 - Keep Amazon's explicit delivery date when its promise includes a clock
