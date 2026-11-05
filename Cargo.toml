@@ -10,7 +10,7 @@ repository = "https://github.com/jessfraz/ha-packages"
 anyhow = "1"
 base64 = "0.22"
 clap = { version = "4", features = ["derive", "env"] }
-dropshot = "0.17"
+dropshot = "0.18"
 getrandom = "0.4"
 http = "1"
 jiff = { version = "0.2", default-features = false, features = ["std", "tzdb-bundle-always"] }
