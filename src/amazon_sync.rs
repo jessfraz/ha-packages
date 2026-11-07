@@ -149,6 +149,7 @@ struct BatchProgress {
     deferred: DeferredCounts,
     complete: Option<bool>,
     has_more: Option<bool>,
+    continued: Option<bool>,
     error_code: Option<&'static str>,
 }
 
@@ -229,6 +230,7 @@ impl AmazonDiscoveryWorker {
                     deferred: batch.deferred_reasons.clone(),
                     complete: Some(batch.complete),
                     has_more: Some(batch.has_more),
+                    continued: Some(batch.continued),
                     ..Default::default()
                 };
                 // An old response cannot import after disconnect or account replacement.
@@ -298,9 +300,10 @@ impl AmazonDiscoveryWorker {
         };
         let account = self.client.status().await;
         // A refusal in an earlier batch still makes the completed sweep partial.
+        // The client owns continuation: a restart retains the schedule but starts a new scan.
         let deferred_store = i64::try_from(progress.deferred_store)
             .map_err(|_| Error::Invalid("too many deferred parcels".into()))?
-            .saturating_add(if claim.has_more {
+            .saturating_add(if progress.continued.unwrap_or(claim.has_more) {
                 claim.deferred_store
             } else {
                 0
@@ -323,7 +326,7 @@ impl AmazonDiscoveryWorker {
                  attempts = CASE WHEN ? THEN 0 ELSE attempts + 1 END,
                  last_finished_at = unixepoch(),
                  last_complete_at = CASE WHEN ? THEN unixepoch() ELSE last_complete_at END,
-                 last_outcome = ?, last_error_code = ?, has_more = ?,
+                 last_outcome = ?, last_error_code = ?, has_more = coalesce(?, has_more),
                  deferred_parcels = ?, deferred_store = ?,
                  lease_token = NULL, lease_until = NULL
              WHERE id = 1 AND lease_token = ? AND lease_until > unixepoch()",
@@ -333,7 +336,7 @@ impl AmazonDiscoveryWorker {
         .bind(outcome == DiscoveryOutcome::Complete)
         .bind(outcome)
         .bind(progress.error_code)
-        .bind(progress.has_more.unwrap_or(false))
+        .bind(progress.has_more)
         .bind(deferred)
         .bind(deferred_store)
         .bind(&claim.lease_token)
