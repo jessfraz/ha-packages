@@ -71,6 +71,7 @@ struct DiscoverySnapshot {
     last_error_code: Option<String>,
     has_more: bool,
     deferred_parcels: i64,
+    coverage_incomplete: bool,
 }
 
 impl DiscoverySnapshot {
@@ -111,7 +112,8 @@ impl DiscoverySnapshot {
                 | DiscoveryState::ChallengeRequired
                 | DiscoveryState::Failed
                 | DiscoveryState::Stale
-        ) || (state == DiscoveryState::Partial && !self.has_more);
+        ) || (state == DiscoveryState::Partial && !self.has_more)
+            || (state != DiscoveryState::Disabled && self.coverage_incomplete);
         DiscoveryHealth {
             state,
             problem,
@@ -167,7 +169,7 @@ impl AmazonDiscoveryWorker {
             "SELECT unixepoch() AS checked_at, last_attempt_at, last_finished_at,
                     last_complete_at, next_attempt_at, lease_until AS running_until,
                     attempts AS consecutive_failures, last_outcome, last_error_code,
-                    has_more, deferred_parcels
+                    has_more, deferred_parcels, coverage_incomplete
              FROM amazon_discovery WHERE id = 1",
         )
         .fetch_one(store.pool())
@@ -202,7 +204,8 @@ impl AmazonDiscoveryWorker {
                  lease_token = NULL, lease_until = NULL, last_attempt_at = NULL,
                  last_finished_at = NULL, last_complete_at = NULL,
                  last_outcome = NULL, last_error_code = NULL,
-                 has_more = 0, deferred_parcels = 0, deferred_store = 0
+                 has_more = 0, deferred_parcels = 0, deferred_store = 0,
+                 coverage_incomplete = 0
              WHERE id = 1",
         )
         .execute(store.pool())
@@ -328,6 +331,7 @@ impl AmazonDiscoveryWorker {
                  last_complete_at = CASE WHEN ? THEN unixepoch() ELSE last_complete_at END,
                  last_outcome = ?, last_error_code = ?, has_more = coalesce(?, has_more),
                  deferred_parcels = ?, deferred_store = ?,
+                 coverage_incomplete = CASE WHEN ? THEN ? ELSE coverage_incomplete END,
                  lease_token = NULL, lease_until = NULL
              WHERE id = 1 AND lease_token = ? AND lease_until > unixepoch()",
         )
@@ -339,6 +343,15 @@ impl AmazonDiscoveryWorker {
         .bind(progress.has_more)
         .bind(deferred)
         .bind(deferred_store)
+        // A new attempt or continuation does not repair a completed coverage gap.
+        .bind(
+            progress.complete == Some(true)
+                && matches!(
+                    outcome,
+                    DiscoveryOutcome::Complete | DiscoveryOutcome::Partial
+                ),
+        )
+        .bind(outcome == DiscoveryOutcome::Partial)
         .bind(&claim.lease_token)
         .execute(&self.pool)
         .await?;
@@ -492,6 +505,127 @@ mod tests {
         assert_eq!(disabled.state, DiscoveryState::Disabled);
         assert!(!disabled.problem);
         store.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn coverage_migration_retains_completed_gaps_and_reset_clears_them() {
+        use sqlx::{
+            migrate::Migrator,
+            sqlite::{SqliteConnectOptions, SqlitePoolOptions},
+        };
+        use std::path::Path;
+
+        let directory = tempfile::tempdir().unwrap();
+        let migrations = directory.path().join("before-coverage-retention");
+        std::fs::create_dir(&migrations).unwrap();
+        for entry in
+            std::fs::read_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join("migrations")).unwrap()
+        {
+            let entry = entry.unwrap();
+            let name = entry.file_name();
+            let version: i64 = name
+                .to_str()
+                .unwrap()
+                .split_once('_')
+                .unwrap()
+                .0
+                .parse()
+                .unwrap();
+            if version <= 26 {
+                std::fs::copy(entry.path(), migrations.join(name)).unwrap();
+            }
+        }
+        let legacy = Migrator::new(migrations.as_path()).await.unwrap();
+        for (index, (outcome, has_more, expected, problem)) in [
+            (None, false, false, false),
+            (Some(DiscoveryOutcome::Complete), false, false, false),
+            (Some(DiscoveryOutcome::Partial), true, false, false),
+            (Some(DiscoveryOutcome::Partial), false, true, true),
+            (Some(DiscoveryOutcome::Failed), false, false, true),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let database = directory.path().join(format!("legacy-{index}.sqlite3"));
+            let pool = SqlitePoolOptions::new()
+                .max_connections(1)
+                .connect_with(
+                    SqliteConnectOptions::new()
+                        .filename(&database)
+                        .create_if_missing(true),
+                )
+                .await
+                .unwrap();
+            legacy.run(&pool).await.unwrap();
+            sqlx::query(
+                "UPDATE amazon_discovery
+                 SET last_outcome = ?, has_more = ?, deferred_parcels = ?,
+                     last_finished_at = 1794000000, last_complete_at = 1793900000,
+                     next_attempt_at = unixepoch() + 1800
+                 WHERE id = 1",
+            )
+            .bind(outcome)
+            .bind(has_more)
+            .bind(if outcome == Some(DiscoveryOutcome::Partial) {
+                2
+            } else {
+                0
+            })
+            .execute(&pool)
+            .await
+            .unwrap();
+            let retained_sql = "SELECT last_outcome,has_more,deferred_parcels,last_finished_at,last_complete_at,next_attempt_at FROM amazon_discovery WHERE id=1";
+            let retained: (
+                Option<DiscoveryOutcome>,
+                bool,
+                i64,
+                Option<i64>,
+                Option<i64>,
+                i64,
+            ) = sqlx::query_as(retained_sql).fetch_one(&pool).await.unwrap();
+            pool.close().await;
+            let store = Store::open(&database).await.unwrap();
+            let after = sqlx::query_as(retained_sql)
+                .fetch_one(store.pool())
+                .await
+                .unwrap();
+            assert_eq!(retained, after);
+            let incomplete: bool =
+                sqlx::query_scalar("SELECT coverage_incomplete FROM amazon_discovery WHERE id=1")
+                    .fetch_one(store.pool())
+                    .await
+                    .unwrap();
+            assert_eq!(incomplete, expected);
+            let mut account = crate::amazon::AmazonStatus {
+                state: crate::amazon::AmazonState::Connected,
+                imports_enabled: true,
+                ..Default::default()
+            };
+            assert_eq!(
+                AmazonDiscoveryWorker::health(&store, &account)
+                    .await
+                    .unwrap()
+                    .problem,
+                problem
+            );
+            if expected {
+                account.imports_enabled = false;
+                let disabled = AmazonDiscoveryWorker::health(&store, &account)
+                    .await
+                    .unwrap();
+                assert_eq!(disabled.state, DiscoveryState::Disabled);
+                assert!(!disabled.problem);
+                account.imports_enabled = true;
+                AmazonDiscoveryWorker::enabled(&store).await.unwrap();
+                let reset = AmazonDiscoveryWorker::health(&store, &account)
+                    .await
+                    .unwrap();
+                assert_eq!(reset.state, DiscoveryState::Pending);
+                assert!(!reset.problem);
+                assert_eq!(reset.last_complete_at, None);
+            }
+            store.close().await.unwrap();
+        }
     }
 
     #[derive(Clone, Default)]
