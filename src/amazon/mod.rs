@@ -2402,17 +2402,34 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn restarted_discovery_does_not_count_previous_sweep_refusals_twice() {
+    async fn discovery_coverage_survives_retries_and_restarts_until_a_clean_sweep() {
         use crate::{
             amazon_sync::AmazonDiscoveryWorker,
             models::{CreateShipment, Direction, InputTracking},
             store::Store,
         };
-        let fixture = Fixture::new(|path| {
+        let recovered = Arc::new(AtomicBool::new(false));
+        let upstream_recovered = recovered.clone();
+        let package_count = Arc::new(std::sync::atomic::AtomicUsize::new(7));
+        let upstream_count = package_count.clone();
+        let gate = Arc::new(Mutex::new(
+            None::<(
+                tokio::sync::oneshot::Sender<()>,
+                std::sync::mpsc::Receiver<()>,
+            )>,
+        ));
+        let upstream_gate = gate.clone();
+        let fixture = Fixture::new(move |path| {
+            if path == "/your-orders/orders?timeFilter=months-3"
+                && let Some((started, release)) = upstream_gate.lock().unwrap().take()
+            {
+                started.send(()).unwrap();
+                release.recv().unwrap();
+            }
             match path {
             "/auth/token" => (200, ACCESS.into()),
             "/ap/exchangetoken/cookies" => (200, COOKIES.into()),
-            "/your-orders/orders?timeFilter=months-3" => (200, (1..=7).map(|package| {
+            "/your-orders/orders?timeFilter=months-3" => (200, (1..=upstream_count.load(Ordering::Acquire)).filter(|package| *package != 1 || !upstream_recovered.load(Ordering::Acquire)).map(|package| {
                 let path = PATH.replace("packageId=1", &format!("packageId={package}"));
                 format!(r#"<a class="item-card__link" href="{path}" aria-label="Package {package}, Order placed 1 October 2026, Shipped"></a>"#)
             }).collect()),
@@ -2477,6 +2494,66 @@ mod tests {
         assert_eq!(finished.deferred_parcels, 1);
         assert!(finished.problem);
         assert_eq!(finished.last_complete_at, None);
+        assert_eq!(store.get(owned.id).await.unwrap().title, "Owner's parcel");
+
+        package_count.store(14, Ordering::Release);
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        *gate.lock().unwrap() = Some((started_tx, release_rx));
+        force_discovery_due(&store).await;
+        let retry_worker = worker.clone();
+        let retry = tokio::spawn(async move { retry_worker.tick().await });
+        started_rx.await.unwrap();
+        let running = AmazonDiscoveryWorker::health(&store, &restored.status().await).await;
+        // Release the fixture before assertions so a failed regression cannot
+        // leave its server thread blocked during cleanup.
+        release_tx.send(()).unwrap();
+        assert!(retry.await.unwrap().unwrap());
+        let running = running.unwrap();
+        assert_eq!(running.state, crate::amazon_sync::DiscoveryState::Running);
+        assert!(
+            running.problem,
+            "a new attempt has not repaired known coverage"
+        );
+        let continuation = AmazonDiscoveryWorker::health(&store, &restored.status().await)
+            .await
+            .unwrap();
+        assert!(continuation.has_more);
+        assert!(continuation.problem);
+
+        drop(worker);
+        drop(restored);
+        store.close().await.unwrap();
+        let store = Store::open(&dir.path().join("registry.sqlite3"))
+            .await
+            .unwrap();
+        let restored = Arc::new(
+            AmazonClient::for_test(dir.path().join("amazon-account.json"), fixture.url.clone())
+                .unwrap(),
+        );
+        let restarted = AmazonDiscoveryWorker::health(&store, &restored.status().await)
+            .await
+            .unwrap();
+        assert!(restarted.has_more);
+        assert!(
+            restarted.problem,
+            "coverage survives the process and Store restart"
+        );
+
+        recovered.store(true, Ordering::Release);
+        let worker = AmazonDiscoveryWorker::new(store.clone(), restored.clone());
+        for _ in 0..3 {
+            force_discovery_due(&store).await;
+            assert!(worker.tick().await.unwrap());
+        }
+        let complete = AmazonDiscoveryWorker::health(&store, &restored.status().await)
+            .await
+            .unwrap();
+        assert!(!complete.has_more);
+        assert_eq!(complete.deferred_parcels, 0);
+        assert!(complete.last_complete_at.is_some());
+        assert_eq!(complete.state, crate::amazon_sync::DiscoveryState::Complete);
+        assert!(!complete.problem);
         assert_eq!(store.get(owned.id).await.unwrap().title, "Owner's parcel");
         store.close().await.unwrap();
     }

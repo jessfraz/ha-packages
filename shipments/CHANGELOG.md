@@ -1,3 +1,8 @@
+## 0.6.31
+
+- Keep incomplete Amazon discovery coverage visible during retries and restarts,
+  until a complete clean sweep or an intentional account reset.
+
 ## 0.6.30
 
 - Keep discovery deferral counts accurate when the app restarts during a bounded

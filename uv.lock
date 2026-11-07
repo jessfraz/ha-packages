@@ -2833,7 +2833,7 @@ wheels = [
 
 [[package]]
 name = "shipments-home-assistant"
-version = "0.6.30"
+version = "0.6.31"
 source = { virtual = "." }
 
 [package.dev-dependencies]
