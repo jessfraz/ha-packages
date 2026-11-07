@@ -1,5 +1,6 @@
 [package]
 name = "shipments"
+default-run = "shipments"
 version = "0.6.28"
 edition = "2024"
 license = "MIT AND Apache-2.0"

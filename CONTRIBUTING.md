@@ -56,6 +56,10 @@ contract test against the compiled Rust binary. CI builds that binary before
 running the Python suite. The default suite needs no API keys and makes no
 external provider requests.
 
+CLI tests run the actual binary against loopback HTTP and the current server.
+To check an installed CLI, set `HA_SHIPMENTS_TEST_BINARY` when running
+`cargo test --locked --test cli`. This catches release skew in the client types.
+
 The separate **EasyPost sandbox** CI workflow uses the repository's
 `EASYPOST_TEST_API_KEY` Actions secret. It runs against EasyPost's test API on
 main, trusted same-repository pull requests and manual dispatches. Fork and

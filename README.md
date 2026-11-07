@@ -36,6 +36,9 @@ there is no token to create or copy during setup.
 See the [installation guide](shipments/DOCS.md) for configuration, pairing,
 updates, and backups. Keep the app and integration on the same release.
 
+The [JSON CLI](docs/cli.md) uses the same API types as the server and supports
+native and Home Assistant connections. Install it with `nix build .#ha-shipments`.
+
 ## Tracking
 
 Every shipment needs a tracking number and an `inbound` or `outbound`
