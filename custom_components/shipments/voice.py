@@ -255,7 +255,7 @@ def query_enabled(hass: HomeAssistant, assistant: str | None = "conversation") -
     return entry is not None
 
 
-async def _coordinator(
+async def async_query_coordinator(
     hass: HomeAssistant, context: Context, assistant: str | None
 ) -> tuple[ShipmentsCoordinator | None, str | None]:
     entry, gateway, error = _connection(hass, assistant)
@@ -367,7 +367,7 @@ async def async_query(
     assistant: str | None,
 ) -> VoiceAnswer:
     """Answer from synchronized database rows, without contacting a carrier."""
-    coordinator, access_error = await _coordinator(hass, context, assistant)
+    coordinator, access_error = await async_query_coordinator(hass, context, assistant)
     if coordinator is None:
         return _error(
             request,
@@ -426,7 +426,7 @@ async def async_query(
             "I couldn't read shipment information. Please try again shortly.",
         )
     # Awaiting a request can overlap unloading, exposure changes or user revocation.
-    current, access_error = await _coordinator(hass, context, assistant)
+    current, access_error = await async_query_coordinator(hass, context, assistant)
     if current is not coordinator:
         return _error(
             request,

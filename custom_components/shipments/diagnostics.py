@@ -28,6 +28,7 @@ class CoordinatorDiagnostics(TypedDict):
 class BackendDiagnostics(TypedDict):
     last_observed_version: str | None
     last_observed_versions_match: bool | None
+    amazon_discovery: dict[str, object] | None
 
 
 class SummaryDiagnostics(TypedDict):
@@ -98,6 +99,11 @@ async def async_get_config_entry_diagnostics(
             "last_observed_version": backend_version,
             "last_observed_versions_match": (
                 backend_version == version if backend_version is not None else None
+            ),
+            "amazon_discovery": (
+                coordinator.amazon_discovery.attributes()
+                if coordinator is not None and coordinator.amazon_discovery is not None
+                else None
             ),
         },
         "summary": {"current": available, "counts": counts},

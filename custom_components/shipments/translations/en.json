@@ -95,6 +95,21 @@
       },
       "inbound_due_today": {
         "name": "Inbound deliveries today"
+      },
+      "amazon_discovery": {
+        "name": "Amazon discovery",
+        "state": {
+          "disabled": "Disabled",
+          "pending": "Pending",
+          "running": "Running",
+          "complete": "Complete",
+          "partial": "Partial",
+          "retrying": "Retrying",
+          "auth_required": "Auth required",
+          "challenge_required": "Challenge required",
+          "failed": "Failed",
+          "stale": "Stale"
+        }
       }
     },
     "binary_sensor": {
@@ -103,6 +118,9 @@
       },
       "sync_errors": {
         "name": "Sync errors"
+      },
+      "amazon_discovery": {
+        "name": "Amazon discovery problem"
       }
     },
     "calendar": {

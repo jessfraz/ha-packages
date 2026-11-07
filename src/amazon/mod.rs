@@ -98,7 +98,7 @@ pub struct DeferredCounts {
     pub request_limit: usize,
 }
 impl DeferredCounts {
-    fn total(&self) -> usize {
+    pub(crate) fn total(&self) -> usize {
         self.unsupported_link
             + self.missing_identity
             + self.missing_product
@@ -4167,6 +4167,13 @@ mod tests {
         );
         assert_eq!(shipment.tracking.carrier, crate::carrier::Carrier::Usps);
         assert_eq!(shipment.sources.len(), 1);
+        let health = AmazonDiscoveryWorker::health(&store, &client.status().await)
+            .await
+            .unwrap();
+        assert_eq!(health.state, crate::amazon_sync::DiscoveryState::Complete);
+        assert!(health.last_complete_at.is_some());
+        assert_eq!(health.last_complete_at, health.last_finished_at);
+        assert!(!health.problem);
         let before = fixture.calls.lock().unwrap().len();
         assert!(!worker.tick().await.unwrap());
         assert_eq!(fixture.calls.lock().unwrap().len(), before);

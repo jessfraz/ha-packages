@@ -39,6 +39,9 @@
       },
       "inbound_due_today": {
         "default": "mdi:package-clock"
+      },
+      "amazon_discovery": {
+        "default": "mdi:cloud-sync-outline"
       }
     },
     "calendar": {

@@ -13,7 +13,7 @@ from .conftest import SUMMARY, Backend, get_state
 
 async def test_summary_entities_and_unload(hass: HomeAssistant, entry) -> None:
     states = hass.states.async_all("sensor")
-    assert len(states) == len(SENSOR_KEYS)
+    assert len(states) == len(SENSOR_KEYS) + 1
     assert {state.entity_id: state.state for state in states} == {
         **{f"sensor.shipments_{key}": str(value) for key, value in SUMMARY.items()},
         "sensor.shipments_inbound_delivered_today": "1",
@@ -23,6 +23,7 @@ async def test_summary_entities_and_unload(hass: HomeAssistant, entry) -> None:
         "sensor.shipments_inbound_exceptions": "0",
         "sensor.shipments_outbound_active": "1",
         "sensor.shipments_outbound_exceptions": "0",
+        "sensor.shipments_amazon_discovery": "unavailable",
     }
     assert hass.services.has_service(DOMAIN, "archive")
     assert await hass.config_entries.async_unload(entry.entry_id)
@@ -33,7 +34,7 @@ async def test_summary_entities_and_unload(hass: HomeAssistant, entry) -> None:
     # Shared HA session survives unloading and the same view can serve a reload.
     assert await hass.config_entries.async_setup(entry.entry_id)
     await hass.async_block_till_done()
-    assert len(hass.states.async_all("sensor")) == len(SENSOR_KEYS)
+    assert len(hass.states.async_all("sensor")) == len(SENSOR_KEYS) + 1
 
 
 async def test_failed_summary_marks_entities_unavailable(
@@ -74,6 +75,7 @@ async def test_direction_counts_keep_existing_sensors_combined(
         "sensor.shipments_inbound_exceptions": "1",
         "sensor.shipments_outbound_active": "3",
         "sensor.shipments_outbound_exceptions": "2",
+        "sensor.shipments_amazon_discovery": "unavailable",
     }
     assert [
         (request.path, request.query)

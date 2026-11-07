@@ -1,3 +1,11 @@
+## 0.6.29
+
+- Report Amazon discovery coverage and actual retry deadlines separately from
+  individual tracking requests, with native HA diagnostics and problem entities.
+- Add a read-only discovery health tool to Assist, using the existing exposure
+  and user permissions.
+- Add the source repository link to the app footer.
+
 ## 0.6.28
 
 - Discover unrecognized tracking through every configured provider's trait

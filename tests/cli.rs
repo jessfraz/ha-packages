@@ -581,6 +581,7 @@ fn native_only_routes_get_and_page_reads_and_revoke() {
             "GET",
             serde_json::to_string(&System {
                 amazon: Default::default(),
+                amazon_discovery: None,
                 version: "fixture".into(),
                 provider_enabled: false,
                 enabled_providers: vec![],

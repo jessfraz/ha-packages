@@ -142,6 +142,21 @@ conversation agent.
 
 ## Sensors
 
+Amazon discovery has separate diagnostic status and problem entities. Their
+attributes include the last attempt, last finished batch, last complete scan,
+and actual next scheduled attempt. A successful tracking lookup does not update
+these discovery timestamps. Bounded scans show partial coverage while more work
+is scheduled; a finished scan with deferred parcels remains a problem.
+
+The worker allows its scheduled retry and a five-minute grace period before
+reporting stale discovery, including provider-requested backoff and an active
+batch's work lease. Three consecutive failures require attention; sign-in and
+verification challenges require attention immediately. Missing or old backend
+reports make the entities unavailable, rather than healthy.
+
+When Shipments is exposed to Assist, the read-only `shipments__health` tool can
+report discovery health without running discovery or changing account settings.
+
 The integration keeps the existing counts combined across inbound and outbound
 shipments, including **Exceptions** and **Sync errors**. It also adds:
 

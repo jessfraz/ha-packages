@@ -779,6 +779,8 @@ pub struct Summary {
 pub struct System {
     #[serde(default)]
     pub amazon: crate::amazon::AmazonStatus,
+    #[serde(default)]
+    pub amazon_discovery: Option<crate::amazon_sync::DiscoveryHealth>,
     pub version: String,
     pub provider_enabled: bool,
     #[serde(default)]
