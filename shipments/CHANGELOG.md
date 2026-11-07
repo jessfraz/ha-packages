@@ -1,3 +1,8 @@
+## 0.6.30
+
+- Keep discovery deferral counts accurate when the app restarts during a bounded
+  account scan, while retaining refusals across real batch continuations.
+
 ## 0.6.29
 
 - Report Amazon discovery coverage and actual retry deadlines separately from

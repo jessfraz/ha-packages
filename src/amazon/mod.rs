@@ -115,6 +115,7 @@ pub struct Discovery {
     pub has_more: bool,
     pub complete: bool,
     pub(crate) listing_pages: usize,
+    pub(crate) continued: bool,
     pub failure: Option<ConnectionError>,
 }
 
@@ -781,7 +782,7 @@ impl AmazonClient {
     }
 
     async fn discover_inner(&self, check: AccountCheck) -> Result<Discovery, ConnectionError> {
-        let (generation, customer, imported, mut scan) = {
+        let (generation, customer, imported, mut scan, continued) = {
             let mut state = self.state.lock().await;
             let credential = state
                 .credential
@@ -794,12 +795,19 @@ impl AmazonClient {
                     )
                 })?;
             let customer = credential.customer_id.clone();
+            let continued = matches!(check, AccountCheck::Discovery) && state.scan.is_some();
             let scan = if matches!(check, AccountCheck::Discovery) {
                 state.scan.take().unwrap_or_default()
             } else {
                 DiscoveryScan::default()
             };
-            (state.generation, customer, state.imported.clone(), scan)
+            (
+                state.generation,
+                customer,
+                state.imported.clone(),
+                scan,
+                continued,
+            )
         };
         let started = Instant::now();
         let deadline = started + self.operation_timeout;
@@ -1079,6 +1087,7 @@ impl AmazonClient {
             has_more,
             complete,
             listing_pages,
+            continued,
             failure,
         })
     }
@@ -2390,6 +2399,86 @@ mod tests {
             }
             assert!(!client.status().await.imports_enabled);
         }
+    }
+
+    #[tokio::test]
+    async fn restarted_discovery_does_not_count_previous_sweep_refusals_twice() {
+        use crate::{
+            amazon_sync::AmazonDiscoveryWorker,
+            models::{CreateShipment, Direction, InputTracking},
+            store::Store,
+        };
+        let fixture = Fixture::new(|path| {
+            match path {
+            "/auth/token" => (200, ACCESS.into()),
+            "/ap/exchangetoken/cookies" => (200, COOKIES.into()),
+            "/your-orders/orders?timeFilter=months-3" => (200, (1..=7).map(|package| {
+                let path = PATH.replace("packageId=1", &format!("packageId={package}"));
+                format!(r#"<a class="item-card__link" href="{path}" aria-label="Package {package}, Order placed 1 October 2026, Shipped"></a>"#)
+            }).collect()),
+            path if path.starts_with("/gp/your-account/ship-track?") => (200, coverage_tracking(path)),
+            _ => (404, "Unexpected request".into()),
+        }
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let client = Arc::new(configured(&dir, &fixture));
+        client.enable_imports().await.unwrap();
+        let store = Store::open(&dir.path().join("registry.sqlite3"))
+            .await
+            .unwrap();
+        let owned = store
+            .create(
+                CreateShipment {
+                    title: "Owner's parcel".into(),
+                    direction: Direction::Outbound,
+                    merchant: None,
+                    order_reference: None,
+                    signature_required: None,
+                    tracking: InputTracking {
+                        number: "9400111122223333440001".into(),
+                        carrier: Some(crate::carrier::Carrier::Usps),
+                        recipient_url: None,
+                    },
+                    source: None,
+                },
+                "owner",
+                "restart-conflict",
+                None,
+            )
+            .await
+            .unwrap();
+        let worker = AmazonDiscoveryWorker::new(store.clone(), client.clone());
+        assert!(worker.tick().await.unwrap());
+        let before = AmazonDiscoveryWorker::health(&store, &client.status().await)
+            .await
+            .unwrap();
+        assert!(before.has_more);
+        assert!(before.deferred_parcels > 0);
+        drop(worker);
+        drop(client);
+
+        let restored = Arc::new(
+            AmazonClient::for_test(dir.path().join("amazon-account.json"), fixture.url.clone())
+                .unwrap(),
+        );
+        let worker = AmazonDiscoveryWorker::new(store.clone(), restored.clone());
+        force_discovery_due(&store).await;
+        assert!(worker.tick().await.unwrap());
+        let restarted = AmazonDiscoveryWorker::health(&store, &restored.status().await)
+            .await
+            .unwrap();
+        assert_eq!(restarted.deferred_parcels, before.deferred_parcels);
+        force_discovery_due(&store).await;
+        assert!(worker.tick().await.unwrap());
+        let finished = AmazonDiscoveryWorker::health(&store, &restored.status().await)
+            .await
+            .unwrap();
+        assert!(!finished.has_more);
+        assert_eq!(finished.deferred_parcels, 1);
+        assert!(finished.problem);
+        assert_eq!(finished.last_complete_at, None);
+        assert_eq!(store.get(owned.id).await.unwrap().title, "Owner's parcel");
+        store.close().await.unwrap();
     }
 
     #[tokio::test]
