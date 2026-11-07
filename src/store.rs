@@ -1468,6 +1468,7 @@ impl Store {
         let (pending_syncs,sync_errors)=sqlx::query_as("SELECT count(CASE WHEN next_attempt_at IS NOT NULL THEN 1 END),count(last_error) FROM shipments WHERE archived=0").fetch_one(&self.pool).await?;
         Ok(System {
             amazon: Default::default(),
+            amazon_discovery: None,
             version: env!("CARGO_PKG_VERSION").into(),
             provider_enabled,
             enabled_providers: Vec::new(),

@@ -909,6 +909,10 @@ async fn system(
     } else {
         Default::default()
     };
+    system.amazon_discovery = Some(
+        crate::amazon_sync::AmazonDiscoveryWorker::health(&request.context().store, &system.amazon)
+            .await?,
+    );
     system.enabled_providers = request
         .context()
         .providers

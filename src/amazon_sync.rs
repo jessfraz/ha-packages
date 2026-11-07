@@ -3,21 +3,139 @@
 
 use std::sync::Arc;
 
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 use sqlx::{FromRow, SqlitePool};
 use uuid::Uuid;
 
 use crate::{
-    amazon::{AmazonClient, DeferredCounts},
+    amazon::{AmazonClient, AmazonState, AmazonStatus, DeferredCounts},
     error::Error,
     shipping_api::ShippingApi,
     store::Store,
     sync::{discovery_delay, retry_delay},
 };
 
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, JsonSchema, sqlx::Type, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+#[sqlx(rename_all = "snake_case")]
+pub enum DiscoveryOutcome {
+    Complete,
+    Partial,
+    Blocked,
+    Failed,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DiscoveryState {
+    Disabled,
+    Pending,
+    Running,
+    Complete,
+    Partial,
+    Retrying,
+    AuthRequired,
+    ChallengeRequired,
+    Failed,
+    Stale,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+pub struct DiscoveryHealth {
+    pub state: DiscoveryState,
+    pub problem: bool,
+    pub checked_at: i64,
+    pub last_attempt_at: Option<i64>,
+    pub last_finished_at: Option<i64>,
+    pub last_complete_at: Option<i64>,
+    pub next_attempt_at: i64,
+    pub running_until: Option<i64>,
+    pub consecutive_failures: i64,
+    pub last_outcome: Option<DiscoveryOutcome>,
+    pub last_error_code: Option<String>,
+    pub has_more: bool,
+    pub deferred_parcels: i64,
+}
+
+#[derive(FromRow)]
+struct DiscoverySnapshot {
+    checked_at: i64,
+    last_attempt_at: Option<i64>,
+    last_finished_at: Option<i64>,
+    last_complete_at: Option<i64>,
+    next_attempt_at: i64,
+    running_until: Option<i64>,
+    consecutive_failures: i64,
+    last_outcome: Option<DiscoveryOutcome>,
+    last_error_code: Option<String>,
+    has_more: bool,
+    deferred_parcels: i64,
+}
+
+impl DiscoverySnapshot {
+    fn health(self, account: &AmazonStatus) -> DiscoveryHealth {
+        let deadline = self.next_attempt_at.max(self.running_until.unwrap_or(0));
+        let state = if account.state == AmazonState::AuthRequired {
+            DiscoveryState::AuthRequired
+        } else if account.challenge_required {
+            DiscoveryState::ChallengeRequired
+        } else if !account.imports_enabled || account.state == AmazonState::Disconnected {
+            DiscoveryState::Disabled
+        } else if self.checked_at > deadline.saturating_add(300) {
+            // Use the actual scheduled retry, including provider backoff, and
+            // allow an owned in-flight batch its full lease before declaring it stale.
+            DiscoveryState::Stale
+        } else if self.consecutive_failures >= 3 {
+            DiscoveryState::Failed
+        } else if self
+            .running_until
+            .is_some_and(|until| until > self.checked_at)
+        {
+            DiscoveryState::Running
+        } else if self.consecutive_failures > 0 {
+            DiscoveryState::Retrying
+        } else {
+            match self.last_outcome {
+                Some(DiscoveryOutcome::Complete) => DiscoveryState::Complete,
+                Some(DiscoveryOutcome::Partial) => DiscoveryState::Partial,
+                Some(DiscoveryOutcome::Blocked | DiscoveryOutcome::Failed) => {
+                    DiscoveryState::Failed
+                }
+                None => DiscoveryState::Pending,
+            }
+        };
+        let problem = matches!(
+            state,
+            DiscoveryState::AuthRequired
+                | DiscoveryState::ChallengeRequired
+                | DiscoveryState::Failed
+                | DiscoveryState::Stale
+        ) || (state == DiscoveryState::Partial && !self.has_more);
+        DiscoveryHealth {
+            state,
+            problem,
+            checked_at: self.checked_at,
+            last_attempt_at: self.last_attempt_at,
+            last_finished_at: self.last_finished_at,
+            last_complete_at: self.last_complete_at,
+            next_attempt_at: self.next_attempt_at,
+            running_until: self.running_until,
+            consecutive_failures: self.consecutive_failures,
+            last_outcome: self.last_outcome,
+            last_error_code: self.last_error_code,
+            has_more: self.has_more,
+            deferred_parcels: self.deferred_parcels,
+        }
+    }
+}
+
 #[derive(FromRow)]
 struct DiscoveryClaim {
     lease_token: String,
     attempts: i64,
+    has_more: bool,
+    deferred_store: i64,
 }
 
 // Page coverage and parser deferrals are cumulative within the current sweep;
@@ -43,6 +161,19 @@ pub struct AmazonDiscoveryWorker {
 }
 
 impl AmazonDiscoveryWorker {
+    pub async fn health(store: &Store, account: &AmazonStatus) -> Result<DiscoveryHealth, Error> {
+        let snapshot = sqlx::query_as::<_, DiscoverySnapshot>(
+            "SELECT unixepoch() AS checked_at, last_attempt_at, last_finished_at,
+                    last_complete_at, next_attempt_at, lease_until AS running_until,
+                    attempts AS consecutive_failures, last_outcome, last_error_code,
+                    has_more, deferred_parcels
+             FROM amazon_discovery WHERE id = 1",
+        )
+        .fetch_one(store.pool())
+        .await?;
+        Ok(snapshot.health(account))
+    }
+
     pub fn new(store: Store, client: Arc<AmazonClient>) -> Self {
         Self {
             pool: store.pool().clone(),
@@ -64,8 +195,17 @@ impl AmazonDiscoveryWorker {
     }
 
     pub async fn enabled(store: &Store) -> Result<(), Error> {
-        sqlx::query("UPDATE amazon_discovery SET next_attempt_at=unixepoch(),attempts=0,lease_token=NULL,lease_until=NULL WHERE id=1")
-            .execute(store.pool()).await?;
+        sqlx::query(
+            "UPDATE amazon_discovery
+             SET next_attempt_at = unixepoch(), attempts = 0,
+                 lease_token = NULL, lease_until = NULL, last_attempt_at = NULL,
+                 last_finished_at = NULL, last_complete_at = NULL,
+                 last_outcome = NULL, last_error_code = NULL,
+                 has_more = 0, deferred_parcels = 0, deferred_store = 0
+             WHERE id = 1",
+        )
+        .execute(store.pool())
+        .await?;
         Ok(())
     }
 
@@ -74,7 +214,7 @@ impl AmazonDiscoveryWorker {
             return Ok(false);
         }
         let claim = sqlx::query_as::<_, DiscoveryClaim>(
-            "UPDATE amazon_discovery SET lease_token=?,lease_until=unixepoch()+600,last_attempt_at=unixepoch() WHERE id=1 AND next_attempt_at<=unixepoch() AND (lease_until IS NULL OR lease_until<=unixepoch()) RETURNING lease_token,attempts",
+            "UPDATE amazon_discovery SET lease_token=?,lease_until=unixepoch()+600,last_attempt_at=unixepoch() WHERE id=1 AND next_attempt_at<=unixepoch() AND (lease_until IS NULL OR lease_until<=unixepoch()) RETURNING lease_token,attempts,has_more,deferred_store",
         ).bind(Uuid::now_v7().to_string()).fetch_optional(&self.pool).await?;
         let Some(claim) = claim else {
             return Ok(false);
@@ -156,9 +296,49 @@ impl AmazonDiscoveryWorker {
                 )
             }
         };
-        let scheduled = sqlx::query("UPDATE amazon_discovery SET next_attempt_at=unixepoch()+?,attempts=CASE WHEN ? THEN 0 ELSE attempts+1 END,lease_token=NULL,lease_until=NULL WHERE id=1 AND lease_token=? AND lease_until>unixepoch()")
-            .bind(delay).bind(succeeded).bind(&claim.lease_token)
-            .execute(&self.pool).await?;
+        let account = self.client.status().await;
+        // A refusal in an earlier batch still makes the completed sweep partial.
+        let deferred_store = i64::try_from(progress.deferred_store)
+            .map_err(|_| Error::Invalid("too many deferred parcels".into()))?
+            .saturating_add(if claim.has_more {
+                claim.deferred_store
+            } else {
+                0
+            });
+        let deferred = i64::try_from(progress.deferred.total())
+            .map_err(|_| Error::Invalid("too many deferred parcels".into()))?
+            .saturating_add(deferred_store);
+        let outcome = if account.state == AmazonState::AuthRequired || account.challenge_required {
+            DiscoveryOutcome::Blocked
+        } else if !succeeded {
+            DiscoveryOutcome::Failed
+        } else if progress.complete == Some(true) && deferred == 0 {
+            DiscoveryOutcome::Complete
+        } else {
+            DiscoveryOutcome::Partial
+        };
+        let scheduled = sqlx::query(
+            "UPDATE amazon_discovery
+             SET next_attempt_at = unixepoch() + ?,
+                 attempts = CASE WHEN ? THEN 0 ELSE attempts + 1 END,
+                 last_finished_at = unixepoch(),
+                 last_complete_at = CASE WHEN ? THEN unixepoch() ELSE last_complete_at END,
+                 last_outcome = ?, last_error_code = ?, has_more = ?,
+                 deferred_parcels = ?, deferred_store = ?,
+                 lease_token = NULL, lease_until = NULL
+             WHERE id = 1 AND lease_token = ? AND lease_until > unixepoch()",
+        )
+        .bind(delay)
+        .bind(succeeded)
+        .bind(outcome == DiscoveryOutcome::Complete)
+        .bind(outcome)
+        .bind(progress.error_code)
+        .bind(progress.has_more.unwrap_or(false))
+        .bind(deferred)
+        .bind(deferred_store)
+        .bind(&claim.lease_token)
+        .execute(&self.pool)
+        .await?;
         if scheduled.rows_affected() == 1 {
             // complete describes page coverage; Store refusals must never be
             // represented as a successful import, even after the final page.
@@ -191,6 +371,7 @@ impl AmazonDiscoveryWorker {
 #[cfg(test)]
 mod tests {
     use super::AmazonDiscoveryWorker;
+    use crate::amazon_sync::{DiscoveryOutcome, DiscoveryState};
     use crate::{
         amazon::AmazonClient,
         carrier::Carrier,
@@ -208,6 +389,107 @@ mod tests {
         },
     };
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[tokio::test]
+    async fn health_tracks_real_schedule_lease_and_coverage_independently_of_tracking() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("registry.db")).await.unwrap();
+        let mut account = crate::amazon::AmazonStatus {
+            state: crate::amazon::AmazonState::Connected,
+            imports_enabled: true,
+            last_success_at: Some("2026-11-07T12:00:00Z".into()),
+            ..Default::default()
+        };
+        let initial = AmazonDiscoveryWorker::health(&store, &account)
+            .await
+            .unwrap();
+        assert_eq!(initial.state, DiscoveryState::Pending);
+        assert_eq!(initial.last_complete_at, None);
+
+        // A valid long provider backoff does not look like a stopped worker.
+        sqlx::query("UPDATE amazon_discovery SET next_attempt_at=unixepoch()+21600,attempts=1,last_outcome='failed',last_error_code='rate_limited' WHERE id=1")
+            .execute(store.pool()).await.unwrap();
+        let retry = AmazonDiscoveryWorker::health(&store, &account)
+            .await
+            .unwrap();
+        assert_eq!(retry.state, DiscoveryState::Retrying);
+        assert!(!retry.problem);
+        assert_eq!(retry.last_complete_at, None);
+        assert_eq!(retry.last_error_code.as_deref(), Some("rate_limited"));
+        assert!((21599..=21600).contains(&(retry.next_attempt_at - retry.checked_at)));
+
+        sqlx::query("UPDATE amazon_discovery SET next_attempt_at=unixepoch()-301 WHERE id=1")
+            .execute(store.pool())
+            .await
+            .unwrap();
+        let stale = AmazonDiscoveryWorker::health(&store, &account)
+            .await
+            .unwrap();
+        assert_eq!(stale.state, DiscoveryState::Stale);
+        assert!(stale.problem);
+
+        // A batch may still own its normal ten-minute work lease.
+        sqlx::query("UPDATE amazon_discovery SET lease_until=unixepoch()+60 WHERE id=1")
+            .execute(store.pool())
+            .await
+            .unwrap();
+        let running = AmazonDiscoveryWorker::health(&store, &account)
+            .await
+            .unwrap();
+        assert_eq!(running.state, DiscoveryState::Running);
+        assert!(!running.problem);
+
+        sqlx::query("UPDATE amazon_discovery SET next_attempt_at=unixepoch()+60,lease_until=NULL,attempts=3 WHERE id=1")
+            .execute(store.pool()).await.unwrap();
+        assert!(
+            AmazonDiscoveryWorker::health(&store, &account)
+                .await
+                .unwrap()
+                .problem
+        );
+        sqlx::query("UPDATE amazon_discovery SET attempts=0,last_outcome='partial',has_more=1,deferred_parcels=2 WHERE id=1")
+            .execute(store.pool()).await.unwrap();
+        let partial = AmazonDiscoveryWorker::health(&store, &account)
+            .await
+            .unwrap();
+        assert_eq!(partial.state, DiscoveryState::Partial);
+        assert!(!partial.problem);
+        assert_eq!(partial.last_outcome, Some(DiscoveryOutcome::Partial));
+        sqlx::query("UPDATE amazon_discovery SET has_more=0 WHERE id=1")
+            .execute(store.pool())
+            .await
+            .unwrap();
+        assert!(
+            AmazonDiscoveryWorker::health(&store, &account)
+                .await
+                .unwrap()
+                .problem
+        );
+
+        account.state = crate::amazon::AmazonState::AuthRequired;
+        let blocked = AmazonDiscoveryWorker::health(&store, &account)
+            .await
+            .unwrap();
+        assert_eq!(blocked.state, DiscoveryState::AuthRequired);
+        assert!(blocked.problem);
+        account.state = crate::amazon::AmazonState::Connected;
+        account.challenge_required = true;
+        assert_eq!(
+            AmazonDiscoveryWorker::health(&store, &account)
+                .await
+                .unwrap()
+                .state,
+            DiscoveryState::ChallengeRequired
+        );
+        account.challenge_required = false;
+        account.imports_enabled = false;
+        let disabled = AmazonDiscoveryWorker::health(&store, &account)
+            .await
+            .unwrap();
+        assert_eq!(disabled.state, DiscoveryState::Disabled);
+        assert!(!disabled.problem);
+        store.close().await.unwrap();
+    }
 
     #[derive(Clone, Default)]
     struct Capture(Arc<Mutex<Vec<u8>>>);
@@ -273,7 +555,7 @@ mod tests {
                     order_reference: None,
                     signature_required: None,
                     tracking: InputTracking {
-                        number: "9400000000000000000007".into(),
+                        number: "9400000000000000000001".into(),
                         carrier: Some(Carrier::Usps),
                         recipient_url: None,
                     },
@@ -383,12 +665,26 @@ mod tests {
                 .unwrap();
             assert!(worker.tick().await.unwrap());
         }
+        let partial = AmazonDiscoveryWorker::health(&store, &worker.client.status().await)
+            .await
+            .unwrap();
+        assert_eq!(partial.last_outcome, Some(DiscoveryOutcome::Partial));
+        assert!(partial.last_finished_at.is_some());
+        assert_eq!(partial.last_complete_at, None);
+        assert_eq!(partial.deferred_parcels, 2);
+        assert!(!partial.has_more);
+        assert!(partial.problem);
         unavailable.store(true, Ordering::Release);
         sqlx::query("UPDATE amazon_discovery SET next_attempt_at=unixepoch()-1 WHERE id=1")
             .execute(store.pool())
             .await
             .unwrap();
         assert!(worker.tick().await.unwrap());
+        let failed = AmazonDiscoveryWorker::health(&store, &worker.client.status().await)
+            .await
+            .unwrap();
+        assert_eq!(failed.last_outcome, Some(DiscoveryOutcome::Failed));
+        assert_eq!(failed.state, DiscoveryState::Retrying);
         tokio::time::pause();
         tokio::time::advance(std::time::Duration::from_secs(331)).await;
         tokio::time::resume();
@@ -399,6 +695,11 @@ mod tests {
             .await
             .unwrap();
         assert!(worker.tick().await.unwrap());
+        let fenced = AmazonDiscoveryWorker::health(&store, &worker.client.status().await)
+            .await
+            .unwrap();
+        assert_eq!(fenced.last_finished_at, failed.last_finished_at);
+        assert_eq!(fenced.last_outcome, failed.last_outcome);
         let text = String::from_utf8(capture.0.lock().unwrap().clone()).unwrap();
         let entries: Vec<Diagnostic> = text
             .lines()
@@ -418,12 +719,13 @@ mod tests {
         for (batch, (pages, verified, committed, complete)) in
             batches
                 .iter()
-                .zip([(3, 3, 3, false), (6, 3, 3, false), (7, 1, 0, true)])
+                .zip([(3, 3, 2, false), (6, 3, 3, false), (7, 1, 1, true)])
         {
             assert_eq!(batch.listing_pages, pages);
             assert_eq!(batch.verified_parcels, verified);
             assert_eq!(batch.committed_parcels, committed);
-            assert_eq!(batch.deferred_store, usize::from(complete));
+            let refused = pages == 3;
+            assert_eq!(batch.deferred_store, usize::from(refused));
             assert_eq!(batch.complete, complete);
             assert_eq!(batch.has_more, !complete);
             assert_eq!(
@@ -435,8 +737,8 @@ mod tests {
             );
             assert_eq!(batch.deferred_tracking, 1);
             assert!(batch.order_fingerprint.is_none());
-            assert_eq!(batch.outcome, if complete { "not_saved" } else { "saved" });
-            assert_eq!(batch.level, if complete { "warn" } else { "info" });
+            assert_eq!(batch.outcome, if refused { "not_saved" } else { "saved" });
+            assert_eq!(batch.level, if refused { "warn" } else { "info" });
             assert!(batch.error_code.is_none());
             if complete {
                 assert!((1800..=1980).contains(&batch.next_delay_seconds));

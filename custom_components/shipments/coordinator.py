@@ -28,6 +28,7 @@ from .const import (
     DOMAIN,
     SUMMARY_KEYS,
 )
+from .health import DiscoveryHealth
 from .models import (
     DeliveryDay,
     DeliveryDayReport,
@@ -108,6 +109,7 @@ class ShipmentsCoordinator(DataUpdateCoordinator[dict[str, int]]):
         self._event_listeners: list[Callable[[ShipmentStatusEvent], None]] = []
         self.event_available = False
         self._amazon_notice: _AmazonNotice | None = None
+        self.amazon_discovery: DiscoveryHealth | None = None
 
     async def _async_update_data(self) -> dict[str, int]:
         # A prior successful feed cannot establish availability for this refresh.
@@ -242,6 +244,7 @@ class ShipmentsCoordinator(DataUpdateCoordinator[dict[str, int]]):
         return unsubscribe
 
     async def _async_check_version(self) -> bool:
+        self.amazon_discovery = None
         response = await self.client.request("GET", "/v1/system")
         if response.status in {401, 403}:
             raise ConfigEntryAuthFailed("The backend rejected its credential")
@@ -269,6 +272,7 @@ class ShipmentsCoordinator(DataUpdateCoordinator[dict[str, int]]):
             )
             return False
         ir.async_delete_issue(self.hass, DOMAIN, "version_mismatch")
+        self.amazon_discovery = DiscoveryHealth.parse(data.get("amazon_discovery"))
         self._async_amazon_notification(data.get("amazon"))
         return True
 

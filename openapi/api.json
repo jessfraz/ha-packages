@@ -667,6 +667,101 @@
         ],
         "type": "string"
       },
+      "DiscoveryHealth": {
+        "properties": {
+          "checked_at": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "consecutive_failures": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "deferred_parcels": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "has_more": {
+            "type": "boolean"
+          },
+          "last_attempt_at": {
+            "format": "int64",
+            "nullable": true,
+            "type": "integer"
+          },
+          "last_complete_at": {
+            "format": "int64",
+            "nullable": true,
+            "type": "integer"
+          },
+          "last_error_code": {
+            "nullable": true,
+            "type": "string"
+          },
+          "last_finished_at": {
+            "format": "int64",
+            "nullable": true,
+            "type": "integer"
+          },
+          "last_outcome": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/DiscoveryOutcome"
+              }
+            ],
+            "nullable": true
+          },
+          "next_attempt_at": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "problem": {
+            "type": "boolean"
+          },
+          "running_until": {
+            "format": "int64",
+            "nullable": true,
+            "type": "integer"
+          },
+          "state": {
+            "$ref": "#/components/schemas/DiscoveryState"
+          }
+        },
+        "required": [
+          "checked_at",
+          "consecutive_failures",
+          "deferred_parcels",
+          "has_more",
+          "next_attempt_at",
+          "problem",
+          "state"
+        ],
+        "type": "object"
+      },
+      "DiscoveryOutcome": {
+        "enum": [
+          "complete",
+          "partial",
+          "blocked",
+          "failed"
+        ],
+        "type": "string"
+      },
+      "DiscoveryState": {
+        "enum": [
+          "disabled",
+          "pending",
+          "running",
+          "complete",
+          "partial",
+          "retrying",
+          "auth_required",
+          "challenge_required",
+          "failed",
+          "stale"
+        ],
+        "type": "string"
+      },
       "Error": {
         "description": "Error information from a response.",
         "properties": {
@@ -1507,6 +1602,15 @@
               "state": "disconnected"
             }
           },
+          "amazon_discovery": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/DiscoveryHealth"
+              }
+            ],
+            "default": null,
+            "nullable": true
+          },
           "credential_role": {
             "type": "string"
           },
@@ -1651,7 +1755,7 @@
   "info": {
     "description": "Persistent local shipment records, manual corrections, and carrier synchronization. Use a Bearer owner or ingestion token. Creates require Idempotency-Key; writes to an existing shipment require its quoted revision in If-Match.",
     "title": "Shipments API",
-    "version": "0.6.28"
+    "version": "0.6.29"
   },
   "openapi": "3.0.3",
   "paths": {

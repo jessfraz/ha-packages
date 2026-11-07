@@ -5,14 +5,62 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers import intent
 
 from .models import Direction
-from .voice import ShipmentDay, ShipmentQuery, VoiceRequest, async_query
+from .voice import (
+    ShipmentDay,
+    ShipmentQuery,
+    VoiceRequest,
+    async_query,
+    async_query_coordinator,
+)
 
 INTENT_QUERY = "ShipmentsQuery"
+INTENT_HEALTH = "ShipmentsHealth"
 
 
 async def async_setup_intents(hass: HomeAssistant) -> None:
     """Register a stateless handler; each request resolves the loaded entry."""
     intent.async_register(hass, ShipmentQueryHandler())
+    intent.async_register(hass, ShipmentsHealthHandler())
+
+
+class ShipmentsHealthHandler(intent.IntentHandler):
+    """Read the current report using the existing exposure and permissions."""
+
+    intent_type = INTENT_HEALTH
+    description = (
+        "Check Amazon order discovery health, coverage, last completed scan and next "
+        "scheduled attempt. This does not run discovery or change account settings."
+    )
+    slot_schema = {}
+
+    async def async_handle(self, intent_obj: intent.Intent) -> intent.IntentResponse:
+        self.async_validate_slots(intent_obj.slots)
+        coordinator, error = await async_query_coordinator(
+            intent_obj.hass, intent_obj.context, intent_obj.assistant
+        )
+        report = coordinator.amazon_discovery if coordinator is not None else None
+        response = intent_obj.create_response()
+        if (
+            error
+            or coordinator is None
+            or not coordinator.last_update_success
+            or report is None
+            or not report.current
+        ):
+            response.async_set_error(
+                intent.IntentResponseErrorCode.FAILED_TO_HANDLE,
+                "Current Amazon discovery health is unavailable to this assistant.",
+            )
+            return response
+        response.response_type = intent.IntentResponseType.QUERY_ANSWER
+        speech = f"Amazon discovery is {report.state.value.replace('_', ' ')}."
+        if report.last_complete_at is None:
+            speech += " No complete scan has been recorded."
+        response.async_set_speech(
+            speech, extra_data={"amazon_discovery": report.attributes()}
+        )
+        response.async_set_card("Amazon discovery", speech)
+        return response
 
 
 class ShipmentQueryHandler(intent.IntentHandler):

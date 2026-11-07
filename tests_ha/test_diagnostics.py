@@ -71,6 +71,7 @@ async def test_native_download_contains_only_cached_health(
         "backend": {
             "last_observed_version": backend.version,
             "last_observed_versions_match": True,
+            "amazon_discovery": None,
         },
         "summary": {
             "current": True,
@@ -165,6 +166,7 @@ async def test_failed_version_read_preserves_last_observation_without_response_d
     assert data["backend"] == {
         "last_observed_version": known_version,
         "last_observed_versions_match": True,
+        "amazon_discovery": None,
     }
     assert data["coordinator"] == {
         "available": False,
@@ -190,6 +192,7 @@ async def test_mixed_versions_keep_unavailable_day_count_absent(
     assert data["backend"] == {
         "last_observed_version": "0.0.1",
         "last_observed_versions_match": False,
+        "amazon_discovery": None,
     }
     assert data["summary"] == {
         "current": True,
@@ -261,6 +264,7 @@ async def test_unloaded_or_never_connected_entry_has_unknown_health(
     assert data["backend"] == {
         "last_observed_version": None,
         "last_observed_versions_match": None,
+        "amazon_discovery": None,
     }
     assert "PRIVATE-" not in text
     assert len(backend.requests) == request_count

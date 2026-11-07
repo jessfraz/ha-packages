@@ -192,7 +192,7 @@ export function installAmazonSettings(root, request, onUnauthorized) {
       : "";
     if (challenged && !byId("amazon-error").textContent) appendOrdersLink(byId("amazon-check-note"));
     byId("amazon-last-success").textContent = status?.last_success_at && Number.isFinite(Date.parse(status.last_success_at))
-      ? `Last successful check: ${new Date(status.last_success_at).toLocaleString()}.` : "";
+      ? `Last successful account request: ${new Date(status.last_success_at).toLocaleString()}.` : "";
     byId("amazon-start").textContent = status?.state === "disconnected" || !status ? "Connect Amazon" : "Reconnect Amazon";
     byId("amazon-start").hidden = Boolean(flowId) || challenged;
     byId("amazon-preview").hidden = !connected;

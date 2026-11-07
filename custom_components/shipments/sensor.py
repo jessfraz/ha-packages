@@ -1,6 +1,7 @@
 """Shipment counts exposed as native sensors."""
 
 from homeassistant.components.sensor import (
+    SensorDeviceClass,
     SensorEntity,
     SensorEntityDescription,
     SensorStateClass,
@@ -12,7 +13,8 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import SENSOR_KEYS
 from .coordinator import ShipmentsCoordinator
-from .entity import shipments_device_info
+from .entity import AmazonDiscoveryEntity, shipments_device_info
+from .health import DiscoveryState
 from .models import ShipmentItems
 
 
@@ -25,6 +27,22 @@ async def async_setup_entry(
     async_add_entities(
         ShipmentCountSensor(entry.runtime_data, entry, key) for key in SENSOR_KEYS
     )
+    async_add_entities([AmazonDiscoverySensor(entry.runtime_data, entry)])
+
+
+class AmazonDiscoverySensor(AmazonDiscoveryEntity, SensorEntity):
+    """The discovery worker owns its coverage and real retry schedule."""
+
+    _attr_device_class = SensorDeviceClass.ENUM
+    _attr_options = [state.value for state in DiscoveryState]
+
+    def __init__(self, coordinator: ShipmentsCoordinator, entry: ConfigEntry) -> None:
+        super().__init__(coordinator, entry, "amazon_discovery")
+
+    def _update_attributes(self) -> None:
+        super()._update_attributes()
+        report = self.health
+        self._attr_native_value = report.state.value if report else None
 
 
 class ShipmentCountSensor(CoordinatorEntity[ShipmentsCoordinator], SensorEntity):

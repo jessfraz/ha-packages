@@ -11,7 +11,7 @@ from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .coordinator import ShipmentsCoordinator
-from .entity import shipments_device_info
+from .entity import AmazonDiscoveryEntity, shipments_device_info
 
 
 async def async_setup_entry(
@@ -23,6 +23,21 @@ async def async_setup_entry(
         ShipmentProblem(entry.runtime_data, entry, key)
         for key in ("exceptions", "sync_errors")
     )
+    async_add_entities([AmazonDiscoveryProblem(entry.runtime_data, entry)])
+
+
+class AmazonDiscoveryProblem(AmazonDiscoveryEntity, BinarySensorEntity):
+    """Report actual failures; unknown transport or stale reports are unavailable."""
+
+    _attr_device_class = BinarySensorDeviceClass.PROBLEM
+
+    def __init__(self, coordinator: ShipmentsCoordinator, entry: ConfigEntry) -> None:
+        super().__init__(coordinator, entry, "amazon_discovery_problem")
+
+    def _update_attributes(self) -> None:
+        super()._update_attributes()
+        report = self.health
+        self._attr_is_on = report.problem if report else None
 
 
 class ShipmentProblem(CoordinatorEntity[ShipmentsCoordinator], BinarySensorEntity):
