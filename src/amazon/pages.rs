@@ -764,7 +764,8 @@ pub(crate) fn order_resolution(page: &str, expected_order: &str) -> Result<Order
     let left_grid = selector(r#"[data-component="shipmentsLeftGrid"]"#)?;
     let right_grid = selector(r#"[data-component="shipmentsRightGrid"]"#)?;
     let status_containers = selector(r#"[data-component="shipmentStatus"]"#)?;
-    let status_messages = selector(".od-status-message")?;
+    // Delivery notes reuse this class; only the heading states shipment status.
+    let status_messages = selector("h4.od-status-message")?;
     let purchased_items = selector(r#"[data-component="purchasedItems"]"#)?;
     let item_titles = selector(r#"[data-component="itemTitle"] a"#)?;
     let all_items: Vec<_> = html
@@ -2811,6 +2812,33 @@ mod tests {
             r#"<div data-component="orderId"><span>111-1234567-1234567</span></div>
             <div data-component="shipments"><div class="a-box-group">{rows}</div></div>"#
         )
+    }
+
+    #[test]
+    fn terminal_status_headings_are_distinct_from_delivery_notes() {
+        let delivered = terminal_order_row("Delivered October 1").replace(
+            "</h4>",
+            "</h4><div class=\"a-row od-status-message\">Delivery note.</div>",
+        );
+        assert!(matches!(
+            pages::order_resolution(&terminal_order(&delivered), "111-1234567-1234567").unwrap(),
+            pages::OrderResolution::Terminal
+        ));
+        for row in [
+            terminal_order_row("Arriving tomorrow").replace(
+                "</h4>",
+                "</h4><div class=\"od-status-message\">Delivered October 1</div>",
+            ),
+            delivered.replace(
+                "</h4>",
+                "</h4><h4 class=\"od-status-message\">Arriving tomorrow</h4>",
+            ),
+        ] {
+            assert!(matches!(
+                pages::order_resolution(&terminal_order(&row), "111-1234567-1234567").unwrap(),
+                pages::OrderResolution::Unverified
+            ));
+        }
     }
 
     #[test]
