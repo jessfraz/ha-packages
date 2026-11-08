@@ -6,8 +6,8 @@ import pytest
 from homeassistant.config_entries import ConfigEntryState
 from homeassistant.core import HomeAssistant
 from homeassistant.setup import async_setup_component
-from pytest_homeassistant_custom_component.common import MockConfigEntry
-from pytest_homeassistant_custom_component.typing import ClientSessionGenerator
+from pytest_homeassistant.common import MockConfigEntry
+from pytest_homeassistant.typing import ClientSessionGenerator
 
 from custom_components.shipments.const import (
     CONF_BACKEND_URL,
@@ -17,6 +17,8 @@ from custom_components.shipments.const import (
 )
 
 from .conftest import Backend, FixtureShipment
+from .test_amazon_repairs import report
+from .test_discovery_health import discovery_report
 
 
 async def download(
@@ -81,6 +83,7 @@ async def test_native_download_contains_only_cached_health(
             "version_mismatch": False,
             "event_stream_unavailable": False,
             "event_history_reset": False,
+            "amazon_discovery": False,
         },
     }
     for private in (
@@ -206,6 +209,7 @@ async def test_mixed_versions_keep_unavailable_day_count_absent(
         "version_mismatch": True,
         "event_stream_unavailable": False,
         "event_history_reset": False,
+        "amazon_discovery": False,
     }
     assert len(backend.requests) == request_count
 
@@ -268,6 +272,31 @@ async def test_unloaded_or_never_connected_entry_has_unknown_health(
     }
     assert "PRIVATE-" not in text
     assert len(backend.requests) == request_count
+
+
+@pytest.mark.parametrize("code", ["timeout", "PRIVATE-ORDER-AND-TOKEN"])
+async def test_native_download_reports_the_owned_amazon_repair_without_private_errors(
+    hass: HomeAssistant,
+    hass_client: ClientSessionGenerator,
+    entry: MockConfigEntry,
+    backend: Backend,
+    code: str,
+) -> None:
+    report(
+        backend,
+        discovery_report(state="failed", problem=True, last_error_code=code),
+    )
+    await entry.runtime_data.async_refresh()
+    requests = len(backend.requests)
+    data, text = await download(hass, hass_client, entry)
+    assert data["repairs"] == {
+        "version_mismatch": False,
+        "event_stream_unavailable": False,
+        "event_history_reset": False,
+        "amazon_discovery": True,
+    }
+    assert "PRIVATE-" not in text
+    assert len(backend.requests) == requests
 
 
 async def test_native_download_requires_admin(

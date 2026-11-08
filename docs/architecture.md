@@ -177,10 +177,22 @@ observation guard as well as its shipment lease/generation fences. No network ca
 holds a SQLite transaction. Metadata-only edits preserve tracking-provider ownership.
 
 The authenticated system report exposes only safe account connection state.
-Home Assistant creates one persistent reconnect notification on confirmed Amazon
-authentication rejection, retains it through outages, and clears it after reconnect
-or explicit disconnect. Amazon expiry does not invalidate Home Assistant pairing.
-The notification deep link opens settings without carrying codes or credentials.
+Home Assistant maintains one config-entry-owned, persistent native Repair for
+confirmed Amazon authentication, challenge, stale discovery or unresolved coverage
+problems. A fresh healthy discovery report or intentional disable clears it;
+missing, old and unavailable observations retain it across reloads and restarts.
+A config-entry-owned listener keeps the minute poll running independently of
+enabled entities. A separate thirty-second, cache-only freshness check raises an
+unavailable Repair if the health report expires or cannot be read; initial setup
+has a three-minute grace. Unknown observations preserve an existing confirmed
+fault. Only a completed fresh poll can confirm recovery. Both listener and timer
+stop on entry unload. Core hides the Repair while its entry is disabled and removes
+it with the entry. Backend authentication failures use Core's reauthentication
+Repair instead of the availability fallback, preserving any independent confirmed
+Amazon sign-in or discovery failure.
+Legacy account notifications are dismissed when covered by the Repair. Delivery
+notification automations remain independent. Links open existing settings, native
+logs and integration diagnostics without carrying codes or credentials.
 
 The adapter follows pinned ha-amazon/alexapy source with MIT and Apache-2.0
 attribution in NOTICE. Website layouts are deliberately narrow; unsupported or

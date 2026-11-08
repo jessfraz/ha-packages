@@ -16,7 +16,7 @@ go to the configured provider.
 
 ## Install
 
-Requires Home Assistant 2026.10 or newer. Install both the app and integration
+Requires Home Assistant 2026.11 or newer. Install both the app and integration
 using this repository URL:
 
 ```text
@@ -84,8 +84,16 @@ separate; a number already in Shipments links to its existing record.
 Amazon parcels use the same tracking schedule as other shipments. Discovery checks
 recent order pages in small paced batches, then checks again every 30–33 minutes.
 New work continues even when none of the saved parcels are active. If Amazon rejects the saved
-sign-in, Home Assistant shows a notification linking directly to **Reconnect
-Amazon**. Network failures and changed pages retain saved data and retry separately.
+sign-in, Home Assistant raises a native Repair linking to **Reconnect Amazon**.
+Discovery failures and unresolved source records also appear in Settings → Repairs,
+with app logs and integration diagnostics. Repairs survive connection outages and
+reloads until a fresh healthy discovery report or an intentional disable confirms
+recovery. The backend retains known coverage failures until a full clean scan.
+The integration keeps polling even when its entities are disabled. Missing or
+expired health reports raise an unavailable Repair, with a three-minute initial
+startup grace. Rejected backend credentials use Home Assistant's reauthentication
+Repair; independent Amazon sign-in or discovery failures remain separate.
+Network failures and changed pages retain saved data and retry separately.
 Disconnect stops account access and retains shipment records and history.
 
 The saved refresh token can create an Amazon website session; it is not scoped

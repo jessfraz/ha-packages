@@ -12,7 +12,7 @@ from homeassistant.auth.const import GROUP_ID_USER
 from homeassistant.core import HomeAssistant, State
 from homeassistant.loader import async_get_integration
 from homeassistant.setup import async_setup_component
-from pytest_homeassistant_custom_component.common import MockConfigEntry, MockUser
+from pytest_homeassistant.common import MockConfigEntry, MockUser
 
 from custom_components.shipments.const import CONF_BACKEND_URL, CONF_TOKEN, DOMAIN
 
@@ -129,6 +129,8 @@ class Backend:
     version: str = ""
     delay_seconds: float = 0
     event_read_started: asyncio.Event = field(default_factory=asyncio.Event)
+    system_read_started: asyncio.Event = field(default_factory=asyncio.Event)
+    system_read_release: asyncio.Event | None = None
 
     def selected_shipments(self, query: dict[str, str]) -> list[FixtureShipment]:
         """Honor the backend's public list filters over independently owned rows."""
@@ -210,6 +212,10 @@ class Backend:
     async def handle(self, request: web.Request) -> web.Response:
         if request.path == "/v1/events":
             self.event_read_started.set()
+        if request.path == "/v1/system":
+            self.system_read_started.set()
+            if self.system_read_release is not None:
+                await self.system_read_release.wait()
         self.requests.append(
             ReceivedRequest(
                 request.method,
@@ -269,9 +275,10 @@ class Backend:
         )
 
 
-@pytest.fixture(autouse=True)
-def custom_integrations(enable_custom_integrations) -> None:
-    """Enable loading the actual integration from custom_components."""
+@pytest.fixture
+def hass_config_dir(hass_tmp_config_dir: str) -> str:
+    """Keep Core's writable default blueprints isolated from source and other tests."""
+    return hass_tmp_config_dir
 
 
 @pytest.fixture(autouse=True)

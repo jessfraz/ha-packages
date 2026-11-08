@@ -1,3 +1,11 @@
+## 0.6.34
+
+- Report Amazon account and discovery failures as native Home Assistant Repairs.
+  Detect missing or expired reports even with diagnostic entities disabled, retain
+  confirmed problems through outages, and use Core's backend reauthentication
+  Repair without duplicate account notices. Keep delivery notifications separate.
+  Requires Home Assistant 2026.11.
+
 ## 0.6.33
 
 - Distinguish Amazon's shipment status heading from delivery notes.

@@ -5,7 +5,7 @@ import json
 import pytest
 from homeassistant.components import frontend
 from homeassistant.core import HomeAssistant
-from pytest_homeassistant_custom_component.common import MockConfigEntry
+from pytest_homeassistant.common import MockConfigEntry
 
 from custom_components.shipments.const import (
     CONF_ADDON_SLUG,

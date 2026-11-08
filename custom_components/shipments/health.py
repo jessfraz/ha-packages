@@ -5,6 +5,28 @@ from enum import StrEnum
 
 from homeassistant.util import dt as dt_util
 
+# ConnectionReason is the source's fixed vocabulary, never provider free text.
+_DISCOVERY_ERROR_CODES = frozenset(
+    {
+        "invalid_input",
+        "expired_flow",
+        "account_identity_missing",
+        "account_mismatch",
+        "session_changed",
+        "upstream_rejected",
+        "unexpected_response",
+        "timeout",
+        "connection",
+        "rate_limited",
+        "upstream_http",
+        "persistence",
+        "configuration",
+        "unsupported_orders_layout",
+        "challenge_page",
+        "in_progress",
+    }
+)
+
 
 class DiscoveryState(StrEnum):
     DISABLED = "disabled"
@@ -76,6 +98,8 @@ class DiscoveryHealth:
             return None
         if error is not None and (not isinstance(error, str) or len(error) > 100):
             return None
+        if error not in _DISCOVERY_ERROR_CODES:
+            error = None
         return cls(
             state,
             value["problem"],
