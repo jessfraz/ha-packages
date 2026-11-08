@@ -162,6 +162,15 @@ Completed discovery sweeps are scheduled every 30 minutes with up to three minut
 of stable jitter. Discovery continues when all saved parcels are delivered; terminal
 parcels themselves stop polling. Failures honor the shared retry/backoff policy.
 
+Discovery health reports request failures and source records the adapter cannot
+account for. Confirmed delivered or cancelled items, ordered packages awaiting a
+carrier, and explicit pending tracking information are normal states. Classification
+requires scoped order or parcel evidence; age and unrelated page text never suffice.
+Logs separate `classified_terminal`, `awaiting_shipment` and
+`awaiting_tracking_update` counts from unresolved deferrals. A known coverage error
+remains active through retries and restarts until a completed sweep accounts for
+every source record.
+
 Account replacement invalidates in-flight work. Discovery holds the account
 generation through each short database commit; normal sync uses the provider's
 observation guard as well as its shipment lease/generation fences. No network call

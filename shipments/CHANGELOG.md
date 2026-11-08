@@ -1,3 +1,8 @@
+## 0.6.32
+
+- Recognize fulfilled and cancelled Amazon orders and normal pending tracking
+  states. Keep actual discovery failures visible and log classification counts.
+
 ## 0.6.31
 
 - Keep incomplete Amazon discovery coverage visible during retries and restarts,

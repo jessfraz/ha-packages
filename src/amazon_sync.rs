@@ -145,6 +145,9 @@ struct DiscoveryClaim {
 #[derive(Default)]
 struct BatchProgress {
     listing_pages: Option<usize>,
+    classified_terminal: usize,
+    awaiting_shipment: usize,
+    awaiting_tracking_update: usize,
     verified_parcels: usize,
     committed_parcels: usize,
     deferred_store: usize,
@@ -229,6 +232,9 @@ impl AmazonDiscoveryWorker {
             Ok(mut batch) => {
                 progress = BatchProgress {
                     listing_pages: Some(batch.listing_pages),
+                    classified_terminal: batch.classified_terminal,
+                    awaiting_shipment: batch.awaiting_shipment,
+                    awaiting_tracking_update: batch.awaiting_tracking_update,
                     verified_parcels: batch.parcels.len(),
                     deferred: batch.deferred_reasons.clone(),
                     complete: Some(batch.complete),
@@ -368,6 +374,9 @@ impl AmazonDiscoveryWorker {
             slog::info!(self.log, "amazon_discovery_batch";
                 "provider" => "amazon_account", "operation" => "discovery", "outcome" => outcome,
                 "listing_pages" => progress.listing_pages,
+                "classified_terminal" => progress.classified_terminal,
+                "awaiting_shipment" => progress.awaiting_shipment,
+                "awaiting_tracking_update" => progress.awaiting_tracking_update,
                 "verified_parcels" => progress.verified_parcels,
                 "committed_parcels" => progress.committed_parcels,
                 "deferred_store" => progress.deferred_store,
