@@ -1,3 +1,7 @@
+## 0.6.33
+
+- Distinguish Amazon's shipment status heading from delivery notes.
+
 ## 0.6.32
 
 - Recognize fulfilled and cancelled Amazon orders and normal pending tracking
