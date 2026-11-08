@@ -54,6 +54,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ShipmentsConfigEntry) ->
     coordinator = ShipmentsCoordinator(hass, entry, client, str(integration.version))
     await coordinator.async_config_entry_first_refresh()
     entry.runtime_data = coordinator
+    coordinator.async_start_amazon_repairs()
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     await async_register_sentences(hass, entry)
     module_url = "/shipments-static/calendar-links.js?" + urlencode(

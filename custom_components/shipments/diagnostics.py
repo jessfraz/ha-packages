@@ -8,7 +8,7 @@ from homeassistant.helpers import issue_registry as ir
 from homeassistant.loader import async_get_integration
 
 from .const import CONF_ADDON_SLUG, DOMAIN, SENSOR_KEYS
-from .coordinator import ShipmentsCoordinator
+from .coordinator import ShipmentsCoordinator, amazon_discovery_issue_id
 
 
 class IntegrationDiagnostics(TypedDict):
@@ -66,6 +66,12 @@ async def async_get_config_entry_diagnostics(
                 if key in coordinator.data
             }
     registry = ir.async_get(hass)
+    repair_ids = {
+        "version_mismatch": "version_mismatch",
+        "event_stream_unavailable": "event_stream_unavailable",
+        "event_history_reset": "event_history_reset",
+        "amazon_discovery": amazon_discovery_issue_id(entry.entry_id),
+    }
     return {
         "integration": {
             "version": version,
@@ -108,11 +114,7 @@ async def async_get_config_entry_diagnostics(
         },
         "summary": {"current": available, "counts": counts},
         "repairs": {
-            key: registry.async_get_issue(DOMAIN, key) is not None
-            for key in (
-                "version_mismatch",
-                "event_stream_unavailable",
-                "event_history_reset",
-            )
+            key: registry.async_get_issue(DOMAIN, issue_id) is not None
+            for key, issue_id in repair_ids.items()
         },
     }

@@ -15,7 +15,7 @@ from homeassistant.core import Context, HomeAssistant
 from homeassistant.helpers import intent
 from homeassistant.helpers.script import ScriptRunResult
 from homeassistant.setup import async_setup_component
-from pytest_homeassistant_custom_component.common import MockConfigEntry, MockUser
+from pytest_homeassistant.common import MockConfigEntry, MockUser
 
 from .conftest import Backend, FixtureShipment
 

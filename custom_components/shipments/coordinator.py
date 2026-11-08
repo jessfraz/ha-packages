@@ -4,9 +4,9 @@ import asyncio
 import json
 import logging
 from collections.abc import Callable
-from datetime import timedelta
+from datetime import datetime, timedelta
 from typing import Literal, NotRequired, TypedDict
-from urllib.parse import urlencode
+from urllib.parse import quote, urlencode
 from uuid import UUID
 
 from aiohttp import ClientError
@@ -15,6 +15,7 @@ from homeassistant.config_entries import ConfigEntry, ConfigEntryState
 from homeassistant.core import CALLBACK_TYPE, HomeAssistant, callback
 from homeassistant.exceptions import ConfigEntryAuthFailed, HomeAssistantError
 from homeassistant.helpers import issue_registry as ir
+from homeassistant.helpers.event import async_track_time_interval
 from homeassistant.helpers.hassio import is_hassio
 from homeassistant.helpers.storage import Store
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
@@ -28,7 +29,7 @@ from .const import (
     DOMAIN,
     SUMMARY_KEYS,
 )
-from .health import DiscoveryHealth
+from .health import DiscoveryHealth, DiscoveryState
 from .models import (
     DeliveryDay,
     DeliveryDayReport,
@@ -44,13 +45,24 @@ from .models import (
 _LOGGER = logging.getLogger(__name__)
 _BACKUP_TIMEOUT_SECONDS = 10
 _ITEM_LIMIT = 20
-
-type _AmazonNotice = Literal["none", "auth_required", "challenge_required"]
+_AMAZON_STARTUP_GRACE = timedelta(minutes=3)
+type _AmazonUnavailableReason = Literal[
+    "backend_unavailable",
+    "health_report_missing",
+    "health_report_invalid",
+    "health_report_expired",
+    "health_report_future",
+]
 
 
 def amazon_notification_id(entry_id: str) -> str:
-    """Keep one account-action notice stable across reloads and sign-ins."""
+    """Identify the legacy account notice for migration and removal."""
     return f"{DOMAIN}_{entry_id}_amazon_auth_required"
+
+
+def amazon_discovery_issue_id(entry_id: str) -> str:
+    """Keep one account-owned Repair stable through refreshes and reloads."""
+    return f"amazon_discovery_{entry_id}"
 
 
 class BackupReport(TypedDict):
@@ -108,8 +120,128 @@ class ShipmentsCoordinator(DataUpdateCoordinator[dict[str, int]]):
         self._after: int | None = None
         self._event_listeners: list[Callable[[ShipmentStatusEvent], None]] = []
         self.event_available = False
-        self._amazon_notice: _AmazonNotice | None = None
         self.amazon_discovery: DiscoveryHealth | None = None
+        self._amazon_repair_active = True
+        self._amazon_started_at = dt_util.utcnow()
+        self._amazon_seen_current = False
+        self._amazon_last_report: DiscoveryHealth | None = None
+        self._amazon_account_report: object = None
+        self._amazon_report_problem: _AmazonUnavailableReason | None = (
+            "health_report_missing"
+        )
+
+        @callback
+        def stop_amazon_repairs() -> None:
+            self._amazon_repair_active = False
+
+        entry.async_on_unload(stop_amazon_repairs)
+
+    @callback
+    def async_start_amazon_repairs(self) -> None:
+        """Keep source polling and freshness checks independent of enabled entities."""
+        self._entry.async_on_unload(self.async_add_listener(self._async_amazon_update))
+        self._entry.async_on_unload(
+            async_track_time_interval(
+                self.hass, self._async_amazon_freshness, timedelta(seconds=30)
+            )
+        )
+        self._async_amazon_update()
+
+    @property
+    def _amazon_repairs_allowed(self) -> bool:
+        return (
+            self._amazon_repair_active
+            and self.hass.config_entries.async_get_entry(self._entry.entry_id)
+            is self._entry
+            and self._entry.state
+            in {ConfigEntryState.SETUP_IN_PROGRESS, ConfigEntryState.LOADED}
+        )
+
+    @callback
+    def _async_amazon_update(self) -> None:
+        if not self._amazon_repairs_allowed:
+            return
+        if not self.last_update_success:
+            self._async_amazon_unavailable("backend_unavailable")
+            return
+        self._async_amazon_repair(self._amazon_account_report, allow_clear=True)
+        if self._amazon_report_problem is not None:
+            self._async_amazon_unavailable(self._amazon_report_problem)
+
+    @callback
+    def _async_amazon_freshness(self, _now: datetime) -> None:
+        # This timer never declares recovery. Only a completed fresh poll can.
+        report = self._amazon_last_report
+        if report is not None and not report.current:
+            self._async_amazon_unavailable(
+                "health_report_future"
+                if report.checked_at > dt_util.utcnow().timestamp()
+                else "health_report_expired"
+            )
+        elif not self.last_update_success:
+            self._async_amazon_unavailable("backend_unavailable")
+        elif self._amazon_report_problem is not None:
+            self._async_amazon_unavailable(self._amazon_report_problem)
+
+    @property
+    def _amazon_backend_reauth_required(self) -> bool:
+        if not self.last_update_success and isinstance(
+            self.last_exception, ConfigEntryAuthFailed
+        ):
+            return True
+        # Core owns the credential Repair while its reauth flow remains open,
+        # including after a subsequent connection failure replaces the exception.
+        issue = ir.async_get(self.hass).async_get_issue(
+            "homeassistant", f"config_entry_reauth_{DOMAIN}_{self._entry.entry_id}"
+        )
+        return issue is not None and issue.active
+
+    @callback
+    def _async_amazon_backend_auth(self) -> None:
+        if not self._amazon_repairs_allowed:
+            return
+        registry = ir.async_get(self.hass)
+        issue_id = amazon_discovery_issue_id(self._entry.entry_id)
+        existing = registry.async_get_issue(DOMAIN, issue_id)
+        # Backend credentials and Amazon cookies are independent. Only the
+        # availability fallback is superseded by Core's backend reauth Repair.
+        if (
+            existing is not None
+            and existing.translation_key == "amazon_discovery_unavailable"
+        ):
+            ir.async_delete_issue(self.hass, DOMAIN, issue_id)
+        persistent_notification.async_dismiss(
+            self.hass, amazon_notification_id(self._entry.entry_id)
+        )
+
+    @callback
+    def _async_amazon_unavailable(self, reason: _AmazonUnavailableReason) -> None:
+        if not self._amazon_repairs_allowed:
+            return
+        if self._amazon_backend_reauth_required:
+            self._async_amazon_backend_auth()
+            return
+        registry = ir.async_get(self.hass)
+        if registry.async_get_issue(DOMAIN, "version_mismatch") is not None:
+            return
+        existing = registry.async_get_issue(
+            DOMAIN, amazon_discovery_issue_id(self._entry.entry_id)
+        )
+        # An unknown observation cannot replace a confirmed account/source fault.
+        if (
+            existing is not None
+            and existing.translation_key != "amazon_discovery_unavailable"
+        ):
+            return
+        if (
+            existing is None
+            and not self._amazon_seen_current
+            and dt_util.utcnow() - self._amazon_started_at < _AMAZON_STARTUP_GRACE
+        ):
+            return
+        self._async_set_amazon_issue(
+            "amazon_discovery_unavailable", "unavailable", reason, 0
+        )
 
     async def _async_update_data(self) -> dict[str, int]:
         # A prior successful feed cannot establish availability for this refresh.
@@ -159,6 +291,10 @@ class ShipmentsCoordinator(DataUpdateCoordinator[dict[str, int]]):
                     tuple(ordered[:_ITEM_LIMIT]), count > _ITEM_LIMIT
                 )
             await self._async_report_presence(day)
+        except ConfigEntryAuthFailed:
+            # Also runs during the first refresh, before the monitor is attached.
+            self._async_amazon_backend_auth()
+            raise
         except (ClientError, TimeoutError, ResponseTooLarge, ValueError) as err:
             raise UpdateFailed("Cannot read the backend state") from err
         try:
@@ -272,65 +408,116 @@ class ShipmentsCoordinator(DataUpdateCoordinator[dict[str, int]]):
             )
             return False
         ir.async_delete_issue(self.hass, DOMAIN, "version_mismatch")
-        self.amazon_discovery = DiscoveryHealth.parse(data.get("amazon_discovery"))
-        self._async_amazon_notification(data.get("amazon"))
+        raw_report = data.get("amazon_discovery")
+        self.amazon_discovery = parsed = DiscoveryHealth.parse(raw_report)
+        self._amazon_account_report = data.get("amazon")
+        if parsed is None:
+            self._amazon_report_problem = (
+                "health_report_missing"
+                if raw_report is None
+                else "health_report_invalid"
+            )
+        else:
+            self._amazon_last_report = parsed
+            if parsed.current:
+                self._amazon_seen_current = True
+                self._amazon_report_problem = None
+            else:
+                self._amazon_report_problem = (
+                    "health_report_future"
+                    if parsed.checked_at > dt_util.utcnow().timestamp()
+                    else "health_report_expired"
+                )
+        # Defer recovery until the completed poll so transport failures retain it.
+        self._async_amazon_repair(self._amazon_account_report)
         return True
 
     @callback
-    def _async_amazon_notification(self, report: object) -> None:
-        """Only a confirmed account state changes the existing HA notice."""
+    def _async_amazon_repair(
+        self, account: object, *, allow_clear: bool = False
+    ) -> None:
+        """Keep confirmed problems until fresh recovery, including across outages."""
+        if not self._amazon_repairs_allowed:
+            return
+        state: DiscoveryState | None = None
         if (
-            not isinstance(report, dict)
-            or type(report.get("imports_enabled")) is not bool
+            isinstance(account, dict)
+            and type(account.get("imports_enabled")) is bool
+            and isinstance(account.get("state"), str)
+            and account.get("state") in {"connected", "auth_required", "disconnected"}
+            and type(account.get("challenge_required", False)) is bool
         ):
+            if account["state"] == "auth_required":
+                state = DiscoveryState.AUTH_REQUIRED
+            elif account["state"] == "connected" and account.get("challenge_required"):
+                state = DiscoveryState.CHALLENGE_REQUIRED
+        report = self.amazon_discovery
+        current = report is not None and report.current
+        if state is None and current and report is not None and report.problem:
+            state = report.state
+        issue_id = amazon_discovery_issue_id(self._entry.entry_id)
+        if state is None:
+            if allow_clear and current and report is not None and not report.problem:
+                ir.async_delete_issue(self.hass, DOMAIN, issue_id)
+                persistent_notification.async_dismiss(
+                    self.hass, amazon_notification_id(self._entry.entry_id)
+                )
             return
-        state = report.get("state")
-        if not isinstance(state, str) or state not in (
-            "connected",
-            "auth_required",
-            "disconnected",
-        ):
-            return
-        challenge = report.get("challenge_required", False)
-        if type(challenge) is not bool:
-            return
-        notice: _AmazonNotice = "none"
-        if state == "auth_required":
-            notice = "auth_required"
-        elif state == "connected" and challenge:
-            notice = "challenge_required"
-        if notice == self._amazon_notice:
-            return
-        self._amazon_notice = notice
-        notification_id = amazon_notification_id(self._entry.entry_id)
-        if notice == "none":
-            persistent_notification.async_dismiss(self.hass, notification_id)
-            return
+        error_code = (
+            report.last_error_code
+            if current and report is not None and report.last_error_code is not None
+            else "unspecified"
+        )
+        translation_key = (
+            f"amazon_discovery_{state}"
+            if state
+            in {DiscoveryState.AUTH_REQUIRED, DiscoveryState.CHALLENGE_REQUIRED}
+            else "amazon_discovery"
+        )
+        self._async_set_amazon_issue(
+            translation_key,
+            state.value,
+            error_code,
+            report.deferred_parcels if current and report is not None else 0,
+        )
+
+    @callback
+    def _async_set_amazon_issue(
+        self, translation_key: str, state: str, error_code: str, deferred: int
+    ) -> None:
         destination = (
             "/shipments/shipments/amazon%3Dconnect"
             if self._entry.data.get(CONF_ADDON_SLUG)
             else f"{self._entry.data[CONF_BACKEND_URL]}/#amazon=connect"
         )
-        if notice == "challenge_required":
-            message = (
-                "Amazon requires a website verification check. Your saved sign-in is "
-                "retained, and automatic Amazon checks are paused. Open "
-                "[Amazon orders](https://www.amazon.com/your-orders/orders) in your "
-                "browser and complete the requested check, then "
-                f"[retry Preview shipments]({destination})."
-            )
-            title = "Shipments: verify Amazon"
-        else:
-            message = (
-                "Amazon no longer accepts the saved sign-in. "
-                f"[Reconnect Amazon]({destination}) to resume Amazon tracking."
-            )
-            title = "Shipments: reconnect Amazon"
-        persistent_notification.async_create(
+        integration_url = f"/config/integrations/integration/{DOMAIN}"
+        slug = self._entry.data.get(CONF_ADDON_SLUG)
+        logs_url = (
+            f"/config/app/{quote(slug, safe='')}/logs"
+            if isinstance(slug, str) and slug
+            else "/config/logs"
+        )
+        ir.async_create_issue(
             self.hass,
-            message,
-            title=title,
-            notification_id=notification_id,
+            DOMAIN,
+            amazon_discovery_issue_id(self._entry.entry_id),
+            config_entry_id=self._entry.entry_id,
+            is_fixable=False,
+            is_persistent=True,
+            severity=ir.IssueSeverity.WARNING,
+            translation_key=translation_key,
+            translation_placeholders={
+                "state": state,
+                "error_code": error_code,
+                "deferred_parcels": str(deferred),
+                "settings_url": destination,
+                "logs_url": logs_url,
+                "diagnostics_url": integration_url,
+            },
+            learn_more_url=integration_url,
+        )
+        persistent_notification.async_dismiss(
+            self.hass, amazon_notification_id(self._entry.entry_id)
         )
 
     async def _async_estimates(self) -> tuple[DeliveryEstimate, ...]:
