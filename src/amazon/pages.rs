@@ -4,7 +4,7 @@
 use std::collections::{BTreeMap, BTreeSet, btree_map::Entry};
 
 use reqwest::Url;
-use scraper::{Html, Selector};
+use scraper::{ElementRef, Html, Selector};
 use serde::Deserialize;
 
 use crate::{
@@ -59,6 +59,20 @@ pub(crate) struct Listing {
     pub next_page: Option<String>,
     pub deferred: usize,
     pub deferred_reasons: DeferredCounts,
+    pub classified_terminal: usize,
+}
+
+#[derive(Clone)]
+pub(crate) enum OrderResolution {
+    Terminal,
+    Tracking(Vec<ParcelPage>),
+    Unverified,
+}
+
+pub(crate) enum ParcelTracking {
+    Tracked(Box<Tracker>),
+    AwaitingShipment,
+    AwaitingTrackingUpdate,
 }
 
 fn selector(value: &str) -> Result<Selector, Error> {
@@ -436,6 +450,7 @@ pub(crate) fn listing(page: &str) -> Result<Listing, Error> {
     let mut groups: BTreeMap<(String, String, PackageSlot), usize> = BTreeMap::new();
     let mut parcels = Vec::new();
     let mut reasons = DeferredCounts::default();
+    let mut classified_terminal = 0;
     let mut found = false;
     for (index, node) in html
         .select(&selector("a.item-card__link")?)
@@ -454,6 +469,10 @@ pub(crate) fn listing(page: &str) -> Result<Listing, Error> {
             reasons.unsupported_link += 1;
             continue;
         };
+        if cancelled_listing_card(node, &path)? {
+            classified_terminal += 1;
+            continue;
+        }
         let Ok(identity) = query_identity(&path) else {
             reasons.missing_identity += 1;
             continue;
@@ -513,7 +532,54 @@ pub(crate) fn listing(page: &str) -> Result<Listing, Error> {
         next_page: next_listing_page(&html)?,
         deferred: reasons.total(),
         deferred_reasons: reasons,
+        classified_terminal,
     })
+}
+
+fn cancelled_listing_card(node: ElementRef<'_>, path: &str) -> Result<bool, Error> {
+    if order_details_identity(path).is_none() {
+        return Ok(false);
+    }
+    let Some(tile) = node
+        .ancestors()
+        .filter_map(ElementRef::wrap)
+        .find(|parent| {
+            parent
+                .value()
+                .classes()
+                .any(|class| class == "past-purchase-tile")
+        })
+    else {
+        return Ok(false);
+    };
+    let links: Vec<_> = tile.select(&selector("a.item-card__link")?).collect();
+    if !matches!(links.as_slice(), [only] if only.id() == node.id()) {
+        return Ok(false);
+    }
+    let statuses: Vec<_> = tile
+        .select(&selector(".past-purchase-tile__asin-information-primary-text-container > span.item-card__primary-text")?)
+        .collect();
+    let [status] = statuses.as_slice() else {
+        return Ok(false);
+    };
+    let owner = status
+        .ancestors()
+        .filter_map(ElementRef::wrap)
+        .find(|parent| {
+            parent
+                .value()
+                .classes()
+                .any(|class| class == "past-purchase-tile")
+        });
+    Ok(owner.is_some_and(|owner| owner.id() == tile.id())
+        && normalized_text(*status) == "Cancelled")
+}
+
+fn normalized_text(node: ElementRef<'_>) -> String {
+    node.text()
+        .flat_map(str::split_whitespace)
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn next_listing_page(html: &Html) -> Result<Option<String>, Error> {
@@ -658,6 +724,105 @@ pub(crate) fn order_tracking_pages(page: &str, order: &str) -> Result<Vec<Parcel
     }
     bind_shipment_titles(&html, &mut parcels)?;
     Ok(parcels.into_values().collect())
+}
+
+pub(crate) fn order_resolution(page: &str, expected_order: &str) -> Result<OrderResolution, Error> {
+    if diagnostic_page_shape(page).is_some() {
+        return Err(provider_error(ErrorKind::InvalidResponse));
+    }
+    let parcels = order_tracking_pages(page, expected_order)?;
+    if !parcels.is_empty() {
+        return Ok(OrderResolution::Tracking(parcels));
+    }
+    let html = Html::parse_document(page);
+    if html.select(&selector("a[href]")?).any(|anchor| {
+        anchor
+            .value()
+            .attr("href")
+            .and_then(|href| Url::parse(ORIGIN).ok()?.join(href).ok())
+            .is_some_and(|url| {
+                url.host_str() == Some("www.amazon.com")
+                    && matches!(
+                        retail_path(url.path()).split("/ref=").next(),
+                        Some("/gp/your-account/ship-track" | "/progress-tracker/package")
+                    )
+            })
+    }) {
+        // A foreign or incomplete tracking link is unresolved evidence, even
+        // beside a terminal label. It cannot become successful absence.
+        return Ok(OrderResolution::Unverified);
+    }
+    let identities: Vec<_> = html
+        .select(&selector(r#"[data-component="orderId"]"#)?)
+        .collect();
+    if !matches!(identities.as_slice(), [identity] if normalized_text(*identity) == expected_order)
+    {
+        return Ok(OrderResolution::Unverified);
+    }
+    let rows =
+        selector(r#"[data-component="shipments"] > .a-box-group .a-fixed-right-grid-inner"#)?;
+    let left_grid = selector(r#"[data-component="shipmentsLeftGrid"]"#)?;
+    let right_grid = selector(r#"[data-component="shipmentsRightGrid"]"#)?;
+    let status_containers = selector(r#"[data-component="shipmentStatus"]"#)?;
+    let status_messages = selector(".od-status-message")?;
+    let purchased_items = selector(r#"[data-component="purchasedItems"]"#)?;
+    let item_titles = selector(r#"[data-component="itemTitle"] a"#)?;
+    let all_items: Vec<_> = html
+        .select(&purchased_items)
+        .map(|node| node.id())
+        .collect();
+    let mut covered_items = Vec::new();
+    for row in html.select(&rows) {
+        let left: Vec<_> = row.select(&left_grid).collect();
+        let right: Vec<_> = row.select(&right_grid).collect();
+        let statuses: Vec<_> = row.select(&status_containers).collect();
+        let ([left], [_right], [status]) = (left.as_slice(), right.as_slice(), statuses.as_slice())
+        else {
+            return Ok(OrderResolution::Unverified);
+        };
+        if !left
+            .select(&status_containers)
+            .any(|node| node.id() == status.id())
+        {
+            return Ok(OrderResolution::Unverified);
+        }
+        let messages: Vec<_> = status.select(&status_messages).collect();
+        let [message] = messages.as_slice() else {
+            return Ok(OrderResolution::Unverified);
+        };
+        let message = normalized_text(*message);
+        if message != "Cancelled"
+            && message != "Delivered"
+            && !message
+                .strip_prefix("Delivered ")
+                .is_some_and(|tail| !tail.is_empty())
+        {
+            return Ok(OrderResolution::Unverified);
+        }
+        let items: Vec<_> = left.select(&purchased_items).collect();
+        if items.is_empty() {
+            return Ok(OrderResolution::Unverified);
+        }
+        for item in items {
+            if covered_items.contains(&item.id())
+                || !item
+                    .select(&item_titles)
+                    .any(|title| !normalized_text(title).is_empty())
+            {
+                return Ok(OrderResolution::Unverified);
+            }
+            covered_items.push(item.id());
+        }
+    }
+    // An empty or partially represented order cannot establish that every item
+    // belongs to a terminal shipment. In particular, unshipped siblings count.
+    if all_items.is_empty()
+        || all_items.len() != covered_items.len()
+        || all_items.iter().any(|item| !covered_items.contains(item))
+    {
+        return Ok(OrderResolution::Unverified);
+    }
+    Ok(OrderResolution::Terminal)
 }
 
 fn bind_shipment_titles(
@@ -871,20 +1036,25 @@ fn page_state_blocks(html: &Html) -> Result<Vec<String>, Error> {
         .collect())
 }
 
-fn header_carriers(html: &Html) -> Result<Vec<Carrier>, Error> {
-    let mut carriers = Vec::new();
+fn shipping_carrier_labels(html: &Html) -> Result<Vec<String>, Error> {
+    let mut labels = Vec::new();
     for header in html.select(&selector("h1, h2, h3, h4, h5, h6, [role=heading]")?) {
-        let text = header
-            .text()
-            .flat_map(str::split_whitespace)
-            .collect::<Vec<_>>()
-            .join(" ")
-            .to_ascii_uppercase();
-        if let Some(carrier) = text
+        let text = normalized_text(header).to_ascii_uppercase();
+        if let Some(label) = text
             .strip_prefix("DELIVERY BY ")
             .or_else(|| text.strip_prefix("DELIVERY FACILITATED BY "))
             .or_else(|| text.strip_prefix("SHIPPED WITH "))
-            .and_then(carrier)
+        {
+            labels.push(label.to_owned());
+        }
+    }
+    Ok(labels)
+}
+
+fn header_carriers(html: &Html) -> Result<Vec<Carrier>, Error> {
+    let mut carriers = Vec::new();
+    for label in shipping_carrier_labels(html)? {
+        if let Some(carrier) = carrier(&label)
             && !carriers.contains(&carrier)
         {
             carriers.push(carrier);
@@ -1007,12 +1177,27 @@ pub(crate) fn tracking_parcel(
     page: &str,
     path: &str,
     parcel: &ParcelPage,
-) -> Result<Tracker, Error> {
+) -> Result<ParcelTracking, Error> {
+    if diagnostic_page_shape(page).is_some() {
+        return Err(provider_error(ErrorKind::InvalidResponse));
+    }
     if !query_identity(&parcel.path)?.compatible_with(&query_identity(path)?) {
         return Err(provider_error(ErrorKind::InvalidResponse));
     }
     let observed_at = time::OffsetDateTime::now_utc();
-    tracking_with_package(page, path, None, parcel.package.package_id(), observed_at)
+    let index = match &parcel.package {
+        PackageSlot::Index(index) => Some(index.as_str()),
+        PackageSlot::Id(_) => None,
+    };
+    tracking_projection(
+        page,
+        path,
+        None,
+        parcel.package.package_id(),
+        index,
+        observed_at,
+        true,
+    )
 }
 
 fn tracking_with_package(
@@ -1022,6 +1207,24 @@ fn tracking_with_package(
     package: Option<&str>,
     observed_at: time::OffsetDateTime,
 ) -> Result<Tracker, Error> {
+    match tracking_projection(page, path, expected, package, None, observed_at, false)? {
+        ParcelTracking::Tracked(tracker) => Ok(*tracker),
+        // Existing shipment retrieval still requires a complete tracker.
+        ParcelTracking::AwaitingShipment | ParcelTracking::AwaitingTrackingUpdate => {
+            Err(provider_error(ErrorKind::InvalidResponse))
+        }
+    }
+}
+
+fn tracking_projection(
+    page: &str,
+    path: &str,
+    expected: Option<&str>,
+    package: Option<&str>,
+    package_index: Option<&str>,
+    observed_at: time::OffsetDateTime,
+    discovery: bool,
+) -> Result<ParcelTracking, Error> {
     let path = allowed_path(path)?;
     if !is_tracking(&path) {
         return Err(provider_error(ErrorKind::InvalidResponse));
@@ -1039,11 +1242,17 @@ fn tracking_with_package(
     }
     let state = states.remove(0);
     let expected_package = identity.package.as_deref().or(package);
+    let expected_index = identity.index.as_deref().or(package_index);
     if identity
         .package
         .as_deref()
         .zip(package)
         .is_some_and(|(a, b)| a != b)
+        || identity
+            .index
+            .as_deref()
+            .zip(package_index)
+            .is_some_and(|(a, b)| a != b)
         || [
             (state.order_id.as_deref(), Some(identity.order.as_str())),
             (
@@ -1051,14 +1260,30 @@ fn tracking_with_package(
                 Some(identity.shipment.as_str()),
             ),
             (state.package_id.as_deref(), expected_package),
-            (state.package_index.as_deref(), identity.index.as_deref()),
+            (state.package_index.as_deref(), expected_index),
         ]
         .into_iter()
         .any(|(observed, expected)| observed.zip(expected).is_some_and(|(a, b)| a != b))
     {
         return Err(provider_error(ErrorKind::InvalidResponse));
     }
+    // Discovery may account for a known pending state only when the page itself
+    // confirms every URL identity component. Missing fields remain acceptable
+    // solely for the established complete-tracker path below.
+    let complete_identity = state.order_id.as_deref() == Some(identity.order.as_str())
+        && state.shipment_id.as_deref() == Some(identity.shipment.as_str())
+        && (expected_package.is_some() || expected_index.is_some())
+        && expected_package.is_none_or(|expected| state.package_id.as_deref() == Some(expected))
+        && expected_index.is_none_or(|expected| state.package_index.as_deref() == Some(expected));
+    let progress_status = state
+        .progress_tracker
+        .as_ref()
+        .and_then(|progress| progress.last_reached_milestone.as_deref());
+    let source_statuses = [state.short_status.as_deref(), progress_status];
     let text = html.root_element().text().collect::<Vec<_>>().join(" ");
+    let visible_number = text
+        .split_once("Tracking ID:")
+        .and_then(|(_, tail)| tail.split_whitespace().next());
     let state_carrier = state.carrier_code.as_deref().and_then(carrier);
     let header_carriers = header_carriers(&html)?;
     if header_carriers.len() > 1
@@ -1068,9 +1293,33 @@ fn tracking_with_package(
     {
         return Err(provider_error(ErrorKind::InvalidResponse));
     }
-    let actual_carrier = state_carrier
-        .or_else(|| header_carriers.first().copied())
-        .ok_or_else(|| provider_error(ErrorKind::InvalidResponse))?;
+    let actual_carrier = state_carrier.or_else(|| header_carriers.first().copied());
+    if discovery
+        && complete_identity
+        && actual_carrier.is_none()
+        && state
+            .carrier_code
+            .as_deref()
+            .is_none_or(|value| value.trim().is_empty())
+        && shipping_carrier_labels(&html)?.is_empty()
+        && !state
+            .tracking_id
+            .as_deref()
+            .zip(visible_number)
+            .is_some_and(|(state, visible)| state.trim() != visible)
+        && source_statuses.iter().any(Option::is_some)
+        && source_statuses
+            .iter()
+            .flatten()
+            .all(|value| matches!(*value, "ORDER_PLACED" | "ORDERED"))
+        && html
+            .select(&selector("#primaryStatus, .pt-status-main-status")?)
+            .all(|node| normalized_text(node) == "Ordered")
+    {
+        return Ok(ParcelTracking::AwaitingShipment);
+    }
+    let actual_carrier =
+        actual_carrier.ok_or_else(|| provider_error(ErrorKind::InvalidResponse))?;
     let canonical_number = |value: &str| -> Result<String, Error> {
         let mut tracking = Tracking {
             carrier: actual_carrier,
@@ -1088,11 +1337,7 @@ fn tracking_with_package(
         .as_deref()
         .map(canonical_number)
         .transpose()?;
-    let visible_number = text
-        .split_once("Tracking ID:")
-        .and_then(|(_, tail)| tail.split_whitespace().next())
-        .map(canonical_number)
-        .transpose()?;
+    let visible_number = visible_number.map(canonical_number).transpose()?;
     if state_number
         .as_ref()
         .zip(visible_number.as_ref())
@@ -1106,6 +1351,21 @@ fn tracking_with_package(
     if expected.is_some_and(|expected| expected != number) {
         return Err(provider_error(ErrorKind::InvalidResponse));
     }
+    if discovery
+        && complete_identity
+        && state.short_status.as_deref() == Some("NO_INFORMATION_AVAILABLE")
+        && observed_status(&state).is_none()
+        && state
+            .carrier_code
+            .as_deref()
+            .is_none_or(|value| value.trim().is_empty() || carrier(value).is_some())
+        && source_statuses
+            .iter()
+            .flatten()
+            .all(|value| *value == "NO_INFORMATION_AVAILABLE" || status(value).is_some())
+    {
+        return Ok(ParcelTracking::AwaitingTrackingUpdate);
+    }
     let actual_status =
         observed_status(&state).ok_or_else(|| provider_error(ErrorKind::InvalidResponse))?;
     let delivery_date = state
@@ -1115,7 +1375,7 @@ fn tracking_with_package(
         .and_then(|(message, timezone)| {
             provider_delivery_date(&message, actual_status, observed_at, &timezone)
         });
-    Ok(Tracker {
+    Ok(ParcelTracking::Tracked(Box::new(Tracker {
         provider: ProviderId::AmazonAccount,
         id: path.clone(),
         tracking_code: number,
@@ -1126,7 +1386,7 @@ fn tracking_with_package(
             delivery_date,
             ..Default::default()
         },
-    })
+    })))
 }
 
 fn provider_delivery_date(
@@ -2490,6 +2750,289 @@ mod tests {
                 .unwrap()
                 .contains("PRIVATE_TITLE")
         );
+    }
+
+    fn cancelled_card(link: &str, status: &str) -> String {
+        format!(
+            r#"<div class="past-purchase-tile">
+            <a class="item-card__link" href="{link}" aria-label="Widget, Order placed 1 October 2026, Cancelled"></a>
+            <div class="past-purchase-tile__asin-information-primary-text-container"><span class="item-card__primary-text">{status}</span></div>
+        </div>"#
+        )
+    }
+
+    #[test]
+    fn cancelled_listing_cards_require_one_order_only_link_and_owned_status() {
+        let order = "/your-orders/order-details?orderId=111-1234567-1234567";
+        let cancelled = cancelled_card(order, "Cancelled");
+        let listing = pages::listing(&cancelled).unwrap();
+        assert_eq!(listing.classified_terminal, 1);
+        assert_eq!(listing.deferred, 0);
+        assert!(listing.parcels.is_empty());
+
+        for page in [
+            cancelled_card(order, "Arriving tomorrow"),
+            cancelled_card(order, "Cancelled item; another item is shipping"),
+            cancelled.replace("past-purchase-tile\"", "unrecognized-card\""),
+            cancelled.replace("past-purchase-tile__asin-information-primary-text-container", "neighbor-status"),
+            cancelled.replace("<span class=\"item-card__primary-text\">Cancelled</span>", "<span class=\"item-card__primary-text\">Cancelled</span><span class=\"item-card__primary-text\">Shipped</span>"),
+            cancelled.replace("<div class=\"past-purchase-tile__asin-information-primary-text-container\">", "<div class=\"past-purchase-tile\"><div class=\"past-purchase-tile__asin-information-primary-text-container\">") + "</div>",
+            format!(r#"<a class="item-card__link" href="{order}" aria-label="Widget, Order placed 1 October 2026, Cancelled"></a><p>Cancelled</p>"#),
+        ] {
+            let listing = pages::listing(&page).unwrap();
+            assert_eq!(listing.classified_terminal, 0);
+            assert_eq!(listing.deferred, 1);
+        }
+        let mixed = cancelled.replace(
+            "<div class=\"past-purchase-tile__asin-information-primary-text-container\">",
+            &format!(r#"<a class="item-card__link" href="{order}" aria-label="Second item, Order placed 1 October 2026, Shipped"></a><div class="past-purchase-tile__asin-information-primary-text-container">"#),
+        );
+        let listing = pages::listing(&mixed).unwrap();
+        assert_eq!(listing.classified_terminal, 0);
+        assert_eq!(listing.deferred, 2);
+        let listing = pages::listing(&cancelled_card(PATH, "Cancelled")).unwrap();
+        assert_eq!(listing.classified_terminal, 0);
+        assert_eq!(listing.parcels.len(), 1);
+    }
+
+    fn terminal_order_row(status: &str) -> String {
+        format!(
+            r#"<div class="a-fixed-right-grid-inner">
+            <div data-component="shipmentsLeftGrid">
+                <div data-component="shipmentStatus"><h4 class="od-status-message"><span>{status}</span></h4></div>
+                <div data-component="purchasedItems"><div data-component="itemTitle"><a>Example item</a></div></div>
+            </div><div data-component="shipmentsRightGrid"></div>
+        </div>"#
+        )
+    }
+
+    fn terminal_order(rows: &str) -> String {
+        format!(
+            r#"<div data-component="orderId"><span>111-1234567-1234567</span></div>
+            <div data-component="shipments"><div class="a-box-group">{rows}</div></div>"#
+        )
+    }
+
+    #[test]
+    fn terminal_orders_account_for_every_owned_item_and_shipment_status() {
+        let order = "111-1234567-1234567";
+        let delivered = terminal_order_row("Delivered October 1");
+        let cancelled = terminal_order_row("Cancelled");
+        for page in [
+            terminal_order(&delivered),
+            terminal_order(&cancelled),
+            terminal_order(&(delivered.clone() + &cancelled)),
+        ] {
+            assert!(matches!(
+                pages::order_resolution(&page, order).unwrap(),
+                pages::OrderResolution::Terminal
+            ));
+        }
+        let valid = terminal_order(&delivered);
+        for page in [
+            terminal_order(""),
+            terminal_order(&(delivered.clone() + &terminal_order_row("Arriving tomorrow"))),
+            terminal_order(
+                &(delivered.clone() + &terminal_order_row("Check tracking for updates")),
+            ),
+            valid.replace(order, "111-7654321-7654321"),
+            valid.replace(
+                "data-component=\"orderId\"",
+                "data-component=\"orderIdLabel\"",
+            ),
+            format!(r#"{valid}<div data-component="orderId">{order}</div>"#),
+            format!(
+                r#"{valid}<div data-component="purchasedItems"><div data-component="itemTitle"><a>Unshipped sibling</a></div></div>"#
+            ),
+            valid.replace(
+                "data-component=\"shipmentStatus\"",
+                "data-component=\"unboundStatus\"",
+            ),
+            valid.replace(
+                "class=\"od-status-message\"",
+                "class=\"unrecognized-message\"",
+            ),
+            valid.replace("Delivered October 1", "Not delivered October 1"),
+            valid.replace(
+                "Delivered October 1",
+                "Cancelled but another item is shipping",
+            ),
+            valid.replace(
+                "<div data-component=\"itemTitle\"><a>Example item</a></div>",
+                "",
+            ),
+            valid.replace("</h4>", "</h4><h4 class=\"od-status-message\">Shipped</h4>"),
+            format!(
+                r#"{valid}<a href="{}">Foreign tracking</a>"#,
+                PATH.replace(order, "111-7654321-7654321")
+            ),
+            format!(
+                r#"{valid}<a href="{}">Incomplete tracking</a>"#,
+                PATH.replace("&packageId=1", "")
+            ),
+            format!(r#"{valid}<a href="{PATH}&orderId={order}">Conflicting tracking identity</a>"#),
+        ] {
+            assert!(matches!(
+                pages::order_resolution(&page, order).unwrap(),
+                pages::OrderResolution::Unverified
+            ));
+        }
+        for blocked in [
+            "<form name=signIn><input type=password></form>",
+            "<input name=captchacharacters>",
+            "Sorry! Something went wrong!",
+        ] {
+            assert!(pages::order_resolution(&(valid.clone() + blocked), order).is_err());
+        }
+        let with_tracking = format!(r#"{valid}<a href="{PATH}">Track package</a>"#);
+        let pages::OrderResolution::Tracking(parcels) =
+            pages::order_resolution(&with_tracking, order).unwrap()
+        else {
+            panic!("verified tracking candidates must take priority over terminal presentation");
+        };
+        assert_eq!(parcels.len(), 1);
+        assert_eq!(parcels[0].path, PATH);
+    }
+
+    fn pending_tracking_page(status: &str, milestone: Option<&str>) -> String {
+        let milestone = milestone.map_or_else(String::new, |value| {
+            format!(r#", "progressTracker":{{"lastReachedMilestone":"{value}"}}"#)
+        });
+        format!(
+            r#"<div class="pt-status-main-status">Ordered</div><script id="page-state">{{"orderId":"111-1234567-1234567","shipmentId":"SHIP1","packageId":"1","trackingId":"TBA000000000001","shortStatus":"{status}"{milestone}}}</script>"#
+        )
+    }
+
+    #[test]
+    fn awaiting_shipment_requires_complete_identity_and_positive_unassigned_order_state() {
+        let parcel = &pages::listing(&format!(r#"<a class="item-card__link" href="{PATH}" aria-label="Example item, Order placed 1 October 2026, Ordered"></a>"#)).unwrap().parcels[0];
+        for page in [
+            pending_tracking_page("ORDER_PLACED", Some("ORDERED")),
+            pending_tracking_page("ORDERED", None),
+        ] {
+            assert!(matches!(
+                pages::tracking_parcel(&page, PATH, parcel).unwrap(),
+                pages::ParcelTracking::AwaitingShipment
+            ));
+            assert!(
+                pages::tracking(&page, PATH, None).is_err(),
+                "existing records still require a real tracker"
+            );
+        }
+        let valid = pending_tracking_page("ORDER_PLACED", Some("ORDERED"));
+        for page in [
+            valid.replace(r#""orderId":"111-1234567-1234567","#, ""),
+            valid.replace(r#""shipmentId":"SHIP1","#, ""),
+            valid.replace(r#""packageId":"1","#, ""),
+            valid.replace(r#""packageId":"1""#, r#""packageId":"2""#),
+            valid.replace("ORDER_PLACED", "UNRECOGNIZED_STATUS"),
+            valid.replace("ORDERED", "IN_TRANSIT"),
+            valid.replace("ORDERED", "UNRECOGNIZED_MILESTONE"),
+            valid.replace(">Ordered<", ">Shipped<"),
+            valid.replace(
+                "\"trackingId\":",
+                "\"carrierCode\":\"UNKNOWN_CARRIER\",\"trackingId\":",
+            ),
+            format!("<h3>Shipped with Unknown carrier</h3>{valid}"),
+            format!("<h3>Delivery by USPS</h3><h3>Shipped with Amazon</h3>{valid}"),
+            format!("<form name=signIn><input type=password></form>{valid}"),
+            format!("{valid}<p>Tracking ID: TBA000000000002</p>"),
+        ] {
+            assert!(pages::tracking_parcel(&page, PATH, parcel).is_err());
+        }
+        let assigned = format!("<h3>Delivery by Amazon</h3>{valid}");
+        assert!(
+            matches!(pages::tracking_parcel(&assigned, PATH, parcel).unwrap(), pages::ParcelTracking::Tracked(tracker) if tracker.status == Status::PreTransit)
+        );
+        let indexed_path = PATH.replace("packageId=1", "packageIndex=0");
+        let indexed = pending_tracking_page("ORDER_PLACED", Some("ORDERED"))
+            .replace("\"packageId\":\"1\"", "\"packageIndex\":\"0\"");
+        let indexed_parcel = pages::ParcelPage {
+            package: pages::PackageSlot::Index("0".into()),
+            path: indexed_path.clone(),
+            ..parcel.clone()
+        };
+        assert!(matches!(
+            pages::tracking_parcel(&indexed, &indexed_path, &indexed_parcel).unwrap(),
+            pages::ParcelTracking::AwaitingShipment
+        ));
+        assert!(
+            pages::tracking_parcel(
+                &indexed.replace("\"packageIndex\":\"0\"", "\"packageIndex\":\"1\""),
+                &indexed_path,
+                &indexed_parcel
+            )
+            .is_err()
+        );
+        let identified = pending_tracking_page("ORDER_PLACED", Some("ORDERED"));
+        assert!(
+            pages::tracking_parcel(&identified, PATH, &indexed_parcel).is_err(),
+            "an ID-only page does not confirm the original indexed slot"
+        );
+        let bound = identified.replace(
+            "\"packageId\":\"1\"",
+            "\"packageId\":\"1\",\"packageIndex\":\"0\"",
+        );
+        assert!(matches!(
+            pages::tracking_parcel(&bound, PATH, &indexed_parcel).unwrap(),
+            pages::ParcelTracking::AwaitingShipment
+        ));
+    }
+
+    #[test]
+    fn awaiting_tracking_update_requires_known_source_state_and_verified_parcel_fields() {
+        let parcel = &pages::listing(&format!(r#"<a class="item-card__link" href="{PATH}" aria-label="Example item, Order placed 1 October 2026, Shipped"></a>"#)).unwrap().parcels[0];
+        let valid = format!(
+            "<h3>Shipped with USPS</h3>{}",
+            pending_tracking_page("NO_INFORMATION_AVAILABLE", None)
+                .replace("TBA000000000001", "9400111122223333444455")
+                .replace(
+                    "<div class=\"pt-status-main-status\">Ordered</div>",
+                    "<div id=\"primaryStatus\">On the way, but running late</div>"
+                )
+        );
+        assert!(matches!(
+            pages::tracking_parcel(&valid, PATH, parcel).unwrap(),
+            pages::ParcelTracking::AwaitingTrackingUpdate
+        ));
+        assert!(
+            pages::tracking(&valid, PATH, None).is_err(),
+            "known pending information must not fabricate an existing-record tracker"
+        );
+        for (milestone, expected) in [
+            ("ORDERED", Status::PreTransit),
+            ("IN_TRANSIT", Status::InTransit),
+            ("DELIVERED", Status::Delivered),
+        ] {
+            let with_milestone = valid.replace(
+                "\"shortStatus\":",
+                &format!("\"progressTracker\":{{\"lastReachedMilestone\":\"{milestone}\"}},\"shortStatus\":"),
+            );
+            assert!(
+                matches!(pages::tracking_parcel(&with_milestone, PATH, parcel).unwrap(), pages::ParcelTracking::Tracked(tracker) if tracker.status == expected),
+                "a verified milestone takes priority over pending information"
+            );
+            assert_eq!(
+                pages::tracking(&with_milestone, PATH, None).unwrap().status,
+                expected
+            );
+        }
+        for page in [
+            valid.replace("NO_INFORMATION_AVAILABLE", "NEW_UNRECOGNIZED_STATUS"),
+            valid.replace(r#""shipmentId":"SHIP1","# , ""),
+            valid.replace(r#""packageId":"1","# , ""),
+            valid.replace("111-1234567-1234567", "111-7654321-7654321"),
+            valid.replace("SHIP1", "SHIP2"),
+            valid.replace("9400111122223333444455", "A1"),
+            valid.replace("9400111122223333444455", ""),
+            valid.replace("<h3>Shipped with USPS</h3>", ""),
+            valid.replace("Shipped with USPS", "Shipped with Unknown carrier"),
+            valid.replace("\"trackingId\":", "\"carrierCode\":\"Amazon\",\"trackingId\":"),
+            valid.replace("</script>", "</script><p>Tracking ID: 9400111122223333444466</p>"),
+            valid.replace("\"shortStatus\":", "\"progressTracker\":{\"lastReachedMilestone\":\"UNRECOGNIZED_MILESTONE\"},\"shortStatus\":"),
+        ] {
+            assert!(pages::tracking_parcel(&page, PATH, parcel).is_err());
+        }
     }
 
     #[test]

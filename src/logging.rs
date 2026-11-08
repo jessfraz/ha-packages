@@ -75,6 +75,12 @@ struct Fields {
     #[serde(skip_serializing_if = "Option::is_none")]
     listing_pages: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    classified_terminal: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    awaiting_shipment: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    awaiting_tracking_update: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     complete: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     has_more: Option<bool>,
@@ -217,6 +223,15 @@ impl slog::Serializer for Fields {
             "committed_parcels" => self.committed_parcels = bounded_number(&value.to_string(), 500),
             "deferred_store" => self.deferred_store = bounded_number(&value.to_string(), 500),
             "listing_pages" => self.listing_pages = bounded_number(&value.to_string(), 101),
+            "classified_terminal" => {
+                self.classified_terminal = bounded_number(&value.to_string(), deferred_limit)
+            }
+            "awaiting_shipment" => {
+                self.awaiting_shipment = bounded_number(&value.to_string(), deferred_limit)
+            }
+            "awaiting_tracking_update" => {
+                self.awaiting_tracking_update = bounded_number(&value.to_string(), deferred_limit)
+            }
             "complete" => self.complete = value.to_string().parse().ok(),
             "has_more" => self.has_more = value.to_string().parse().ok(),
             "next_delay_seconds" => {

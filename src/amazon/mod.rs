@@ -115,6 +115,9 @@ pub struct Discovery {
     pub has_more: bool,
     pub complete: bool,
     pub(crate) listing_pages: usize,
+    pub(crate) classified_terminal: usize,
+    pub(crate) awaiting_shipment: usize,
+    pub(crate) awaiting_tracking_update: usize,
     pub(crate) continued: bool,
     pub failure: Option<ConnectionError>,
 }
@@ -157,7 +160,10 @@ struct DiscoveryScan {
     next_page: Option<String>,
     seen_pages: BTreeSet<u8>,
     seen_sources: BTreeSet<String>,
-    canonical_orders: BTreeMap<String, Vec<pages::ParcelPage>>,
+    canonical_orders: BTreeMap<String, pages::OrderResolution>,
+    classified_terminal: usize,
+    awaiting_shipment: usize,
+    awaiting_tracking_update: usize,
     deferred: DeferredCounts,
 }
 impl Default for DiscoveryScan {
@@ -169,9 +175,19 @@ impl Default for DiscoveryScan {
             seen_pages: BTreeSet::new(),
             seen_sources: BTreeSet::new(),
             canonical_orders: BTreeMap::new(),
+            classified_terminal: 0,
+            awaiting_shipment: 0,
+            awaiting_tracking_update: 0,
             deferred: DeferredCounts::default(),
         }
     }
+}
+
+enum DiscoveryObservation {
+    Tracked(Box<Tracker>),
+    Terminal,
+    AwaitingShipment,
+    AwaitingTrackingUpdate,
 }
 struct RequestSchedule {
     next: Instant,
@@ -648,7 +664,15 @@ impl AmazonClient {
             let mut last_error = None;
             for candidate in candidates.into_iter().take(MAX_TRACK_LOADS) {
                 let page = self.fetch_page_detailed(&candidate.path).await?;
-                let mut tracker = match pages::tracking_parcel(&page, &candidate.path, &candidate) {
+                let observation = pages::tracking_parcel(&page, &candidate.path, &candidate)
+                    .and_then(|observation| match observation {
+                        pages::ParcelTracking::Tracked(tracker) => Ok(*tracker),
+                        pages::ParcelTracking::AwaitingShipment
+                        | pages::ParcelTracking::AwaitingTrackingUpdate => {
+                            Err(provider_error(ErrorKind::InvalidResponse))
+                        }
+                    });
+                let mut tracker = match observation {
                     Ok(tracker) => tracker,
                     Err(error) if matches!(error.kind, ErrorKind::InvalidResponse) => {
                         last_error = Some(
@@ -875,6 +899,7 @@ impl AmazonClient {
                 scan.deferred.unsupported_link += listing.deferred_reasons.unsupported_link;
                 scan.deferred.missing_identity += listing.deferred_reasons.missing_identity;
                 scan.deferred.missing_product += listing.deferred_reasons.missing_product;
+                scan.classified_terminal += listing.classified_terminal;
                 for parcel in listing.parcels {
                     let key = source_key(&customer, &parcel);
                     if !imported.contains(&key) && scan.seen_sources.insert(key) {
@@ -918,7 +943,7 @@ impl AmazonClient {
                                     let details =
                                         self.discovery_page(&details_path, deadline).await?;
                                     let canonical =
-                                        pages::order_tracking_pages(&details, &candidate.order)
+                                        pages::order_resolution(&details, &candidate.order)
                                             .map_err(|error| {
                                                 ConnectionError::with_status(
                                                     ConnectionStage::Orders,
@@ -935,6 +960,13 @@ impl AmazonClient {
                                     scan.canonical_orders
                                         .insert(candidate.order.clone(), canonical.clone());
                                     canonical
+                                };
+                                let canonical = match canonical {
+                                    pages::OrderResolution::Terminal => {
+                                        return Ok(DiscoveryObservation::Terminal);
+                                    }
+                                    pages::OrderResolution::Tracking(parcels) => parcels,
+                                    pages::OrderResolution::Unverified => return Err(deferral),
                                 };
                                 // The consumed POP source is not a verified package.
                                 // A canonical candidate may reuse its exact identity,
@@ -956,16 +988,33 @@ impl AmazonClient {
                     };
                     page = self.discovery_page(&path, deadline).await?;
                 }
-                pages::tracking_parcel(&page, &path, &candidate).map_err(|error| {
-                    ConnectionError::with_status(ConnectionStage::Orders, error, 200)
-                        .with_page_kind(PageKind::Tracking)
-                        .with_path(&path)
-                        .with_shape(pages::tracking_failure_shape(&page))
-                })
+                pages::tracking_parcel(&page, &path, &candidate)
+                    .map(|observation| match observation {
+                        pages::ParcelTracking::Tracked(tracker) => {
+                            DiscoveryObservation::Tracked(tracker)
+                        }
+                        pages::ParcelTracking::AwaitingShipment => {
+                            DiscoveryObservation::AwaitingShipment
+                        }
+                        pages::ParcelTracking::AwaitingTrackingUpdate => {
+                            DiscoveryObservation::AwaitingTrackingUpdate
+                        }
+                    })
+                    .map_err(|error| {
+                        ConnectionError::with_status(ConnectionStage::Orders, error, 200)
+                            .with_page_kind(PageKind::Tracking)
+                            .with_path(&path)
+                            .with_shape(pages::tracking_failure_shape(&page))
+                    })
             }
             .await;
             match result {
-                Ok(mut tracker) => {
+                Ok(DiscoveryObservation::Terminal) => scan.classified_terminal += 1,
+                Ok(DiscoveryObservation::AwaitingShipment) => scan.awaiting_shipment += 1,
+                Ok(DiscoveryObservation::AwaitingTrackingUpdate) => {
+                    scan.awaiting_tracking_update += 1
+                }
+                Ok(DiscoveryObservation::Tracked(mut tracker)) => {
                     tracker.id = format!("{}:{}", account_key(&customer), tracker.id);
                     let title = candidate.titles.join("; ");
                     let mut title = if title.starts_with("Amazon: ") {
@@ -987,7 +1036,7 @@ impl AmazonClient {
                         title,
                         order_reference: candidate.order,
                         source_key,
-                        tracker,
+                        tracker: *tracker,
                     });
                 }
                 Err(error)
@@ -1024,6 +1073,9 @@ impl AmazonClient {
         deferred_reasons.request_limit = scan.pending.len() + scan.retry.len();
         let complete = !has_more && failure.is_none();
         let listing_pages = scan.seen_pages.len();
+        let classified_terminal = scan.classified_terminal;
+        let awaiting_shipment = scan.awaiting_shipment;
+        let awaiting_tracking_update = scan.awaiting_tracking_update;
         let mut state = self.state.lock().await;
         if state.generation != generation {
             return Err(ConnectionError::failure(
@@ -1087,6 +1139,9 @@ impl AmazonClient {
             has_more,
             complete,
             listing_pages,
+            classified_terminal,
+            awaiting_shipment,
+            awaiting_tracking_update,
             continued,
             failure,
         })
@@ -5013,6 +5068,118 @@ mod tests {
         let restored = AmazonClient::new(dir.path().join("amazon-account.json")).unwrap();
         assert!(!restored.status().await.imports_enabled);
         assert!(!restored.blocked());
+    }
+
+    #[tokio::test]
+    async fn discovery_accounts_for_terminal_and_unshipped_orders_without_hiding_gaps() {
+        use crate::{amazon_sync::AmazonDiscoveryWorker, store::Store};
+
+        const DELIVERED: &str =
+            "/your-orders/pop?orderId=111-0000001-0000001&shipmentId=DONE&packageIndex=0";
+        const CANCELLED: &str = "/your-orders/order-details?orderID=111-0000002-0000002";
+        const ORDERED: &str =
+            "/progress-tracker/package?orderId=111-0000003-0000003&shipmentId=WAIT&packageIndex=0";
+        const DELAYED: &str =
+            "/progress-tracker/package?orderId=111-0000004-0000004&shipmentId=LATE&packageIndex=0";
+        const UNKNOWN: &str =
+            "/your-orders/pop?orderId=111-0000005-0000005&shipmentId=UNKNOWN&packageIndex=0";
+        fn order_page(order: &str, status: &str) -> String {
+            format!(
+                r#"<div data-component="orderId"><span>{order}</span></div>
+                <div data-component="shipments"><div class="a-box-group"><div class="a-fixed-right-grid-inner">
+                  <div data-component="shipmentsLeftGrid">
+                    <div data-component="shipmentStatus"><h4 class="od-status-message"><span>{status}</span></h4></div>
+                    <div data-component="purchasedItems"><div data-component="itemTitle"><a>Example item</a></div></div>
+                  </div><div data-component="shipmentsRightGrid"></div>
+                </div></div></div>"#
+            )
+        }
+        let recovered = Arc::new(AtomicBool::new(false));
+        let source_recovered = recovered.clone();
+        let fixture = Fixture::new(move |path| {
+            match path {
+            "/auth/token" => (200, ACCESS.into()),
+            "/ap/exchangetoken/cookies" => (200, COOKIES.into()),
+            "/your-orders/orders?timeFilter=months-3" => {
+                let mut html = [DELIVERED, ORDERED, DELAYED, UNKNOWN]
+                    .into_iter()
+                    .map(|path| format!(r#"<a class="item-card__link" href="{path}" aria-label="Example item, Order placed 1 October 2026, Shipped"></a>"#))
+                    .collect::<String>();
+                html.push_str(&format!(r#"<div class="past-purchase-tile">
+                    <a class="item-card__link" href="{CANCELLED}" aria-label="Example item, Order placed 1 October 2026, Cancelled"></a>
+                    <div class="past-purchase-tile__asin-information-primary-text-container"><span class="item-card__primary-text">Cancelled</span></div>
+                </div>"#));
+                (200, html)
+            }
+            DELIVERED | UNKNOWN => (200, "<div role=dialog>No tracking link</div>".into()),
+            "/your-orders/order-details?orderID=111-0000001-0000001" => {
+                (200, order_page("111-0000001-0000001", "Delivered October 1"))
+            }
+            "/your-orders/order-details?orderID=111-0000005-0000005" => {
+                let status = if source_recovered.load(Ordering::Acquire) { "Delivered October 2" } else { "Check tracking for updates" };
+                (200, order_page("111-0000005-0000005", status))
+            }
+            ORDERED => (200, r#"<div class="pt-status-main-status">Ordered</div><script id="page-state">{"orderId":"111-0000003-0000003","shipmentId":"WAIT","packageIndex":"0","trackingId":"TBA000000000001","shortStatus":"ORDER_PLACED","progressTracker":{"lastReachedMilestone":"ORDERED"}}</script>"#.into()),
+            DELAYED => (200, format!(r#"<h3>Shipped with USPS</h3><div id="primaryStatus">On the way, but running late</div><script id="page-state">{{"orderId":"111-0000004-0000004","shipmentId":"LATE","packageIndex":"0","trackingId":"{NUMBER}","shortStatus":"NO_INFORMATION_AVAILABLE"}}</script>"#)),
+            _ => (404, "Unexpected source request".into()),
+        }
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let client = Arc::new(configured(&dir, &fixture));
+        client.enable_imports().await.unwrap();
+        let store = Store::open(&dir.path().join("registry.sqlite3"))
+            .await
+            .unwrap();
+        let worker = AmazonDiscoveryWorker::new(store.clone(), client.clone());
+        assert!(worker.tick().await.unwrap());
+        let health = AmazonDiscoveryWorker::health(&store, &client.status().await)
+            .await
+            .unwrap();
+        assert!(!health.has_more);
+        assert_eq!(
+            health.deferred_parcels, 1,
+            "only genuinely unclassified source data is a discovery error"
+        );
+        assert!(health.problem);
+        assert!(health.last_complete_at.is_none());
+
+        drop(worker);
+        drop(client);
+        let restored = Arc::new(
+            AmazonClient::for_test(dir.path().join("amazon-account.json"), fixture.url.clone())
+                .unwrap(),
+        );
+        let health = AmazonDiscoveryWorker::health(&store, &restored.status().await)
+            .await
+            .unwrap();
+        assert!(
+            health.problem,
+            "classifying normal orders must not clear unresolved coverage on restart"
+        );
+        assert_eq!(health.deferred_parcels, 1);
+        assert!(
+            store
+                .list(&crate::models::Filters::default(), None, 100)
+                .await
+                .unwrap()
+                .is_empty(),
+            "terminal and pending observations never fabricate shipments"
+        );
+
+        recovered.store(true, Ordering::Release);
+        force_discovery_due(&store).await;
+        let worker = AmazonDiscoveryWorker::new(store.clone(), restored.clone());
+        assert!(worker.tick().await.unwrap());
+        let health = AmazonDiscoveryWorker::health(&store, &restored.status().await)
+            .await
+            .unwrap();
+        assert!(
+            !health.problem,
+            "an accounted-for sweep clears the error despite normal pending delivery states"
+        );
+        assert_eq!(health.deferred_parcels, 0);
+        assert!(health.last_complete_at.is_some());
+        store.close().await.unwrap();
     }
 
     #[tokio::test]
