@@ -256,9 +256,21 @@ request POST /v1/agents 403 \
     --header 'Content-Type: application/json' --data '{"name":"Forbidden agent"}'
 request DELETE "/v1/agents/$agent_id" 403 --header "Authorization: Bearer $agent_token"
 
-# Exercise a complete private-state restore into a fresh volume. Like a native
-# Supervisor restore, copied files retain their modes but arrive owned by root.
-database_mode=$(docker exec "$container" stat -c '%a' /data/packages.sqlite3)
+# Exercise the actual native SecureTar extraction/copy path. The observed host
+# cannot restore modes/times after extraction assigns app ownership. Dropping
+# FOWNER reproduces that boundary without granting the app any new capability.
+case $expected_arch in
+    amd64)
+        supervisor_image='ghcr.io/home-assistant/amd64-hassio-supervisor@sha256:f5f3728cf7a9a637485576c7588d209a1527fe9d6bb46f7326ef9aa629c55713'
+        ;;
+    arm64)
+        supervisor_image='ghcr.io/home-assistant/aarch64-hassio-supervisor@sha256:0f606324063cd5e7e591fb71efb5214ff56a05514898e33e461757950abc2914'
+        ;;
+    *)
+        echo "Unsupported native restore architecture: $expected_arch" >&2
+        exit 1
+        ;;
+esac
 stop_container
 # Deliberately fake and paused: this saved account can never contact a provider.
 printf '%s\n' '{"refresh_token":"container-smoke-only","device_serial":"container-smoke-only","customer_id":"container-smoke-only","generation":1,"imports_enabled":false,"auth_required":true}' >"$scratch/amazon-account.json"
@@ -272,23 +284,54 @@ docker run --rm --mount "type=volume,source=$volume,target=/data" \
         mkdir /outside/private /data/owned-nested
         printf "preserved-private-state\n" > /data/owned-nested/marker
         chown -R 10001:10001 /data/owned-nested
+        chown 10001:10001 /data/amazon-account.json
         ln -s /outside /data/external-directory
         ln -s /outside/sentinel /data/external-file
     '
-mkdir "$scratch/app-data"
-docker cp "$container:/data/." "$scratch/app-data"
 docker rm "$container" >/dev/null
 docker volume create "$restore_volume" >/dev/null
+docker run --rm --network none --read-only --cap-drop FOWNER \
+    --tmpfs /tmp:rw,nosuid,nodev,noexec \
+    --mount "type=volume,source=$volume,target=/source,readonly" \
+    --mount "type=volume,source=$restore_volume,target=/restored" \
+    --entrypoint python3 --interactive "$supervisor_image" <<'PY'
+import io
+from pathlib import Path
+import shutil
+import tarfile
+import tempfile
+
+from securetar import SecureTarArchive, SecureTarFile, atomic_contents_add
+
+# Synthetic application state only; this archive never leaves the helper.
+password = "container-native-restore-only"
+encrypted = io.BytesIO()
+with SecureTarArchive(fileobj=encrypted, mode="w", password=password, create_version=3) as archive:
+    with archive.create_tar("./app.tar.gz") as private:
+        atomic_contents_add(private, Path("/source"), file_filter=lambda _: False, arcname="data")
+encrypted.seek(0)
+with tempfile.TemporaryDirectory() as extracted, tarfile.open(fileobj=encrypted, mode="r:") as outer:
+    member = next(item for item in outer if item.name.endswith("app.tar.gz"))
+    with SecureTarFile(fileobj=outer.extractfile(member), password=password, gzip=True) as private:
+        private.extractall(path=extracted, filter="tar")
+    # The mounted destination is already an empty directory; copy2 is the
+    # native restore's default, including its loss of source ownership.
+    shutil.copytree(Path(extracted, "data"), "/restored", symlinks=True, dirs_exist_ok=True)
+for name in ("credentials.json", "amazon-account.json", "packages.sqlite3"):
+    item = Path("/restored", name).stat()
+    assert item.st_uid == 0 and item.st_gid == 0
+    assert item.st_mode & 0o777 == 0o644, "Native extraction fixture did not reproduce permission loss"
+PY
 docker create --name "$container" \
+    --cap-drop FOWNER \
     --publish 127.0.0.1::8080 \
     --mount "type=volume,source=$restore_volume,target=/data" \
     --mount "type=volume,source=$outside_volume,target=/outside" \
     "$image" >/dev/null
-docker cp "$scratch/app-data/." "$container:/data"
 docker run --rm --mount "type=volume,source=$restore_volume,target=/data" \
     --entrypoint sh "$image" -c '
-        test "$(stat -c "%a:%u:%g" /data/credentials.json)" = 600:0:0
-        test "$(stat -c "%a:%u:%g" /data/amazon-account.json)" = 600:0:0
+        test "$(stat -c "%a:%u:%g" /data/credentials.json)" = 644:0:0
+        test "$(stat -c "%a:%u:%g" /data/amazon-account.json)" = 644:0:0
         test -L /data/external-directory
         test -L /data/external-file
     '
@@ -298,8 +341,13 @@ wait_for_api
 check_credentials
 ownership=$(docker exec "$container" stat -c '%a:%u:%g' \
     /data/packages.sqlite3 /data/amazon-account.json /data/owned-nested/marker)
-if [[ $ownership != "$database_mode:10001:10001"$'\n600:10001:10001\n600:10001:10001' ]]; then
-    echo 'Restored private data modes/owners were not preserved' >&2
+if [[ $ownership != $'600:10001:10001\n600:10001:10001\n600:10001:10001' ]]; then
+    echo 'Restored private data modes/owners were not repaired' >&2
+    exit 1
+fi
+directories=$(docker exec "$container" stat -c '%a:%u:%g' /data /data/owned-nested)
+if [[ $directories != $'700:10001:10001\n700:10001:10001' ]]; then
+    echo 'Private directory modes/owners were not repaired' >&2
     exit 1
 fi
 outside=$(docker exec "$container" stat -c '%a:%u:%g' /outside/sentinel /outside/private)
@@ -331,6 +379,7 @@ stop_container
 docker start "$container" >/dev/null
 base_url="http://$(docker port "$container" 8080/tcp)"
 wait_for_api
+check_credentials
 request GET /v1/system 401 --header "Authorization: Bearer $agent_token"
 request GET /v1/agents 200 --header "Authorization: Bearer $token"
 jq --exit-status '.items == []' "$scratch/response.json" >/dev/null
@@ -369,4 +418,42 @@ docker run --rm --mount "type=volume,source=$outside_volume,target=/outside" \
         test "$(stat -c "%u:%g" /outside)" = 0:0
     '
 
-echo "Container smoke passed ($expected_arch): uid10001, standalone/app/agent access, private-state restore, unchanged credentials/modes, external-link and mount boundaries, installation checks, and durable packages/credentials/revocations."
+# A hard link can alias an outside inode without crossing a path or mount.
+# Use a subpath of the fixture volume so the alias itself is inside /data.
+docker rm "$boundary_container" "$root_link_container" >/dev/null
+docker run --rm --mount "type=volume,source=$outside_volume,target=/outside" \
+    --entrypoint ln "$image" /outside/sentinel /outside/private/outside-alias
+docker create --name "$boundary_container" \
+    --cap-drop FOWNER \
+    --mount "type=volume,source=$outside_volume,target=/data,volume-subpath=private" \
+    "$image" >/dev/null
+expect_startup_refusal "$boundary_container"
+failure=$(docker logs "$boundary_container" 2>&1)
+if [[ $failure != *'outside hard links'* ]]; then
+    echo 'Outside hard link was not rejected at the private-data preflight' >&2
+    exit 1
+fi
+docker run --rm --mount "type=volume,source=$outside_volume,target=/outside" \
+    --entrypoint sh "$image" -c '
+        test "$(stat -c "%a:%u:%g" /outside/sentinel)" = 600:0:0
+        test "$(cat /outside/sentinel)" = outside-private-data
+        rm /outside/private/outside-alias
+        printf "internal-private-state\n" > /outside/private/internal-one
+        chmod 600 /outside/private/internal-one
+        ln /outside/private/internal-one /outside/private/internal-two
+    '
+# Atomic credential publication can leave two legitimate links after a crash.
+# Both aliases are private, so startup must preserve and accept that state.
+docker run --rm --name "$root_link_container" \
+    --cap-drop FOWNER \
+    --mount "type=volume,source=$outside_volume,target=/data,volume-subpath=private" \
+    "$image" --help >/dev/null
+docker run --rm --mount "type=volume,source=$outside_volume,target=/outside" \
+    --entrypoint sh "$image" -c '
+        test "$(stat -c "%a:%u:%g:%h" /outside/private/internal-one)" = 600:10001:10001:2
+        test "$(stat -c "%a:%u:%g:%h" /outside/private/internal-two)" = 600:10001:10001:2
+        test "$(cat /outside/private/internal-one)" = internal-private-state
+        test "$(stat -c "%a:%u:%g" /outside/sentinel)" = 600:0:0
+    '
+
+echo "Container smoke passed ($expected_arch): uid10001, standalone/app/agent access, native private-state restore, unchanged credentials, repaired modes, safe restart, external symlink/mount/hardlink boundaries, internal hardlinks, installation checks, and durable packages/credentials/revocations."

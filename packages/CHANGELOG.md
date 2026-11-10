@@ -1,3 +1,10 @@
+## 0.7.2
+
+- Repair private file permissions as well as ownership after native restores,
+  before starting the unprivileged backend.
+- Keep external symlinks, nested mounts, and outside hard-link aliases outside
+  the repair boundary while allowing private atomic-publication remnants.
+
 ## 0.7.1
 
 - Repair private data ownership after native restores before starting the
