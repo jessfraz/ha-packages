@@ -20,6 +20,7 @@ use crate::pickup::{
 pub struct Manager {
     store: Store,
     providers: Vec<Arc<dyn Pickup>>,
+    configuration_id: Uuid,
 }
 
 #[derive(Serialize, serde::Deserialize, JsonSchema)]
@@ -27,6 +28,7 @@ pub struct CarrierStatus {
     pub carrier: PickupCarrier,
     pub configured: bool,
     pub capabilities: Capabilities,
+    pub configuration_id: Option<Uuid>,
 }
 
 impl Manager {
@@ -34,6 +36,7 @@ impl Manager {
         Self {
             store: Store::new(store.pool().clone()),
             providers: Vec::new(),
+            configuration_id: Uuid::now_v7(),
         }
     }
     pub fn new(store: &crate::store::Store, settings: Settings) -> Result<Self> {
@@ -52,6 +55,10 @@ impl Manager {
     pub fn with_provider(mut self, provider: Arc<dyn Pickup>) -> Self {
         self.providers.retain(|p| p.carrier() != provider.carrier());
         self.providers.push(provider);
+        // A browser review belongs to this loaded configuration. A random
+        // generation reveals no account identifiers and changes on restart;
+        // durable jobs keep their separate, stable billing fingerprint.
+        self.configuration_id = Uuid::now_v7();
         self
     }
     fn provider(&self, carrier: PickupCarrier) -> Result<Arc<dyn Pickup>> {
@@ -107,6 +114,7 @@ impl Manager {
                     carrier,
                     configured: provider.is_some(),
                     capabilities,
+                    configuration_id: provider.map(|_| self.configuration_id),
                 }
             })
             .collect()
@@ -127,9 +135,19 @@ impl Manager {
         }
         self.store.site(request.site_id).await
     }
-    pub async fn check_reviewed_site(&self, request: &ScheduleRequest) -> Result<()> {
+    pub async fn check_reviewed_plan(&self, request: &ScheduleRequest) -> Result<()> {
+        self.check_reviewed_configuration(request)?;
         if request.reviewed_site.is_some() {
             self.request_site(request).await?;
+        }
+        Ok(())
+    }
+    fn check_reviewed_configuration(&self, request: &ScheduleRequest) -> Result<()> {
+        if request
+            .reviewed_configuration
+            .is_some_and(|reviewed| reviewed != self.configuration_id)
+        {
+            return Err(Error::new(ErrorCode::ConfigurationChanged));
         }
         Ok(())
     }
@@ -189,6 +207,7 @@ impl Manager {
         request: &ScheduleRequest,
         require_watch: bool,
     ) -> Result<Vec<ResolvedPlan>> {
+        self.check_reviewed_configuration(request)?;
         if request.tracking.len() > 100 {
             return Err(invalid());
         }
@@ -416,7 +435,11 @@ impl Manager {
             let offer = self
                 .observe(provider.as_ref(), provider.preview(&plan).await)
                 .await?;
-            result.push(Preview { plan, offer });
+            result.push(Preview {
+                plan,
+                offer,
+                configuration_id: self.configuration_id,
+            });
         }
         Ok(result)
     }

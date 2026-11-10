@@ -411,6 +411,11 @@
           "carrier": {
             "$ref": "#/components/schemas/PickupCarrier"
           },
+          "configuration_id": {
+            "format": "uuid",
+            "nullable": true,
+            "type": "string"
+          },
           "configured": {
             "type": "boolean"
           }
@@ -936,6 +941,7 @@
           "watch_not_ready",
           "location_required",
           "location_changed",
+          "configuration_changed",
           "ambiguous"
         ],
         "type": "string"
@@ -1379,6 +1385,10 @@
       },
       "Preview": {
         "properties": {
+          "configuration_id": {
+            "format": "uuid",
+            "type": "string"
+          },
           "offer": {
             "$ref": "#/components/schemas/Offer"
           },
@@ -1387,6 +1397,7 @@
           }
         },
         "required": [
+          "configuration_id",
           "offer",
           "plan"
         ],
@@ -1783,6 +1794,12 @@
             "type": "integer"
           },
           "ready_time": {
+            "nullable": true,
+            "type": "string"
+          },
+          "reviewed_configuration": {
+            "description": "Optional preview precondition; one-command CLI scheduling omits it.",
+            "format": "uuid",
             "nullable": true,
             "type": "string"
           },

@@ -2,6 +2,8 @@
 
 - Schedule pickups directly from the header and keep pickup history in the tabs.
 - Keep package refresh running after visiting Pickups.
+- Show pickup actions only for configured carriers and invalidate reviews when
+  carrier configuration changes.
 - Recognize Amazon orders that are still waiting for parcel details.
 - Fix select spacing and let Dependabot track App Kit releases.
 

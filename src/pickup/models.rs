@@ -323,6 +323,9 @@ pub struct ScheduleRequest {
     pub site_id: Option<Uuid>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reviewed_site: Option<ReviewedSite>,
+    /// Optional preview precondition; one-command CLI scheduling omits it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reviewed_configuration: Option<Uuid>,
     pub date: Option<String>,
     pub ready_time: Option<String>,
     pub close_time: Option<String>,
@@ -378,6 +381,7 @@ pub struct Offer {
 pub struct Preview {
     pub plan: ResolvedPlan,
     pub offer: Offer,
+    pub configuration_id: Uuid,
 }
 
 #[derive(Clone, Deserialize, Serialize, JsonSchema)]

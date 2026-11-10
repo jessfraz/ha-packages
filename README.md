@@ -158,6 +158,8 @@ in the app configuration. Native servers accept an owner-only JSON file through
 objects with `client_id`, `client_secret`, and `environment` (`sandbox` or
 `production`). UPS and FedEx also require `account_number`. Keep this file out of
 Git. An ordinary carrier website login is not an API credential.
+Pickup controls appear when at least one carrier is configured, and only those
+carriers can be selected. Changing carrier configuration requires a new review.
 
 With a saved pickup address and known label details:
 

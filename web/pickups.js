@@ -12,6 +12,7 @@ const states = {
   unknown: "Outcome unknown",
 };
 const terminal = new Set(["scheduled", "cancelled", "rejected", "unknown"]);
+const trackingCarriers = { USPS: "usps", UspsShip: "usps", UPS: "ups", UPSDAP: "ups", FedEx: "fedex", FedExDefault: "fedex", FedexSmartPost: "fedex" };
 function node(tag, text, className) {
   const element = document.createElement(tag);
   if (text !== undefined) element.textContent = text;
@@ -67,6 +68,7 @@ export function installPickups(
   let editingSite = null;
   let pendingTracking = null;
   let reviewed = null;
+  let reviewedCarriers = [];
   let operationKey = null;
   let polling = null;
   let cancelRecord = null;
@@ -76,6 +78,11 @@ export function installPickups(
   let loading = false;
   let loadEpoch = 0;
   let queuedLoad = false;
+  let capabilityLoad = null;
+  let capabilitiesKnown = false;
+  let capabilityEpoch = 0;
+  const available = () => access && carriers.some((carrier) => carrier.configured === true);
+  const configured = (carrier) => access && carriers.some((status) => status.carrier === carrier && status.configured === true);
   const current = (value) => access && value === generation;
   function showError(error, id, version) {
     const message = errorText(error);
@@ -150,35 +157,74 @@ export function installPickups(
     find("pickup-edit-site").classList.toggle("quiet", Boolean(site));
   }
   function fillCarriers() {
+    const carrierSelect = field(form, "carrier");
+    const selectedCarrier = carrierSelect.value;
+    const enabled = carriers.filter((carrier) => carrier.configured === true);
+    carrierSelect.replaceChildren(node("option", "Detect from tracking"));
+    carrierSelect.firstElementChild.value = "";
+    for (const carrier of enabled) {
+      const option = node("option", carrierNames[carrier.carrier]);
+      option.value = carrier.carrier;
+      carrierSelect.append(option);
+    }
+    carrierSelect.value = enabled.some((carrier) => carrier.carrier === selectedCarrier) ? selectedCarrier : "";
     const select = field(form, "service");
     const selectedService = select.value;
     select.replaceChildren(node("option", "Use saved label service"));
     select.firstElementChild.value = "";
-    for (const carrier of carriers)
+    for (const carrier of enabled.filter((carrier) => !carrierSelect.value || carrier.carrier === carrierSelect.value))
       for (const service of carrier.capabilities.services) {
         const option = node("option", serviceLabel(service));
         option.value = service;
         select.append(option);
       }
-    select.value = selectedService;
-    const missing = carriers
-      .filter((carrier) => !carrier.configured)
-      .map((carrier) => carrierNames[carrier.carrier]);
-    find("pickup-configuration").textContent = !carriers.some((carrier) => carrier.configured)
+    select.value = [...select.options].some((option) => option.value === selectedService) ? selectedService : "";
+    find("pickup-configuration").textContent = !enabled.length
       ? "Connect a carrier account before scheduling. Add developer credentials in the app’s private configuration."
-      : missing.length
-        ? `Not configured: ${missing.join(", ")}. Only configured carrier accounts can schedule pickups.`
-        : "Charges use the selected carrier account.";
+      : `Charges use your configured ${enabled.map((carrier) => carrierNames[carrier.carrier]).join(", ")} shipping ${enabled.length === 1 ? "account" : "accounts"}.`;
     setBusy(busy);
   }
+  field(form, "carrier").addEventListener("change", fillCarriers);
+  function updateCapabilities(status) {
+    const next = status.filter((carrier) => Object.hasOwn(carrierNames, carrier.carrier) && carrier.configured === true);
+    const changed = JSON.stringify(carriers) !== JSON.stringify(next);
+    carriers = next;
+    if (capabilitiesKnown && changed) {
+      capabilityEpoch++;
+      pendingTracking = null;
+      cancelRecord = null;
+      cancelKey = null;
+      setBusy(false);
+      for (const dialog of dialogs) dialog.close();
+      editPlan();
+    }
+    capabilitiesKnown = true;
+    opener.hidden = !available();
+    fillCarriers();
+    options.onCapabilitiesChanged?.(available());
+  }
+  async function refreshCapabilities() {
+    if (!access) return;
+    if (capabilityLoad) return capabilityLoad;
+    const version = generation;
+    const operation = request("v1/pickups/carriers").then((status) => {
+      if (current(version)) updateCapabilities(status);
+    }).catch((error) => {
+      if (!current(version)) return;
+      updateCapabilities([]);
+      if ([401, 403].includes(error.status)) onForbidden();
+    });
+    capabilityLoad = operation;
+    try { await operation; }
+    finally { if (capabilityLoad === operation) capabilityLoad = null; }
+  }
   async function loadSetup(version) {
-    const [locations, status] = await Promise.all([
+    const [locations] = await Promise.all([
       request("v1/pickups/locations"),
-      request("v1/pickups/carriers"),
+      refreshCapabilities(),
     ]);
     if (!current(version)) return;
     sites = locations;
-    carriers = status;
     fillSites();
     fillCarriers();
   }
@@ -254,7 +300,7 @@ export function installPickups(
       if (record.error)
         card.append(node("p", record.error.code.replaceAll("_", " "), "muted"));
       const actions = node("div", undefined, "header-actions");
-      if (record.state === "scheduled") {
+      if (record.state === "scheduled" && configured(record.plan.carrier)) {
         if (record.plan.carrier !== "fedex") {
           const refresh = node("button", "Check with carrier", "quiet");
           refresh.type = "button";
@@ -317,14 +363,13 @@ export function installPickups(
     loading = true;
     queuedLoad = false;
     try {
-      const [locations, status, page] = await Promise.all([
+      const [locations, , page] = await Promise.all([
         request("v1/pickups/locations"),
-        request("v1/pickups/carriers"),
+        refreshCapabilities(),
         request("v1/pickups?limit=100"),
       ]);
       if (!current(version) || epoch !== loadEpoch) return;
       sites = locations;
-      carriers = status;
       fillSites();
       render(page.items);
       fillCarriers();
@@ -454,6 +499,7 @@ export function installPickups(
   });
   function editPlan() {
     reviewed = null;
+    reviewedCarriers = [];
     operationKey = null;
     field(form, "accept_fee").required = false;
     find("pickup-fee-label").hidden = true;
@@ -481,9 +527,12 @@ export function installPickups(
       !carriers.some((carrier) => carrier.configured)
     ) return;
     const version = generation;
+    const epoch = capabilityEpoch;
     setBusy(true);
     find("pickup-schedule-error").textContent = "";
     try {
+      await refreshCapabilities();
+      if (!current(version) || epoch !== capabilityEpoch || !available()) return;
       if (!reviewed) {
         const input = {
           tracking: field(form, "tracking").value.split(/\s+/).filter(Boolean),
@@ -505,8 +554,11 @@ export function installPickups(
           method: "POST",
           body: JSON.stringify(input),
         });
-        if (!current(version)) return;
+        if (!current(version) || epoch !== capabilityEpoch) return;
+        if (!previews.length || previews.some((preview) => !configured(preview.plan.carrier)))
+          throw new Error("The carrier configuration changed. Review the pickup again.");
         const site = previews[0]?.plan.site;
+        const configuration = previews[0]?.configuration_id;
         if (
           !site ||
           previews.some(
@@ -517,11 +569,15 @@ export function installPickups(
         ) {
           throw new Error("Pickup address changed. Review the details again.");
         }
+        if (!configuration || previews.some((preview) => preview.configuration_id !== configuration))
+          throw new Error("The carrier configuration changed. Review the pickup again.");
         reviewed = {
           ...input,
           site_id: site.id,
           reviewed_site: { id: site.id, revision: site.revision },
+          reviewed_configuration: configuration,
         };
+        reviewedCarriers = previews.map((preview) => preview.plan.carrier);
         operationKey = crypto.randomUUID();
         const details = find("pickup-review-details");
         details.replaceChildren();
@@ -592,9 +648,12 @@ export function installPickups(
       return;
     }
     const version = generation;
+    const epoch = capabilityEpoch;
     setBusy(true);
     find("pickup-schedule-error").textContent = "";
     try {
+      await refreshCapabilities();
+      if (!current(version) || epoch !== capabilityEpoch || !reviewed || !reviewedCarriers.every(configured)) return;
       const receipt = await request("v1/pickups", {
         method: "POST",
         headers: { "Idempotency-Key": operationKey },
@@ -603,7 +662,7 @@ export function installPickups(
           accept_fee: field(form, "accept_fee").checked,
         }),
       });
-      if (!current(version)) return;
+      if (!current(version) || epoch !== capabilityEpoch) return;
       loadEpoch++;
       setBusy(false);
       find("pickup-schedule-dialog").close();
@@ -617,7 +676,7 @@ export function installPickups(
         find("pickup-reload").focus();
       }
     } catch (error) {
-      if (current(version) && error.code === "pickup_location_changed") {
+      if (current(version) && ["pickup_location_changed", "pickup_configuration_changed"].includes(error.code)) {
         editPlan();
         field(form, "tracking").focus();
         await load();
@@ -634,8 +693,11 @@ export function installPickups(
     event.preventDefault();
     if (busy || !access || !cancelRecord) return;
     const version = generation;
+    const epoch = capabilityEpoch;
     setBusy(true);
     try {
+      await refreshCapabilities();
+      if (!current(version) || epoch !== capabilityEpoch || !cancelRecord || !configured(cancelRecord.plan.carrier)) return;
       await request(`v1/pickups/records/${cancelRecord.id}/cancel`, {
         method: "POST",
         headers: {
@@ -644,7 +706,7 @@ export function installPickups(
         },
         body: "{}",
       });
-      if (current(version)) {
+      if (current(version) && epoch === capabilityEpoch) {
         loadEpoch++;
         setBusy(false);
         find("pickup-cancel-dialog").close();
@@ -659,8 +721,9 @@ export function installPickups(
     }
   });
   async function open(tracking) {
-    if (!access || busy) return;
+    if (!available() || busy) return;
     const version = generation;
+    const epoch = capabilityEpoch;
     form.reset();
     editPlan();
     field(form, "tracking").value = tracking.join("\n");
@@ -669,7 +732,7 @@ export function installPickups(
     setBusy(true);
     try {
       await loadSetup(version);
-      if (!current(version)) return;
+      if (!current(version) || epoch !== capabilityEpoch || !available()) return;
       setBusy(false);
       if (!sites.some((site) => site.is_default)) {
         pendingTracking = tracking;
@@ -683,9 +746,12 @@ export function installPickups(
     }
   }
   return {
+    available,
+    canSchedule(carrier) { return configured(trackingCarriers[carrier]); },
+    refreshCapabilities,
     open,
     show() {
-      if (!access) return;
+      if (!available()) return;
       packages.hidden = true;
       root.hidden = false;
       find("pickup-error").textContent = "";
@@ -703,13 +769,18 @@ export function installPickups(
       busy = false;
       sites = [];
       carriers = [];
+      capabilityLoad = null;
+      capabilitiesKnown = false;
+      capabilityEpoch++;
       editingSite = null;
       pendingTracking = null;
       cancelRecord = null;
       cancelKey = null;
       reviewed = null;
+      reviewedCarriers = [];
       operationKey = null;
-      opener.hidden = !allowed;
+      opener.hidden = true;
+      options.onCapabilitiesChanged?.(false);
       root.hidden = true;
       for (const dialog of dialogs) {
         dialog.close();

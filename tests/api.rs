@@ -36,16 +36,22 @@ impl App {
         provider: Option<packages::shipping_api::easypost::EasyPostClient>,
         pickup: Option<Arc<dyn packages::pickup::Pickup>>,
     ) -> Self {
+        Self::with_pickup_providers(ingress_peer, provider, pickup.into_iter().collect()).await
+    }
+    async fn with_pickup_providers(
+        ingress_peer: Option<std::net::IpAddr>,
+        provider: Option<packages::shipping_api::easypost::EasyPostClient>,
+        pickups: Vec<Arc<dyn packages::pickup::Pickup>>,
+    ) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(&dir.path().join("packages.sqlite3"))
             .await
             .unwrap();
-        let pickup_manager = Arc::new(match pickup {
-            Some(provider) => {
-                packages::pickup::service::Manager::unconfigured(&store).with_provider(provider)
-            }
-            None => packages::pickup::service::Manager::unconfigured(&store),
-        });
+        let mut pickup_manager = packages::pickup::service::Manager::unconfigured(&store);
+        for provider in pickups {
+            pickup_manager = pickup_manager.with_provider(provider);
+        }
+        let pickup_manager = Arc::new(pickup_manager);
         let context = Arc::new(
             api::Context::new(
                 store.clone(),
@@ -2463,23 +2469,36 @@ async fn ordinary_ingress_users_can_read_but_cannot_claim_administrator_permissi
 
 #[derive(Clone)]
 struct PickupFixture {
+    identity: u8,
+    carrier: packages::pickup::models::PickupCarrier,
     creates: Arc<std::sync::atomic::AtomicUsize>,
     uncertain: bool,
     pause: bool,
 }
 impl packages::pickup::Pickup for PickupFixture {
     fn carrier(&self) -> packages::pickup::models::PickupCarrier {
-        packages::pickup::models::PickupCarrier::Ups
+        self.carrier
     }
     fn fingerprint(&self) -> [u8; 32] {
-        [7; 32]
+        [self.identity; 32]
     }
     fn capabilities(&self) -> packages::pickup::Capabilities {
         packages::pickup::Capabilities {
-            lookup: packages::pickup::Lookup::Pending,
-            free_normal_route: false,
-            custom_window: true,
-            services: vec![packages::pickup::models::PickupService::UpsGround],
+            lookup: match self.carrier {
+                packages::pickup::models::PickupCarrier::Usps => {
+                    packages::pickup::Lookup::Confirmation
+                }
+                packages::pickup::models::PickupCarrier::Ups => packages::pickup::Lookup::Pending,
+                packages::pickup::models::PickupCarrier::FedEx => {
+                    packages::pickup::Lookup::Unsupported
+                }
+            },
+            free_normal_route: self.carrier == packages::pickup::models::PickupCarrier::Usps,
+            custom_window: self.carrier != packages::pickup::models::PickupCarrier::Usps,
+            services: packages::pickup::models::PickupService::ALL
+                .into_iter()
+                .filter(|service| service.carrier() == self.carrier)
+                .collect(),
         }
     }
     fn preview<'a>(
@@ -2567,6 +2586,8 @@ async fn pickup_app(uncertain: bool) -> (App, Arc<std::sync::atomic::AtomicUsize
         None,
         Some(shipping.client.clone()),
         Some(Arc::new(PickupFixture {
+            identity: 7,
+            carrier: packages::pickup::models::PickupCarrier::Ups,
             creates: creates.clone(),
             uncertain,
             pause: false,
@@ -3006,6 +3027,8 @@ async fn pickup_unknown_outcome_survives_cold_copy_and_only_explicit_reconciliat
     let restored = Store::open(&copy).await.unwrap();
     let manager = packages::pickup::service::Manager::unconfigured(&restored).with_provider(
         Arc::new(PickupFixture {
+            identity: 7,
+            carrier: packages::pickup::models::PickupCarrier::Ups,
             creates: creates.clone(),
             uncertain: true,
             pause: false,
@@ -3080,6 +3103,8 @@ async fn pickup_provider_pause_rejects_a_new_intent_without_repeating_the_physic
     let (app, creates) = pickup_app(false).await;
     let paused = packages::pickup::service::Manager::unconfigured(&app.store).with_provider(
         Arc::new(PickupFixture {
+            identity: 7,
+            carrier: packages::pickup::models::PickupCarrier::Ups,
             creates: creates.clone(),
             uncertain: false,
             pause: true,
@@ -3216,6 +3241,8 @@ async fn pickup_tracking_commands_choose_current_claim_after_a_cancelled_attempt
     let third: Batch = response.json().await.unwrap();
     let uncertain = packages::pickup::service::Manager::unconfigured(&app.store).with_provider(
         Arc::new(PickupFixture {
+            identity: 7,
+            carrier: packages::pickup::models::PickupCarrier::Ups,
             creates: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             uncertain: true,
             pause: false,
@@ -3318,6 +3345,105 @@ async fn pickup_review_two_admin_address_race_requires_a_new_review_before_any_a
     );
     assert!(app.pickup_manager.list(None, 10).await.unwrap().is_empty());
     app.close().await;
+}
+
+#[tokio::test]
+#[ignore = "requires PACKAGES_PLAYWRIGHT_MODULE pointing to the installed Playwright ESM module"]
+async fn pickup_ui_uses_configured_carriers_and_invalidates_plans_on_configuration_loss() {
+    use packages::pickup::{Pickup, models::PickupCarrier};
+    let (one, creates) = pickup_app(false).await;
+    let zero = App::new(None).await;
+    let shipping = ProviderFixture::new();
+    let providers: Vec<Arc<dyn Pickup>> = PickupCarrier::ALL
+        .into_iter()
+        .map(|carrier| {
+            let provider: Arc<dyn Pickup> = Arc::new(PickupFixture {
+                identity: 7,
+                carrier,
+                creates: creates.clone(),
+                uncertain: false,
+                pause: false,
+            });
+            provider
+        })
+        .collect();
+    let mut multiple =
+        App::with_pickup_providers(None, Some(shipping.client.clone()), providers).await;
+    multiple.provider_fixture = Some(shipping);
+    multiple
+        .pickup_manager
+        .save_site(None, None, pickup_site(), true)
+        .await
+        .unwrap();
+    let rotated_shipping = ProviderFixture::new();
+    let mut rotated = App::with_providers(
+        None,
+        Some(rotated_shipping.client.clone()),
+        Some(Arc::new(PickupFixture {
+            identity: 8,
+            carrier: PickupCarrier::Ups,
+            creates: creates.clone(),
+            uncertain: false,
+            pause: false,
+        })),
+    )
+    .await;
+    rotated.provider_fixture = Some(rotated_shipping);
+    for app in [&one, &zero, &multiple, &rotated] {
+        for (title, carrier, tracking) in [
+            ("UPS capability fixture", "ups", "TESTPICKUP123"),
+            ("USPS capability fixture", "usps", "TESTCAPABILITYUSPS123"),
+        ] {
+            let mut body = input(title);
+            body.tracking.carrier = Some(carrier.parse().unwrap());
+            body.tracking.number = tracking.into();
+            let response = app
+                .request(Method::POST, "/v1/packages")
+                .header("Idempotency-Key", tracking)
+                .json(&body)
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::CREATED);
+            let package: Shipment = response.json().await.unwrap();
+            assert_eq!(
+                package.sync.registration_state,
+                RegistrationState::Registered
+            );
+        }
+    }
+    let url = one.url.clone();
+    let zero_url = zero.url.clone();
+    let multiple_url = multiple.url.clone();
+    let rotated_url = rotated.url.clone();
+    let agent = one.agent.clone();
+    let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests_browser/pickup-capabilities.mjs");
+    let result = tokio::task::spawn_blocking(move || {
+        std::process::Command::new("node")
+            .arg(script)
+            .env("PACKAGES_TEST_URL", url)
+            .env("PACKAGES_TEST_ZERO_URL", zero_url)
+            .env("PACKAGES_TEST_MULTIPLE_URL", multiple_url)
+            .env("PACKAGES_TEST_ROTATED_URL", rotated_url)
+            .env("PACKAGES_TEST_OWNER", OWNER)
+            .env("PACKAGES_TEST_AGENT", agent)
+            .output()
+            .unwrap()
+    })
+    .await
+    .unwrap();
+    assert_eq!(creates.load(std::sync::atomic::Ordering::SeqCst), 0);
+    assert!(one.pickup_manager.list(None, 10).await.unwrap().is_empty());
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    one.close().await;
+    zero.close().await;
+    multiple.close().await;
+    rotated.close().await;
 }
 
 #[tokio::test]
@@ -3444,5 +3570,185 @@ async fn pickup_review_bound_idempotent_replay_returns_the_original_receipt_afte
             .count(),
         1
     );
+    app.close().await;
+}
+
+#[tokio::test]
+async fn pickup_account_changes_invalidate_reviews_before_watch_admission_but_preserve_replays() {
+    use packages::pickup::models::*;
+    #[derive(serde::Deserialize)]
+    struct Status {
+        carrier: PickupCarrier,
+        configured: bool,
+        configuration_id: Option<uuid::Uuid>,
+    }
+    #[derive(serde::Deserialize)]
+    struct ReviewedPreview {
+        configuration_id: uuid::Uuid,
+    }
+    #[derive(serde::Serialize)]
+    struct ReviewedRequest<'a> {
+        #[serde(flatten)]
+        request: &'a ScheduleRequest,
+        reviewed_configuration: uuid::Uuid,
+    }
+    #[derive(serde::Deserialize)]
+    struct Failure {
+        error_code: String,
+    }
+
+    let (app, creates) = pickup_app(false).await;
+    let status: Vec<Status> = app
+        .request(Method::GET, "/v1/pickups/carriers")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(
+        status
+            .iter()
+            .filter(|s| !s.configured)
+            .all(|s| s.configuration_id.is_none())
+    );
+    let original = status
+        .iter()
+        .find(|s| s.carrier == PickupCarrier::Ups)
+        .unwrap()
+        .configuration_id
+        .expect("configured carriers must identify the loaded configuration");
+    let input = ScheduleRequest {
+        tracking: vec!["TESTPICKUP123".into()],
+        accept_fee: true,
+        ..Default::default()
+    };
+    let previews: Vec<ReviewedPreview> = app
+        .request(Method::POST, "/v1/pickups/preview")
+        .json(&input)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(previews[0].configuration_id, original);
+    let reviewed = ReviewedRequest {
+        request: &input,
+        reviewed_configuration: original,
+    };
+    let response = app
+        .request(Method::POST, "/v1/pickups")
+        .header("Idempotency-Key", "reviewed-account-operation")
+        .json(&reviewed)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    let batch: Batch = response.json().await.unwrap();
+    let (_stop, rx) = tokio::sync::watch::channel(false);
+    assert!(app.pickup_manager.tick(rx).await.unwrap());
+
+    // A restarted server uses the same durable store and another billing
+    // account for the same carrier. Reviewed requests cannot cross that swap.
+    let replacement = packages::pickup::service::Manager::unconfigured(&app.store).with_provider(
+        Arc::new(PickupFixture {
+            identity: 8,
+            carrier: PickupCarrier::Ups,
+            creates: creates.clone(),
+            uncertain: false,
+            pause: false,
+        }),
+    );
+    let server = api::start(
+        "127.0.0.1:0".parse().unwrap(),
+        Arc::new(
+            api::Context::new(
+                app.store.clone(),
+                OWNER,
+                None,
+                Some(Arc::new(
+                    app.provider_fixture.as_ref().unwrap().client.clone(),
+                )),
+            )
+            .with_pickups(Arc::new(replacement)),
+        ),
+    )
+    .unwrap();
+    let url = format!("http://{}/v1/pickups", server.local_addr());
+    let replacement_status: Vec<Status> = app
+        .client
+        .get(format!("{url}/carriers"))
+        .bearer_auth(OWNER)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let current = replacement_status
+        .iter()
+        .find(|s| s.carrier == PickupCarrier::Ups)
+        .unwrap()
+        .configuration_id
+        .unwrap();
+    assert_ne!(current, original);
+    let stale = ScheduleRequest {
+        tracking: vec!["TESTNEWPICKUP456".into()],
+        accept_fee: true,
+        ..Default::default()
+    };
+    let response = app
+        .client
+        .post(&url)
+        .bearer_auth(OWNER)
+        .header("Idempotency-Key", "stale-account-operation")
+        .json(&ReviewedRequest {
+            request: &stale,
+            reviewed_configuration: original,
+        })
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::PRECONDITION_FAILED);
+    assert_eq!(
+        response.json::<Failure>().await.unwrap().error_code,
+        "pickup_configuration_changed"
+    );
+    assert!(
+        app.store
+            .resolve_reference("TESTNEWPICKUP456", None)
+            .await
+            .is_err()
+    );
+    assert_eq!(app.pickup_manager.list(None, 10).await.unwrap().len(), 1);
+
+    // A receipt retry is still read-only even when its reviewed generation
+    // predates the current process. Never repeat the physical operation.
+    let response = app
+        .client
+        .post(&url)
+        .bearer_auth(OWNER)
+        .header("Idempotency-Key", "reviewed-account-operation")
+        .json(&reviewed)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    let replay: Batch = response.json().await.unwrap();
+    assert_eq!(replay.items[0].id, batch.items[0].id);
+    assert_eq!(replay.items[0].state, State::Scheduled);
+    assert_eq!(creates.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert_eq!(
+        app.provider_fixture
+            .as_ref()
+            .unwrap()
+            .methods()
+            .iter()
+            .filter(|m| **m == Method::POST)
+            .count(),
+        1
+    );
+    server.close().await.unwrap();
     app.close().await;
 }
