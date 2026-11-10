@@ -5,13 +5,13 @@
     <meta name="viewport" content="width=device-width,initial-scale=1">
     <meta name="color-scheme" content="light dark">
     <title>Packages</title>
+    <link rel="stylesheet" href="app-kit.css">
     <link rel="stylesheet" href="style.css">
     <script src="app.js" type="module"></script>
   </head>
   <body data-home-assistant="false">
-    <header>
-      <h1>
-        <a class="wordmark" href="./" aria-label="Packages home">
+    <header class="app-header">
+      <span id="app-brand" hidden>
           <svg width="30" height="30" viewBox="0 0 256 256" aria-hidden="true" focusable="false">
             <g stroke="var(--brand-ink)" stroke-width="12" stroke-linecap="round" stroke-linejoin="round">
               <path fill="var(--brand-soft)" d="M128 8 244 66 128 124 12 66Z"/>
@@ -20,12 +20,11 @@
               <path fill="none" d="M70 37 186 95 186 139"/>
             </g>
           </svg>
-          Packages
-        </a>
-      </h1>
+      </span>
       <button id="add">Add shipment</button>
     </header>
     <main>
+      <h1 class="sr-only">Packages</h1>
       <p id="notice" role="status" aria-live="polite"></p>
       <section id="startup-connection" class="connection" aria-labelledby="connection-title" hidden>
         <h2 id="connection-title">Connecting to Home Assistant</h2>
@@ -151,12 +150,8 @@
         </div>
       </section>
     </main>
-    <footer id="app-footer" class="app-footer" hidden>
-      <p>Packages <span id="app-version" class="app-version"></span></p>
-      <p id="service-status"></p>
-      <a class="source-link" href="https://github.com/jessfraz/ha-packages" target="_blank" rel="noopener noreferrer">Source code <span aria-hidden="true">↗</span></a>
-    </footer>
-    <dialog id="editor" aria-labelledby="edit-title">
+    <footer id="app-footer" class="app-footer"></footer>
+    <dialog id="editor" class="dialog-panel" aria-labelledby="edit-title">
       <form id="edit-form">
         <div class="dialog-heading">
           <h2 id="edit-title">Add shipment</h2>
@@ -169,6 +164,7 @@
             ×
           </button>
         </div>
+        <div class="dialog-body">
         <fieldset id="shipment-fields">
           <label>Title<input name="title" required maxlength="500"></label>
           <label>Direction<select name="direction" required>
@@ -211,9 +207,15 @@
             know the carrier. New labels do not need a scan.
           </p>
         </fieldset>
+        </div>
+        <div class="dialog-footer">
         <p id="edit-status" class="muted" role="status"></p>
         <p id="edit-error" role="alert"></p>
+        <div class="actions">
+        <button type="button" class="quiet" data-close="editor">Cancel</button>
         <button id="save">Save shipment</button>
+        </div>
+        </div>
       </form>
     </dialog>
     <dialog id="detail" aria-labelledby="detail-title">

@@ -41,6 +41,7 @@
         cargoLock = {
           lockFile = ./Cargo.lock;
           outputHashes = {
+            "ha-app-ui-0.1.1" = "sha256-+dmnGRq9mQH3fiIFK6jNo9xfVDCVGDQ11kN8AxweeaI=";
             "sqlx-0.9.0" = "sha256-kLvUfUy6vmL9LYU7nzHv+iB6cIJm2CjDf9Yo6wpWrWg=";
           };
         };

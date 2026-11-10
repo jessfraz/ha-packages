@@ -1813,6 +1813,42 @@
         ]
       }
     },
+    "/app-kit.css": {
+      "get": {
+        "operationId": "kit_style",
+        "responses": {
+          "default": {
+            "content": {
+              "*/*": {
+                "schema": {}
+              }
+            },
+            "description": ""
+          }
+        },
+        "tags": [
+          "web"
+        ]
+      }
+    },
+    "/app-kit.js": {
+      "get": {
+        "operationId": "kit_script",
+        "responses": {
+          "default": {
+            "content": {
+              "*/*": {
+                "schema": {}
+              }
+            },
+            "description": ""
+          }
+        },
+        "tags": [
+          "web"
+        ]
+      }
+    },
     "/app.js": {
       "get": {
         "operationId": "script",
@@ -1894,6 +1930,24 @@
     "/parcel-links.js": {
       "get": {
         "operationId": "parcel_links_script",
+        "responses": {
+          "default": {
+            "content": {
+              "*/*": {
+                "schema": {}
+              }
+            },
+            "description": ""
+          }
+        },
+        "tags": [
+          "web"
+        ]
+      }
+    },
+    "/shell.js": {
+      "get": {
+        "operationId": "shell_script",
         "responses": {
           "default": {
             "content": {
