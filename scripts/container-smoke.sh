@@ -108,6 +108,13 @@ check_shipment() {
         "$scratch/response.json" >/dev/null
 }
 
+check_pickup_journal() {
+    request GET '/v1/pickups/resolve?reference=1Z999AA10123456784&carrier=ups' 200 --header "Authorization: Bearer $token"
+    jq --exit-status '.state == "unknown" and .plan.tracking == ["1Z999AA10123456784"] and .plan.site.details.name == "Example site"' "$scratch/response.json" >/dev/null
+    request GET '/v1/pickups/status' 200 --header "Authorization: Bearer $token"
+    jq --exit-status '.uncertain == 1 and (.windows | length) == 0 and (has("address") | not)' "$scratch/response.json" >/dev/null
+}
+
 check_credentials() {
     local permissions
     permissions=$(docker exec "$container" stat -c '%a:%u:%g' /data/credentials.json)
@@ -148,6 +155,7 @@ jq --exit-status '.error_code == "tracking_provider_unconfigured"' "$scratch/res
 request GET /v1/packages 200 --header "Authorization: Bearer $token"
 jq --exit-status '.items | length == 2' "$scratch/response.json" >/dev/null
 check_shipment
+check_pickup_journal
 
 # Supervisor supplies a root-owned data directory and options file. Recreate
 # that startup path with empty options and no configured owner credential.
@@ -200,6 +208,7 @@ jq --exit-status \
      .backup.status == "unavailable" and .last_backup == null' \
     "$scratch/response.json" >/dev/null
 check_shipment
+check_pickup_journal
 
 request POST /v1/agents 201 \
     --header "Authorization: Bearer $token" \
@@ -366,6 +375,7 @@ fi
 request GET /v1/system 200 --header "Authorization: Bearer $integration_token"
 jq --exit-status '.credential_role == "integration"' "$scratch/response.json" >/dev/null
 check_shipment
+check_pickup_journal
 request GET "/v1/packages/$agent_shipment_id" 200 --header "Authorization: Bearer $agent_token"
 jq --exit-status --arg id "$agent_shipment_id" \
     '.id == $id and .title == "Agent shipment" and .order_reference == "container-agent-order" and
@@ -384,6 +394,7 @@ request GET /v1/system 401 --header "Authorization: Bearer $agent_token"
 request GET /v1/agents 200 --header "Authorization: Bearer $token"
 jq --exit-status '.items == []' "$scratch/response.json" >/dev/null
 check_shipment
+check_pickup_journal
 stop_container
 
 # Reject ambiguous ownership boundaries before starting the unprivileged server.

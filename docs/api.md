@@ -343,3 +343,34 @@ Safe connection state is also included in the integration-readable `/v1/system`.
 Connection and preview responses use `Cache-Control: no-store`. No endpoint returns
 saved Amazon refresh tokens or website cookies. An expired Amazon sign-in is account
 health data, not a 401 rejection of the Home Assistant integration credential.
+
+## Direct carrier pickups
+
+Pickup details and mutations are owner/HA-admin only. Tracking credentials do
+not grant physical-action permission. The integration-only read projection at
+`GET /v1/pickups/status` contains counts and calendar windows, never addresses,
+contacts, tracking numbers or carrier confirmations.
+
+- `GET /v1/pickups/carriers`: the closed `usps`, `ups`, `fedex` capability set.
+- `GET|POST /v1/pickups/locations`, `PUT /v1/pickups/locations/{id}`: saved sites.
+- `GET|PUT /v1/pickups/parcels/{tracking}`: known label service/weight.
+- `POST /v1/pickups/availability` and `/preview`: read-only inspection.
+- `POST /v1/pickups`: verify/reuse watchers and return a durable batch (202).
+- `GET /v1/pickups/batches/{id}`: independent per-carrier results.
+- `GET /v1/pickups`: keyset-paginated history.
+- `GET /v1/pickups/resolve?reference=...&carrier=...`: tracking, UUID or confirmation.
+- `GET /v1/pickups/records/{id}`: one receipt and its ETag.
+- `POST /v1/pickups/records/{id}/refresh`, `/cancel`, `/reconcile`: conditional
+  operations using the current ETag. Scheduling and cancellation also require an
+  `Idempotency-Key`. The CLI generates keys and fetches ETags for ordinary use.
+
+Scheduling accepts tracking numbers and optional carrier, site, date, window,
+service, weight and destination overrides. `accept_fee` is boolean consent to the
+carrier-assessed fee, not a numeric limit. Strong request binding and durable
+claims prevent a new generated command key from booking the same active labels
+again. Unknown physical outcomes remain fenced until explicit reconciliation.
+
+`GET /v1/package-reference?reference=...&carrier=...` resolves normal tracking
+numbers for the package CLI without changing existing UUID-based API identities.
+Ambiguous matches fail instead of selecting the first record. See the generated
+OpenAPI document for complete typed request and response contracts.

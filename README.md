@@ -142,6 +142,61 @@ See the [entity reference](packages/DOCS.md#sensors),
 [actions](packages/DOCS.md#actions). Dashboard cards can use these standard
 entities independently of the app.
 
+## Pickups
+
+USPS, UPS and FedEx pickups use their direct APIs. Prepaid return labels work;
+postage does not need to have been bought through Packages. UPS and FedEx bill
+an authorized shipping account, not a credit card entered in this app. USPS
+normal-route pickup is free for eligible prepaid parcels and happens during
+normal mail delivery, without a selectable time window.
+
+Save and confirm the deployment's pickup address under **Pickups → Pickup
+address**. The app never guesses a postal address from Home Assistant's GPS
+coordinates or a carrier's billing address. Add the direct developer credentials
+in the app configuration. Native servers accept an owner-only JSON file through
+`PACKAGES_PICKUP_CONFIG`; the file has optional `usps`, `ups`, and `fedex`
+objects with `client_id`, `client_secret`, and `environment` (`sandbox` or
+`production`). UPS and FedEx also require `account_number`. Keep this file out of
+Git. An ordinary carrier website login is not an API credential.
+
+With a saved pickup address and known label details:
+
+```sh
+ha-packages pickups schedule TRACKING_NUMBER --accept-fee
+ha-packages pickups schedule TRACKING_NUMBER --carrier ups --accept-fee
+```
+
+The command reuses an active verified tracking watcher, or adds and verifies a
+missing outbound watcher first. Failed or uncertain tracking admission stops the
+pickup. Existing watcher metadata and direction are preserved. Carrier, address,
+time window and next eligible date come from verified/saved details. Service and
+weight cannot be inferred reliably from a barcode. For a new single label, pass
+its actual `--service ups-ground --weight-lb 2.50`, or save details once with
+`pickups parcel set`. Repeat positional tracking numbers for multiple labels.
+Mixed carriers produce separate receipts, not an atomic cross-carrier booking.
+
+`--accept-fee` is a boolean: accept whatever fee the carrier assesses for this
+request. It is not a price cap. Previewing is optional through `pickups preview`
+(`quote` is an alias). The UI shows the address, collection window and any known
+estimate before the explicit **Schedule pickup** action.
+
+Interrupted commands can be run again normally. Durable label and intent claims
+reuse the existing pickup, even with a newly generated command key. A lost
+carrier response is **unknown**, not permission to book again. Check the carrier
+portal or support before using the advanced `pickups reconcile --input FILE`
+operation. It requires `carrier_portal_checked: true` and an explicit outcome:
+`not_scheduled`, `cancelled`, or `scheduled` with the confirmation. This operator
+assertion is recorded. USPS and UPS confirmations are additionally checked
+through their documented lookup APIs; FedEx has no pickup status API.
+
+All physical operations and private pickup details require owner/HA admin access.
+Tracking-agent tokens cannot schedule or cancel pickups. Home Assistant receives
+only read-only counts and calendar windows without addresses or barcodes, and
+raises a Repair for uncertain outcomes. A scheduled pickup is not proof that
+parcels were collected. Cancellation requires a carrier confirmation and does not
+promise a refund.
+
+
 ## API
 
 The JSON API is available at `/v1`. Create a named ingestion credential under

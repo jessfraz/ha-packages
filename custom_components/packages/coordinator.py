@@ -41,6 +41,7 @@ from .models import (
     ShipmentStatusEvent,
     delivery_estimate,
 )
+from .pickups import PickupReport
 
 _LOGGER = logging.getLogger(__name__)
 _BACKUP_TIMEOUT_SECONDS = 10
@@ -112,6 +113,7 @@ class PackagesCoordinator(DataUpdateCoordinator[dict[str, int]]):
         self._version = version
         self.last_backend_version: str | None = None
         self.inbound_estimates: tuple[DeliveryEstimate, ...] = ()
+        self.pickup_report: PickupReport | None = None
         self.shipment_items: dict[str, ShipmentItems] = {}
         self._event_store = Store[EventCheckpoint](
             hass, 1, f"{DOMAIN}.{entry.entry_id}.events", atomic_writes=True
@@ -318,6 +320,29 @@ class PackagesCoordinator(DataUpdateCoordinator[dict[str, int]]):
             )
             if isinstance(err, ConfigEntryAuthFailed):
                 self._entry.async_start_reauth(self.hass)
+        self.pickup_report = None
+        try:
+            response = await self.client.request("GET", "/v1/pickups/status")
+            if response.status == 200:
+                self.pickup_report = PickupReport.parse(response.json())
+        except ClientError, TimeoutError, ResponseTooLarge, ValueError:
+            pass
+        if self.pickup_report is not None:
+            summary["pickups_scheduled"] = self.pickup_report.scheduled
+            summary["pickups_uncertain"] = self.pickup_report.uncertain
+            if self._entry.state is ConfigEntryState.LOADED:
+                issue_id = f"pickup_uncertain_{self._entry.entry_id}"
+                if self.pickup_report.uncertain:
+                    ir.async_create_issue(
+                        self.hass,
+                        DOMAIN,
+                        issue_id,
+                        is_fixable=False,
+                        severity=ir.IssueSeverity.WARNING,
+                        translation_key="pickup_uncertain",
+                    )
+                else:
+                    ir.async_delete_issue(self.hass, DOMAIN, issue_id)
         self.inbound_estimates = estimates
         self.shipment_items = item_lists
         return summary

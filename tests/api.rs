@@ -16,6 +16,7 @@ struct App {
     agent: String,
     agent_id: uuid::Uuid,
     provider_fixture: Option<ProviderFixture>,
+    pickup_manager: Arc<packages::pickup::service::Manager>,
 }
 impl App {
     async fn new(ingress_peer: Option<std::net::IpAddr>) -> Self {
@@ -28,10 +29,23 @@ impl App {
         ingress_peer: Option<std::net::IpAddr>,
         provider: Option<packages::shipping_api::easypost::EasyPostClient>,
     ) -> Self {
+        Self::with_providers(ingress_peer, provider, None).await
+    }
+    async fn with_providers(
+        ingress_peer: Option<std::net::IpAddr>,
+        provider: Option<packages::shipping_api::easypost::EasyPostClient>,
+        pickup: Option<Arc<dyn packages::pickup::Pickup>>,
+    ) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(&dir.path().join("packages.sqlite3"))
             .await
             .unwrap();
+        let pickup_manager = Arc::new(match pickup {
+            Some(provider) => {
+                packages::pickup::service::Manager::unconfigured(&store).with_provider(provider)
+            }
+            None => packages::pickup::service::Manager::unconfigured(&store),
+        });
         let context = Arc::new(
             api::Context::new(
                 store.clone(),
@@ -42,7 +56,8 @@ impl App {
                         as std::sync::Arc<dyn packages::shipping_api::ShippingApi>
                 }),
             )
-            .with_integration(INTEGRATION),
+            .with_integration(INTEGRATION)
+            .with_pickups(pickup_manager.clone()),
         );
         let server = api::start("127.0.0.1:0".parse().unwrap(), context.clone()).unwrap();
         let url = format!("http://{}", server.local_addr());
@@ -92,6 +107,7 @@ impl App {
         let url = format!("http://{}", server.local_addr());
         Self {
             provider_fixture: None,
+            pickup_manager,
             agent: created.token,
             agent_id: created.credential.id,
             _dir: dir,
@@ -2428,5 +2444,691 @@ async fn ordinary_ingress_users_can_read_but_cannot_claim_administrator_permissi
             .status(),
         StatusCode::FORBIDDEN
     );
+    app.close().await;
+}
+
+#[derive(Clone)]
+struct PickupFixture {
+    creates: Arc<std::sync::atomic::AtomicUsize>,
+    uncertain: bool,
+    pause: bool,
+}
+impl packages::pickup::Pickup for PickupFixture {
+    fn carrier(&self) -> packages::pickup::models::PickupCarrier {
+        packages::pickup::models::PickupCarrier::Ups
+    }
+    fn fingerprint(&self) -> [u8; 32] {
+        [7; 32]
+    }
+    fn capabilities(&self) -> packages::pickup::Capabilities {
+        packages::pickup::Capabilities {
+            lookup: packages::pickup::Lookup::Pending,
+            free_normal_route: false,
+            custom_window: true,
+            services: vec![packages::pickup::models::PickupService::UpsGround],
+        }
+    }
+    fn preview<'a>(
+        &'a self,
+        plan: &'a packages::pickup::models::ResolvedPlan,
+    ) -> packages::pickup::PickupFuture<'a, packages::pickup::models::Offer> {
+        Box::pin(async move {
+            Ok(packages::pickup::models::Offer {
+                date: plan.date.clone().unwrap_or_else(|| "2027-02-02".into()),
+                ready_time: plan.ready_time.clone(),
+                close_time: plan.close_time.clone(),
+                fee: packages::pickup::models::Fee::Unquoted,
+            })
+        })
+    }
+    fn schedule<'a>(
+        &'a self,
+        plan: &'a packages::pickup::models::ResolvedPlan,
+    ) -> packages::pickup::PickupFuture<'a, packages::pickup::models::Confirmation> {
+        Box::pin(async move {
+            self.creates
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if self.pause {
+                return Err(packages::pickup::Error {
+                    code: packages::pickup::ErrorCode::RateLimited,
+                    retry_after_seconds: Some(172800),
+                });
+            }
+            if self.uncertain {
+                return Err(packages::pickup::Error::new(
+                    packages::pickup::ErrorCode::UnknownOutcome,
+                ));
+            }
+            Ok(packages::pickup::models::Confirmation {
+                number: "PICKUP-FIXTURE".into(),
+                pickup_date: plan.date.clone().unwrap(),
+                location_code: None,
+                etag: None,
+            })
+        })
+    }
+    fn lookup<'a>(
+        &'a self,
+        _plan: &'a packages::pickup::models::ResolvedPlan,
+        confirmation: &'a packages::pickup::models::Confirmation,
+    ) -> packages::pickup::PickupFuture<'a, packages::pickup::models::Confirmation> {
+        Box::pin(async move { Ok(confirmation.clone()) })
+    }
+    fn cancel<'a>(
+        &'a self,
+        _plan: &'a packages::pickup::models::ResolvedPlan,
+        _confirmation: &'a packages::pickup::models::Confirmation,
+    ) -> packages::pickup::PickupFuture<'a, ()> {
+        Box::pin(async { Ok(()) })
+    }
+}
+fn pickup_site() -> packages::pickup::models::SiteInput {
+    use packages::pickup::models::*;
+    SiteInput {
+        name: "Example site".into(),
+        contact_name: "Example Person".into(),
+        company: None,
+        phone: "2025550100".into(),
+        email: Some("example@example.invalid".into()),
+        address: Address {
+            street: "123 Example Street".into(),
+            secondary: None,
+            city: "Example City".into(),
+            state: "CA".into(),
+            postal_code: "90210".into(),
+            country: "US".into(),
+        },
+        timezone: "America/Los_Angeles".into(),
+        ready_time: "09:00".into(),
+        close_time: "18:00".into(),
+        pickup_point: "FRONT_DOOR".into(),
+        instructions: None,
+        residential: true,
+    }
+}
+async fn pickup_app(uncertain: bool) -> (App, Arc<std::sync::atomic::AtomicUsize>) {
+    let shipping = ProviderFixture::new();
+    let creates = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let mut app = App::with_providers(
+        None,
+        Some(shipping.client.clone()),
+        Some(Arc::new(PickupFixture {
+            creates: creates.clone(),
+            uncertain,
+            pause: false,
+        })),
+    )
+    .await;
+    app.provider_fixture = Some(shipping);
+    app.pickup_manager
+        .save_site(None, None, pickup_site(), true)
+        .await
+        .unwrap();
+    app.pickup_manager
+        .save_parcel(
+            "TESTPICKUP123",
+            packages::pickup::models::ParcelInput {
+                carrier: packages::pickup::models::PickupCarrier::Ups,
+                service: packages::pickup::models::PickupService::UpsGround,
+                weight_lbs: "2.50".into(),
+                destination_country: "US".into(),
+            },
+        )
+        .await
+        .unwrap();
+    (app, creates)
+}
+async fn pickup_cli(app: &App, args: Vec<String>) -> std::process::Output {
+    let url = app.url.clone();
+    tokio::task::spawn_blocking(move || {
+        let binary = std::env::var_os("HA_PACKAGES_TEST_BINARY")
+            .unwrap_or_else(|| env!("CARGO_BIN_EXE_ha-packages").into());
+        let mut command = std::process::Command::new(binary);
+        for name in [
+            "PACKAGES_URL",
+            "PACKAGES_API_TOKEN",
+            "PACKAGES_AGENT_TOKEN",
+            "HOME_ASSISTANT_URL",
+            "HOME_ASSISTANT_TOKEN",
+            "HTTP_PROXY",
+            "HTTPS_PROXY",
+            "ALL_PROXY",
+            "http_proxy",
+            "https_proxy",
+            "all_proxy",
+        ] {
+            command.env_remove(name);
+        }
+        command
+            .env("PACKAGES_URL", url)
+            .env("PACKAGES_API_TOKEN", OWNER)
+            .env("NO_PROXY", "*")
+            .args(args)
+            .output()
+            .unwrap()
+    })
+    .await
+    .unwrap()
+}
+async fn schedule_with_worker(app: &App) -> std::process::Output {
+    let manager = app.pickup_manager.clone();
+    let (stop, rx) = tokio::sync::watch::channel(false);
+    let worker = tokio::spawn(async move {
+        while !*rx.borrow() {
+            manager.tick(rx.clone()).await.unwrap();
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    });
+    let output = pickup_cli(
+        app,
+        vec![
+            "pickups".into(),
+            "schedule".into(),
+            "TESTPICKUP123".into(),
+            "--accept-fee".into(),
+        ],
+    )
+    .await;
+    stop.send(true).unwrap();
+    worker.await.unwrap();
+    output
+}
+#[tokio::test]
+async fn pickup_cli_one_command_adds_missing_verified_watch_then_reuses_receipt_with_new_default_key()
+ {
+    let (app, creates) = pickup_app(false).await;
+    let output = schedule_with_worker(&app).await;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(creates.load(std::sync::atomic::Ordering::SeqCst), 1);
+    let watcher = app
+        .store
+        .resolve_reference("TESTPICKUP123", None)
+        .await
+        .unwrap();
+    assert_eq!(watcher.direction, Direction::Outbound);
+    assert_eq!(
+        watcher.sync.registration_state,
+        RegistrationState::Registered
+    );
+    assert_eq!(
+        app.provider_fixture
+            .as_ref()
+            .unwrap()
+            .methods()
+            .iter()
+            .filter(|m| **m == Method::POST)
+            .count(),
+        1
+    );
+    let again = schedule_with_worker(&app).await;
+    assert!(
+        again.status.success(),
+        "{}",
+        String::from_utf8_lossy(&again.stderr)
+    );
+    assert_eq!(creates.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert_eq!(
+        app.provider_fixture
+            .as_ref()
+            .unwrap()
+            .methods()
+            .iter()
+            .filter(|m| **m == Method::POST)
+            .count(),
+        1
+    );
+    app.close().await;
+}
+#[tokio::test]
+async fn pickup_cli_existing_inbound_watcher_is_not_readded_or_rewritten_and_failed_admission_never_dispatches()
+ {
+    let (app, creates) = pickup_app(false).await;
+    let mut input = input("Existing inbound");
+    input.tracking.number = "TESTPICKUP123".into();
+    input.tracking.carrier = Some(packages::carrier::Carrier::Ups);
+    let response = app
+        .request(Method::POST, "/v1/packages")
+        .header("Idempotency-Key", "existing-inbound")
+        .json(&input)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let before = app.provider_fixture.as_ref().unwrap().calls();
+    let output = schedule_with_worker(&app).await;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(app.provider_fixture.as_ref().unwrap().calls(), before);
+    assert_eq!(creates.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert_eq!(
+        app.store
+            .resolve_reference("TESTPICKUP123", None)
+            .await
+            .unwrap()
+            .direction,
+        Direction::Inbound
+    );
+    app.close().await;
+    let (app, creates) = pickup_app(false).await;
+    app.provider_fixture
+        .as_ref()
+        .unwrap()
+        .reply_to_registration(422, r#"{"error":{"code":"TRACKER.INVALID_TRACKING_CODE"}}"#);
+    let output = schedule_with_worker(&app).await;
+    assert!(!output.status.success());
+    assert_eq!(creates.load(std::sync::atomic::Ordering::SeqCst), 0);
+    assert!(app.pickup_manager.list(None, 10).await.unwrap().is_empty());
+    app.close().await;
+}
+#[tokio::test]
+async fn pickup_unknown_response_remains_fenced_for_new_keys_and_tracking_agents_have_no_physical_authority()
+ {
+    let (app, creates) = pickup_app(true).await;
+    for _ in 0..2 {
+        let output = schedule_with_worker(&app).await;
+        assert!(!output.status.success());
+        assert!(String::from_utf8_lossy(&output.stdout).contains("unknown"));
+    }
+    assert_eq!(creates.load(std::sync::atomic::Ordering::SeqCst), 1);
+    let response = app
+        .client
+        .get(format!("{}/v1/pickups/locations", app.url))
+        .bearer_auth(&app.agent)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    let response = app
+        .client
+        .post(format!("{}/v1/pickups", app.url))
+        .bearer_auth(&app.agent)
+        .header("Idempotency-Key", "unauthorized")
+        .json(&packages::pickup::models::ScheduleRequest {
+            tracking: vec!["TESTPICKUP123".into()],
+            accept_fee: true,
+            ..Default::default()
+        })
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    app.close().await;
+}
+#[tokio::test]
+async fn pickup_concurrent_distinct_actors_and_keys_share_one_physical_intent() {
+    let (app, creates) = pickup_app(false).await;
+    let request = packages::pickup::models::ScheduleRequest {
+        tracking: vec!["TESTPICKUP123".into()],
+        carrier: Some(packages::pickup::models::PickupCarrier::Ups),
+        accept_fee: true,
+        ..Default::default()
+    };
+    let response = app
+        .request(Method::POST, "/v1/pickups")
+        .header("Idempotency-Key", "prepare")
+        .json(&request)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    let (a, b) = tokio::join!(
+        app.pickup_manager
+            .schedule("first-owner", "new-key-a", &request),
+        app.pickup_manager
+            .schedule("second-owner", "new-key-b", &request)
+    );
+    let a = a.unwrap();
+    let b = b.unwrap();
+    assert_eq!(a.items[0].id, b.items[0].id);
+    let (_stop, rx) = tokio::sync::watch::channel(false);
+    let (a, b) = tokio::join!(
+        app.pickup_manager.tick(rx.clone()),
+        app.pickup_manager.tick(rx)
+    );
+    // Both workers may preflight, but only the durable CAS can dispatch.
+    assert!(a.is_ok());
+    assert!(b.is_ok());
+    assert_eq!(creates.load(std::sync::atomic::Ordering::SeqCst), 1);
+    app.close().await;
+}
+
+#[derive(serde::Deserialize)]
+struct CliReceipt<T> {
+    data: T,
+}
+fn cli_data<T: for<'de> serde::Deserialize<'de>>(output: &std::process::Output) -> T {
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice::<CliReceipt<T>>(&output.stdout)
+        .unwrap()
+        .data
+}
+async fn cli_input(
+    app: &App,
+    command: &str,
+    tracking: &str,
+    input: &impl serde::Serialize,
+) -> std::process::Output {
+    let file = tempfile::NamedTempFile::new().unwrap();
+    serde_json::to_writer(&file, input).unwrap();
+    pickup_cli(
+        app,
+        vec![
+            command.into(),
+            tracking.into(),
+            "--input".into(),
+            file.path().to_str().unwrap().into(),
+        ],
+    )
+    .await
+}
+#[tokio::test]
+async fn package_cli_uses_tracking_refs_and_automatic_conditions_without_opaque_bookkeeping() {
+    let app = App::new(None).await;
+    let created: Shipment = cli_data(
+        &pickup_cli(
+            &app,
+            vec![
+                "create".into(),
+                "TESTERGONOMIC123".into(),
+                "--carrier".into(),
+                "ups".into(),
+                "--direction".into(),
+                "outbound".into(),
+            ],
+        )
+        .await,
+    );
+    assert_eq!(created.direction, Direction::Outbound);
+    for reference in ["TESTERGONOMIC123".to_string(), created.id.to_string()] {
+        let fetched: Shipment = cli_data(&pickup_cli(&app, vec!["get".into(), reference]).await);
+        assert_eq!(fetched.id, created.id);
+    }
+    let updated: Shipment = cli_data(
+        &cli_input(
+            &app,
+            "patch",
+            "TESTERGONOMIC123",
+            &UpdateShipment {
+                title: Some("Renamed label".into()),
+                ..Default::default()
+            },
+        )
+        .await,
+    );
+    assert_eq!(updated.title, "Renamed label");
+    let source: Shipment = cli_data(
+        &cli_input(
+            &app,
+            "add-source",
+            "TESTERGONOMIC123",
+            &Source {
+                namespace: "fixture".into(),
+                key: "receipt".into(),
+            },
+        )
+        .await,
+    );
+    assert_eq!(source.sources.len(), 1);
+    let corrected: Shipment = cli_data(
+        &cli_input(
+            &app,
+            "set-override",
+            "TESTERGONOMIC123",
+            &SetOverride {
+                status: Status::Delivered,
+                reason: "Fixture owner confirmation".into(),
+            },
+        )
+        .await,
+    );
+    assert_eq!(corrected.status, Status::Delivered);
+    let cleared: Shipment = cli_data(
+        &pickup_cli(
+            &app,
+            vec!["clear-override".into(), "TESTERGONOMIC123".into()],
+        )
+        .await,
+    );
+    assert!(cleared.status_override.is_none());
+    let archived: Shipment =
+        cli_data(&pickup_cli(&app, vec!["archive".into(), "TESTERGONOMIC123".into()]).await);
+    assert!(archived.archived);
+    let restored: Shipment =
+        cli_data(&pickup_cli(&app, vec!["restore".into(), "TESTERGONOMIC123".into()]).await);
+    assert!(!restored.archived);
+    let refreshed: Shipment =
+        cli_data(&pickup_cli(&app, vec!["refresh".into(), "TESTERGONOMIC123".into()]).await);
+    assert_eq!(refreshed.id, created.id);
+    let events: ResultsPage<Event> =
+        cli_data(&pickup_cli(&app, vec!["history".into(), "TESTERGONOMIC123".into()]).await);
+    assert!(!events.items.is_empty());
+    let conflict = pickup_cli(
+        &app,
+        vec![
+            "get".into(),
+            "TESTERGONOMIC123".into(),
+            "--carrier".into(),
+            "fedex".into(),
+        ],
+    )
+    .await;
+    assert!(!conflict.status.success());
+    assert_eq!(
+        app.provider_fixture
+            .as_ref()
+            .unwrap()
+            .methods()
+            .iter()
+            .filter(|m| **m == Method::POST)
+            .count(),
+        1
+    );
+    app.close().await;
+}
+#[tokio::test]
+async fn pickup_site_or_watch_change_before_dispatch_rejects_without_a_physical_call() {
+    let (app, creates) = pickup_app(false).await;
+    let response = app
+        .request(Method::POST, "/v1/pickups")
+        .header("Idempotency-Key", "site-edit")
+        .json(&packages::pickup::models::ScheduleRequest {
+            tracking: vec!["TESTPICKUP123".into()],
+            accept_fee: true,
+            ..Default::default()
+        })
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    let batch: packages::pickup::models::Batch = response.json().await.unwrap();
+    let site = &batch.items[0].plan.site;
+    let mut changed = site.details.clone();
+    changed.address.street = "124 Example Street".into();
+    app.pickup_manager
+        .save_site(Some(site.id), Some(site.revision), changed, true)
+        .await
+        .unwrap();
+    let (_stop, rx) = tokio::sync::watch::channel(false);
+    assert!(app.pickup_manager.tick(rx).await.unwrap());
+    assert_eq!(creates.load(std::sync::atomic::Ordering::SeqCst), 0);
+    assert_eq!(
+        app.pickup_manager
+            .get(batch.items[0].id)
+            .await
+            .unwrap()
+            .state,
+        packages::pickup::models::State::Rejected
+    );
+    app.close().await;
+}
+#[tokio::test]
+async fn pickup_unknown_outcome_survives_cold_copy_and_only_explicit_reconciliation_releases_it() {
+    use packages::pickup::models::*;
+    let (app, creates) = pickup_app(true).await;
+    let result = schedule_with_worker(&app).await;
+    assert!(!result.status.success());
+    let old = app.pickup_manager.list(None, 10).await.unwrap().remove(0);
+    let source = app._dir.path().join("packages.sqlite3");
+    let copy = app._dir.path().join("restored.sqlite3");
+    app.server.close().await.unwrap();
+    app.store.close().await.unwrap();
+    std::fs::copy(source, &copy).unwrap();
+    assert!(!copy.with_extension("sqlite3-wal").exists());
+    let restored = Store::open(&copy).await.unwrap();
+    let manager = packages::pickup::service::Manager::unconfigured(&restored).with_provider(
+        Arc::new(PickupFixture {
+            creates: creates.clone(),
+            uncertain: true,
+            pause: false,
+        }),
+    );
+    let (_stop, rx) = tokio::sync::watch::channel(false);
+    assert!(!manager.tick(rx).await.unwrap());
+    let again = manager
+        .schedule(
+            "another-owner",
+            "new-generated-key-after-restart",
+            &ScheduleRequest {
+                tracking: vec!["TESTPICKUP123".into()],
+                accept_fee: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(again.items[0].id, old.id);
+    assert_eq!(
+        again.items[0].state,
+        packages::pickup::models::State::Unknown
+    );
+    assert_eq!(creates.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert!(
+        manager
+            .reconcile(
+                old.id,
+                old.revision,
+                "owner",
+                ReconcileRequest {
+                    carrier_portal_checked: false,
+                    outcome: ReconcileOutcome::NotScheduled
+                }
+            )
+            .await
+            .is_err()
+    );
+    let resolved = manager
+        .reconcile(
+            old.id,
+            old.revision,
+            "owner",
+            ReconcileRequest {
+                carrier_portal_checked: true,
+                outcome: ReconcileOutcome::NotScheduled,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(resolved.state, packages::pickup::models::State::Rejected);
+    let next = manager
+        .schedule(
+            "owner",
+            "explicit-new-request-after-carrier-confirmed-absence",
+            &ScheduleRequest {
+                tracking: vec!["TESTPICKUP123".into()],
+                accept_fee: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_ne!(next.items[0].id, old.id);
+    restored.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn pickup_provider_pause_rejects_a_new_intent_without_repeating_the_physical_request() {
+    use packages::pickup::models::*;
+    let (app, creates) = pickup_app(false).await;
+    let paused = packages::pickup::service::Manager::unconfigured(&app.store).with_provider(
+        Arc::new(PickupFixture {
+            creates: creates.clone(),
+            uncertain: false,
+            pause: true,
+        }),
+    );
+    // Prepare the watcher through normal admission before using the manager.
+    let response = app
+        .request(Method::POST, "/v1/pickups")
+        .header("Idempotency-Key", "pause-first")
+        .json(&ScheduleRequest {
+            tracking: vec!["TESTPICKUP123".into()],
+            accept_fee: true,
+            ..Default::default()
+        })
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    let (_stop, rx) = tokio::sync::watch::channel(false);
+    assert!(paused.tick(rx.clone()).await.unwrap());
+    assert_eq!(creates.load(std::sync::atomic::Ordering::SeqCst), 1);
+    let batch = paused
+        .schedule(
+            "another-human",
+            "new-default-key",
+            &ScheduleRequest {
+                tracking: vec!["TESTPICKUP123".into()],
+                accept_fee: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert!(paused.tick(rx.clone()).await.unwrap());
+    assert!(!paused.tick(rx).await.unwrap());
+    assert_eq!(
+        paused.get(batch.items[0].id).await.unwrap().state,
+        State::Rejected
+    );
+    assert_eq!(creates.load(std::sync::atomic::Ordering::SeqCst), 1);
+    app.close().await;
+}
+
+#[tokio::test]
+async fn pickup_cli_preserves_an_archived_watch_instead_of_silently_readding_it() {
+    let (app, creates) = pickup_app(false).await;
+    let mut input = input("Archived inbound");
+    input.tracking.number = "TESTPICKUP123".into();
+    input.tracking.carrier = Some(packages::carrier::Carrier::Ups);
+    let response = app
+        .request(Method::POST, "/v1/packages")
+        .header("Idempotency-Key", "archived-watch")
+        .json(&input)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let archived: Shipment =
+        cli_data(&pickup_cli(&app, vec!["archive".into(), "TESTPICKUP123".into()]).await);
+    assert!(archived.archived);
+    let prior = app.provider_fixture.as_ref().unwrap().calls();
+    let output = schedule_with_worker(&app).await;
+    assert!(!output.status.success());
+    assert_eq!(creates.load(std::sync::atomic::Ordering::SeqCst), 0);
+    assert_eq!(app.provider_fixture.as_ref().unwrap().calls(), prior);
+    let preserved = app.store.get(archived.id).await.unwrap();
+    assert!(preserved.archived);
+    assert_eq!(preserved.direction, Direction::Inbound);
     app.close().await;
 }

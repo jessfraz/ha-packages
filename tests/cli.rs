@@ -465,7 +465,7 @@ fn invalid_inputs_and_auth_selection_fail_before_any_request() {
     }
     failure(
         &invoke(command(&url, false), &["create"], None),
-        "invalid_arguments",
+        "invalid_json_input",
     );
     failure(
         &invoke(command(&url, false), &["list", "--limit", "201"], None),

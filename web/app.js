@@ -2,6 +2,7 @@ import { waitForConnection } from "./connection.js";
 import { ApiError } from "./api-error.js";
 import { calendarDate, deliveryDescription } from "./dates.js";
 import { carrierLabel, carrierOptionLabel, providerNames, trackingLinks } from "./parcel-links.js";
+import { installPickups } from "./pickups.js";
 import { installAmazonSettings } from "./amazon-settings.js";
 
 const byId = (id) => document.getElementById(id);
@@ -55,6 +56,7 @@ let agentBusy = false;
 let agentSession = 0;
 let agentTokenGeneration = 0;
 let issuedAgentId = null;
+const pickups = installPickups(byId("pickups-dashboard"), byId("show-pickups"), byId("dashboard"), api, () => setOwnerAccess(false));
 const amazonSettings = installAmazonSettings(byId("amazon"), api, () => setOwnerAccess(false));
 
 function editError(error) {
@@ -348,6 +350,7 @@ function setOwnerAccess(owner, reset = false) {
   if (showInstallation === owner && !reset) return;
   showInstallation = owner;
   amazonSettings.setAccess(owner, reset);
+  pickups.setAccess(owner, reset);
   // Role and connection changes invalidate pending credential responses and
   // clear any one-time token before privileged controls can disappear.
   agentSession += 1;
@@ -1171,6 +1174,13 @@ async function show(id, preserveView = false, section = route().get("section")) 
   if (!shipment.archived && shipment.direction === "inbound" &&
       shipment.tracking?.carrier === "AmazonMcf" && shipment.sync.provider === "aftership")
     button("Use Amazon Account tracking", () => mutate("amazon", "POST"), true);
+  if (!shipment.archived && shipment.sync.registration_state === "registered" &&
+      ["USPS", "UspsShip", "UPS", "UPSDAP", "FedEx", "FedExDefault", "FedexSmartPost"].includes(shipment.tracking?.carrier))
+    button("Schedule pickup", () => {
+      const tracking = shipment.tracking.number;
+      closeDetail();
+      return pickups.open([tracking]);
+    }, true);
   if (shipment.status_override)
     button("Clear correction", () => mutate("status-override", "DELETE"), true);
   button(shipment.archived ? "Restore" : "Archive", () =>

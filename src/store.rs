@@ -529,6 +529,60 @@ impl Store {
         Ok(result)
     }
 
+    /// Resolve a human tracking reference without hiding archived records or
+    /// selecting the first of an ambiguous set. UUID API identity is unchanged.
+    pub async fn resolve_reference(
+        &self,
+        reference: &str,
+        carrier: Option<&str>,
+    ) -> Result<Shipment, Error> {
+        let shipment = if let Ok(id) = Uuid::parse_str(reference) {
+            self.get(id).await?
+        } else {
+            let mut tracking = Tracking {
+                carrier: (),
+                number: reference.to_owned(),
+                recipient_url: None,
+            };
+            normalize_tracking(&mut tracking)?;
+            let ids = sqlx::query_scalar::<_, String>(
+                "SELECT id FROM shipments WHERE tracking_number=? LIMIT 2",
+            )
+            .bind(&tracking.number)
+            .fetch_all(&self.pool)
+            .await?;
+            match ids.as_slice() {
+                [] => return Err(Error::NotFound),
+                [id] => self.get(parse_id(id)?).await?,
+                _ => {
+                    return Err(Error::Conflict(
+                        "More than one package matches; provide a carrier".into(),
+                    ));
+                }
+            }
+        };
+        if let Some(carrier) = carrier {
+            let matches = if let Ok(carrier) = carrier
+                .to_ascii_lowercase()
+                .parse::<crate::pickup::models::PickupCarrier>()
+            {
+                crate::pickup::models::PickupCarrier::from_tracking(shipment.tracking.carrier)
+                    == Some(carrier)
+            } else {
+                carrier
+                    .parse::<Carrier>()
+                    .map_err(|_| Error::Invalid("Unsupported carrier".into()))?
+                    == shipment.tracking.carrier
+            };
+            if !matches {
+                return Err(Error::Conflict(
+                    "The tracking reference belongs to a different carrier".into(),
+                ));
+            }
+        }
+        Ok(shipment)
+    }
+
     /// Retry committed creates without another provider call. The same check is
     /// repeated under the writer lock when committing concurrent requests.
     pub async fn replay_create(

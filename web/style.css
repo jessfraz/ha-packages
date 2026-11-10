@@ -1004,3 +1004,142 @@ dialog::backdrop {
   font-size: 13px;
   line-height: 1.6;
 }
+
+#pickups-dashboard .header-actions,
+.pickup-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+}
+.pickup-heading {
+  margin-block: 1.5rem;
+}
+.pickup-heading h2 {
+  margin: 0.15rem 0;
+  font-size: clamp(1.6rem, 4vw, 2rem);
+}
+.eyebrow {
+  margin: 0;
+  text-transform: uppercase;
+  letter-spacing: 0.09em;
+  font-size: 0.72rem;
+  color: var(--muted);
+  font-weight: 650;
+}
+.pickup-card {
+  padding: 1.25rem;
+  border: 1px solid var(--line);
+  border-radius: 0.75rem;
+  background: var(--paper);
+}
+.pickup-card h3 {
+  margin: 0;
+}
+.pickup-card p {
+  overflow-wrap: anywhere;
+}
+.pickup-card .header-actions {
+  justify-content: flex-start;
+}
+.pickup-state {
+  font-size: 0.8rem;
+  border: 1px solid var(--line);
+  border-radius: 2rem;
+  padding: 0.25rem 0.6rem;
+}
+.pickup-state.scheduled {
+  color: var(--success, #237a57);
+}
+.pickup-state.unknown {
+  color: var(--danger, #be3535);
+}
+#pickup-review {
+  border-top: 1px solid var(--line);
+  margin-top: 1rem;
+  padding-top: 0.5rem;
+}
+#pickup-plan-fields {
+  border: 0;
+  padding: 0;
+  margin: 0;
+  min-width: 0;
+}
+#pickup-site-form .columns,
+#pickup-schedule-form .columns {
+  align-items: start;
+}
+#pickup-site-form .checkbox-label,
+#pickup-schedule-form .checkbox-label {
+  display: flex;
+  flex-direction: row;
+  align-items: flex-start;
+  gap: 0.6rem;
+  margin-block: 1rem;
+}
+.checkbox-label input[type="checkbox"] {
+  width: auto;
+  flex: none;
+  margin-top: 0.2rem;
+}
+#pickups-dashboard textarea {
+  width: 100%;
+  resize: vertical;
+  box-sizing: border-box;
+  font: inherit;
+  color: inherit;
+  background: var(--paper);
+  border: 1px solid var(--line);
+  border-radius: 0.4rem;
+  padding: 0.65rem;
+}
+#pickup-schedule-form details {
+  margin-block: 1rem;
+}
+#pickup-schedule-dialog {
+  --pickup-dialog-pad: 28px;
+}
+#pickup-actions {
+  position: sticky;
+  bottom: 0;
+  margin: 0 calc(-1 * var(--pickup-dialog-pad))
+    calc(-1 * var(--pickup-dialog-pad));
+  padding: 12px var(--pickup-dialog-pad) 24px;
+  background: var(--paper);
+  border-top: 1px solid var(--line);
+  box-shadow: 0 -10px 16px -16px var(--accent);
+}
+#pickup-actions .header-actions {
+  justify-content: flex-end;
+}
+#pickup-review {
+  scroll-margin-top: 1rem;
+  outline: none;
+  border-top: 0;
+  margin-top: 0;
+}
+#pickup-review h3 {
+  margin-top: 0;
+}
+.pickup-state.scheduled {
+  color: var(--accent);
+}
+.pickup-state.unknown {
+  color: var(--warning);
+}
+#pickup-review-details p {
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 650px) {
+  #pickup-schedule-dialog {
+    --pickup-dialog-pad: 22px;
+  }
+}
+header > .header-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 0.5rem;
+}

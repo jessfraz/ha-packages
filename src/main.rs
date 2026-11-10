@@ -22,6 +22,10 @@ async fn main() -> Result<()> {
     }
     let log = packages::logging::logger();
     let store = Store::open(&config.database).await?;
+    let pickups = Arc::new(packages::pickup::service::Manager::new(
+        &store,
+        config.pickup,
+    )?);
     let token = config
         .api_token
         .as_deref()
@@ -31,6 +35,7 @@ async fn main() -> Result<()> {
             .with_logger(log.clone()),
     );
     let mut context = api::Context::new(store.clone(), token, None, None)
+        .with_pickups(pickups.clone())
         .with_provider(Arc::new(DoorDashClient::new()?.with_logger(log.clone())))
         .with_amazon(amazon.clone());
     if let Some(key) = config.easypost_api_key {
@@ -79,7 +84,7 @@ async fn main() -> Result<()> {
     } else {
         None
     };
-    let workers: Vec<_> = providers.into_iter().map(|provider| {
+    let mut workers: Vec<_> = providers.into_iter().map(|provider| {
         let discovery = (provider.id() == packages::shipping_api::types::ProviderId::AmazonAccount)
             .then(|| AmazonDiscoveryWorker::new(store.clone(), amazon.clone()).with_logger(log.clone()));
         let worker = SyncWorker::new(store.pool().clone(), provider);
@@ -110,6 +115,28 @@ async fn main() -> Result<()> {
             }
         })
     }).collect();
+    let mut pickup_stop = stop_rx.clone();
+    let pickup_log = log.clone();
+    workers.push(tokio::spawn(async move {
+        loop {
+            if *pickup_stop.borrow() {
+                break;
+            }
+            let worked = match pickups.tick(pickup_stop.clone()).await {
+                Ok(worked) => worked,
+                Err(_) => {
+                    slog::error!(pickup_log, "tracking_sync";
+                        "operation" => "sync", "outcome" => "error", "error_code" => "database_error");
+                    false
+                }
+            };
+            let delay = std::time::Duration::from_millis(if worked { 100 } else { 1000 });
+            tokio::select! {
+                _ = pickup_stop.changed() => break,
+                _ = tokio::time::sleep(delay) => {}
+            }
+        }
+    }));
     let mut shutdown_error = shutdown().await.err();
     // Stop accepting mutations and drain active handlers before stopping the
     // workers. Every provider task must finish before SQLite closes, even when

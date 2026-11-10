@@ -22,6 +22,11 @@ pub struct Config {
     pub easypost_api_key: Option<String>,
     #[arg(long, env = "AFTERSHIP_API_KEY", hide_env_values = true)]
     pub aftership_api_key: Option<String>,
+    /// Owner-only JSON carrier credentials for native installations.
+    #[arg(long, env = "PACKAGES_PICKUP_CONFIG")]
+    pub pickup_config: Option<PathBuf>,
+    #[arg(skip)]
+    pub pickup: crate::pickup::Settings,
     #[arg(long, env = "PACKAGES_INGRESS_BIND")]
     pub ingress_bind: Option<SocketAddr>,
     #[arg(long, default_value = "172.30.32.2")]
@@ -38,6 +43,20 @@ pub struct Config {
 struct Options {
     easypost_api_key: Option<String>,
     aftership_api_key: Option<String>,
+    pickup_usps_client_id: Option<String>,
+    pickup_usps_client_secret: Option<String>,
+    #[serde(default)]
+    pickup_usps_environment: crate::pickup::Environment,
+    pickup_ups_client_id: Option<String>,
+    pickup_ups_client_secret: Option<String>,
+    pickup_ups_account_number: Option<String>,
+    #[serde(default)]
+    pickup_ups_environment: crate::pickup::Environment,
+    pickup_fedex_client_id: Option<String>,
+    pickup_fedex_client_secret: Option<String>,
+    pickup_fedex_account_number: Option<String>,
+    #[serde(default)]
+    pickup_fedex_environment: crate::pickup::Environment,
 }
 
 impl Config {
@@ -46,7 +65,26 @@ impl Config {
         if let Some(path) = &config.options {
             let options: Options =
                 serde_json::from_slice(&std::fs::read(path).context("read app options")?)
-                    .context("invalid app options")?;
+                    .map_err(|_| anyhow::anyhow!("invalid app options"))?;
+            config.pickup = crate::pickup::Settings {
+                usps: pickup_credentials(
+                    options.pickup_usps_client_id,
+                    options.pickup_usps_client_secret,
+                    options.pickup_usps_environment,
+                )?,
+                ups: pickup_account(
+                    options.pickup_ups_client_id,
+                    options.pickup_ups_client_secret,
+                    options.pickup_ups_account_number,
+                    options.pickup_ups_environment,
+                )?,
+                fedex: pickup_account(
+                    options.pickup_fedex_client_id,
+                    options.pickup_fedex_client_secret,
+                    options.pickup_fedex_account_number,
+                    options.pickup_fedex_environment,
+                )?,
+            };
             let credentials =
                 Credentials::load_or_create(&path.with_file_name("credentials.json"))?;
             config.api_token = Some(credentials.owner);
@@ -57,6 +95,20 @@ impl Config {
             config.aftership_api_key = config
                 .aftership_api_key
                 .or(options.aftership_api_key.filter(|value| !value.is_empty()));
+        }
+        if let Some(path) = &config.pickup_config {
+            use std::os::unix::fs::PermissionsExt;
+            let metadata =
+                std::fs::symlink_metadata(path).context("read pickup configuration metadata")?;
+            ensure!(
+                metadata.is_file()
+                    && metadata.permissions().mode() & 0o077 == 0
+                    && metadata.len() <= 65536,
+                "pickup configuration must be an owner-only regular file no larger than 64KiB"
+            );
+            config.pickup =
+                serde_json::from_slice(&std::fs::read(path).context("read pickup configuration")?)
+                    .map_err(|_| anyhow::anyhow!("invalid pickup configuration"))?;
         }
         if config.openapi.is_none() {
             let token = config
@@ -81,6 +133,42 @@ impl Config {
             );
         }
         Ok(config)
+    }
+}
+
+fn pickup_credentials(
+    id: Option<String>,
+    secret: Option<String>,
+    environment: crate::pickup::Environment,
+) -> Result<Option<crate::pickup::Credentials>> {
+    let id = id.filter(|v| !v.is_empty());
+    let secret = secret.filter(|v| !v.is_empty());
+    match (id, secret) {
+        (None, None) => Ok(None),
+        (Some(client_id), Some(client_secret)) => Ok(Some(crate::pickup::Credentials {
+            client_id,
+            client_secret,
+            environment,
+        })),
+        _ => anyhow::bail!("pickup credentials require both a client ID and secret"),
+    }
+}
+fn pickup_account(
+    id: Option<String>,
+    secret: Option<String>,
+    account: Option<String>,
+    environment: crate::pickup::Environment,
+) -> Result<Option<crate::pickup::AccountCredentials>> {
+    let account = account.filter(|v| !v.is_empty());
+    match (pickup_credentials(id, secret, environment)?, account) {
+        (None, None) => Ok(None),
+        (Some(credentials), Some(account_number)) => Ok(Some(crate::pickup::AccountCredentials {
+            client_id: credentials.client_id,
+            client_secret: credentials.client_secret,
+            environment: credentials.environment,
+            account_number,
+        })),
+        _ => anyhow::bail!("UPS and FedEx pickup credentials require a shipping account number"),
     }
 }
 
