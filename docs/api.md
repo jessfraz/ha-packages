@@ -65,8 +65,9 @@ key returns `409`. A normalized tracking number belongs to exactly one record,
 including archived packages, other carriers and either direction. A duplicate
 create or tracking edit returns `409 tracking_duplicate` with the existing
 shipment's ID before contacting a provider. Open that shipment or restore it
-if archived; archiving never releases its number. Imported sources are also
-unique. Concurrent admissions reserve the number across providers until saved.
+if archived; archiving never releases its number. Concurrent admissions reserve
+the number across providers until saved. Source references can link several
+parcels from the same email or order.
 
 Reads and writes return an `ETag` containing the shipment revision. Every write
 to an existing shipment requires that value in `If-Match`. A stale edit returns
