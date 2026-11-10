@@ -23,15 +23,15 @@ LABEL org.opencontainers.image.source="https://github.com/jessfraz/ha-packages" 
 RUN apt-get update \
     && apt-get install --no-install-recommends -y ca-certificates gosu \
     && rm -rf /var/lib/apt/lists/* \
-    && groupadd --gid 10001 shipments \
-    && useradd --uid 10001 --gid shipments --no-create-home --shell /usr/sbin/nologin shipments \
-    && install -d -o shipments -g shipments /data
+    && groupadd --gid 10001 packages \
+    && useradd --uid 10001 --gid packages --no-create-home --shell /usr/sbin/nologin packages \
+    && install -d -o packages -g packages /data
 
-COPY --from=build /src/target/release/shipments /usr/local/bin/shipments
+COPY --from=build /src/target/release/packages /usr/local/bin/packages
 COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 
-ENV SHIPMENTS_BIND=0.0.0.0:8080 \
-    SHIPMENTS_DATABASE=/data/shipments.sqlite3
+ENV PACKAGES_BIND=0.0.0.0:8080 \
+    PACKAGES_DATABASE=/data/packages.sqlite3
 
 WORKDIR /data
 EXPOSE 8080

@@ -236,7 +236,7 @@ async fn authenticate(
     let principal = if context.ingress_peer.is_some() {
         ingress_access(request)?;
         if request.request.method() != http::Method::GET
-            && header(request, "x-shipments-request") != Some("1")
+            && header(request, "x-packages-request") != Some("1")
         {
             return Err(client_error(
                 StatusCode::FORBIDDEN,
@@ -261,7 +261,7 @@ async fn authenticate(
             })?;
         let digest: [u8; 32] = Sha256::digest(token).into();
         if bool::from(digest.ct_eq(&context.owner_digest)) {
-            let actor = header(request, "x-shipments-actor").unwrap_or("owner");
+            let actor = header(request, "x-packages-actor").unwrap_or("owner");
             if actor.len() > 200 || actor.is_empty() || actor.chars().any(char::is_control) {
                 return Err(client_error(
                     StatusCode::BAD_REQUEST,
@@ -278,7 +278,7 @@ async fn authenticate(
             .as_ref()
             .is_some_and(|expected| bool::from(digest.ct_eq(expected)))
         {
-            let actor = header(request, "x-shipments-actor");
+            let actor = header(request, "x-packages-actor");
             if request.request.method() != http::Method::GET
                 && !actor.is_some_and(|value| {
                     value.starts_with("ha:")
@@ -381,8 +381,8 @@ struct ShipmentCursor {
 }
 
 /// List local shipment records using stable keyset pagination.
-#[endpoint {method=GET,path="/v1/shipments",tags=["shipments"]}]
-async fn shipments_list(
+#[endpoint {method=GET,path="/v1/packages",tags=["packages"]}]
+async fn packages_list(
     request: RequestContext<Arc<Context>>,
     query: Query<PaginationParams<Filters, ShipmentCursor>>,
 ) -> Result<HttpResponseOk<ResultsPage<Shipment>>, HttpError> {
@@ -421,7 +421,7 @@ async fn shipments_list(
 }
 
 /// List canonical carriers. Omit the input carrier to request provider detection.
-#[endpoint {method=GET,path="/v1/carriers",tags=["shipments"]}]
+#[endpoint {method=GET,path="/v1/carriers",tags=["packages"]}]
 async fn carriers_list(
     request: RequestContext<Arc<Context>>,
 ) -> Result<HttpResponseOk<Vec<crate::carrier::Carrier>>, HttpError> {
@@ -431,8 +431,8 @@ async fn carriers_list(
 
 /// Resolve and verify tracking before saving a shipment. Uncertain provider
 /// attempts remain durable so retries can recover without duplicate trackers.
-#[endpoint {method=POST,path="/v1/shipments",tags=["shipments"]}]
-async fn shipments_create(
+#[endpoint {method=POST,path="/v1/packages",tags=["packages"]}]
+async fn packages_create(
     request: RequestContext<Arc<Context>>,
     body: TypedBody<CreateShipment>,
 ) -> Result<HttpResponseHeaders<HttpResponseCreated<Shipment>, VersionHeaders>, HttpError> {
@@ -510,7 +510,7 @@ async fn shipments_create(
     ))
 }
 
-#[endpoint {method=GET,path="/v1/shipments/{id}",tags=["shipments"]}]
+#[endpoint {method=GET,path="/v1/packages/{id}",tags=["packages"]}]
 async fn shipment_get(
     request: RequestContext<Arc<Context>>,
     path: Path<ShipmentPath>,
@@ -521,7 +521,7 @@ async fn shipment_get(
     ))
 }
 
-#[endpoint {method=PATCH,path="/v1/shipments/{id}",tags=["shipments"]}]
+#[endpoint {method=PATCH,path="/v1/packages/{id}",tags=["packages"]}]
 async fn shipment_update(
     request: RequestContext<Arc<Context>>,
     path: Path<ShipmentPath>,
@@ -620,7 +620,7 @@ fn log_validation_error(
     error
 }
 
-#[endpoint {method=POST,path="/v1/shipments/{id}/sources",tags=["shipments"]}]
+#[endpoint {method=POST,path="/v1/packages/{id}/sources",tags=["packages"]}]
 async fn shipment_source(
     request: RequestContext<Arc<Context>>,
     path: Path<ShipmentPath>,
@@ -641,7 +641,7 @@ async fn shipment_source(
     ))
 }
 
-#[endpoint {method=PUT,path="/v1/shipments/{id}/status-override",tags=["shipments"]}]
+#[endpoint {method=PUT,path="/v1/packages/{id}/status-override",tags=["packages"]}]
 async fn override_set(
     request: RequestContext<Arc<Context>>,
     path: Path<ShipmentPath>,
@@ -662,7 +662,7 @@ async fn override_set(
     ))
 }
 
-#[endpoint {method=DELETE,path="/v1/shipments/{id}/status-override",tags=["shipments"]}]
+#[endpoint {method=DELETE,path="/v1/packages/{id}/status-override",tags=["packages"]}]
 async fn override_clear(
     request: RequestContext<Arc<Context>>,
     path: Path<ShipmentPath>,
@@ -682,7 +682,7 @@ async fn override_clear(
     ))
 }
 
-#[endpoint {method=PUT,path="/v1/shipments/{id}/archive",tags=["shipments"]}]
+#[endpoint {method=PUT,path="/v1/packages/{id}/archive",tags=["packages"]}]
 async fn shipment_archive(
     request: RequestContext<Arc<Context>>,
     path: Path<ShipmentPath>,
@@ -702,7 +702,7 @@ async fn shipment_archive(
     ))
 }
 
-#[endpoint {method=DELETE,path="/v1/shipments/{id}/archive",tags=["shipments"]}]
+#[endpoint {method=DELETE,path="/v1/packages/{id}/archive",tags=["packages"]}]
 async fn shipment_restore(
     request: RequestContext<Arc<Context>>,
     path: Path<ShipmentPath>,
@@ -722,7 +722,7 @@ async fn shipment_restore(
     ))
 }
 
-#[endpoint {method=POST,path="/v1/shipments/{id}/refresh",tags=["shipments"]}]
+#[endpoint {method=POST,path="/v1/packages/{id}/refresh",tags=["packages"]}]
 async fn shipment_refresh(
     request: RequestContext<Arc<Context>>,
     path: Path<ShipmentPath>,
@@ -745,7 +745,7 @@ struct EventCursor {
     after: i64,
 }
 
-#[endpoint {method=GET,path="/v1/shipments/{id}/events",tags=["shipments"]}]
+#[endpoint {method=GET,path="/v1/packages/{id}/events",tags=["packages"]}]
 async fn shipment_events(
     request: RequestContext<Arc<Context>>,
     path: Path<ShipmentPath>,
@@ -1088,7 +1088,7 @@ async fn amazon_complete(
 
 #[derive(Serialize, JsonSchema)]
 struct AmazonPreview {
-    shipments: Vec<AmazonPreviewParcel>,
+    packages: Vec<AmazonPreviewParcel>,
     deferred: usize,
     deferred_reasons: crate::amazon::DeferredCounts,
     complete: bool,
@@ -1122,7 +1122,7 @@ async fn amazon_preview(
         "deferred_product"=>result.deferred_reasons.missing_product,
         "deferred_tracking"=>result.deferred_reasons.unverified_tracking,
         "deferred_limit"=>result.deferred_reasons.request_limit);
-    let shipments = result
+    let packages = result
         .parcels
         .into_iter()
         .map(|p| AmazonPreviewParcel {
@@ -1137,7 +1137,7 @@ async fn amazon_preview(
         .collect();
     Ok(HttpResponseHeaders::new(
         HttpResponseOk(AmazonPreview {
-            shipments,
+            packages,
             deferred: result.deferred,
             deferred_reasons: result.deferred_reasons,
             complete: result.complete,
@@ -1148,7 +1148,7 @@ async fn amazon_preview(
 }
 
 /// Verify and adopt one existing Amazon shipment without enabling new imports.
-#[endpoint {method=POST,path="/v1/shipments/{id}/amazon",tags=["amazon"]}]
+#[endpoint {method=POST,path="/v1/packages/{id}/amazon",tags=["amazon"]}]
 async fn shipment_use_amazon(
     request: RequestContext<Arc<Context>>,
     path: Path<ShipmentPath>,
@@ -1489,9 +1489,9 @@ async fn style(request: RequestContext<Arc<Context>>) -> Result<Response<Body>, 
 pub fn description() -> Result<ApiDescription<Arc<Context>>> {
     let mut api = ApiDescription::new();
     let endpoints: [dropshot::ApiEndpoint<Arc<Context>>; 39] = [
-        shipments_list.into(),
+        packages_list.into(),
         carriers_list.into(),
-        shipments_create.into(),
+        packages_create.into(),
         shipment_get.into(),
         shipment_update.into(),
         shipment_source.into(),
@@ -1536,7 +1536,7 @@ pub fn description() -> Result<ApiDescription<Arc<Context>>> {
 }
 
 pub fn openapi() -> Result<serde_json::Value> {
-    description()?.openapi("Shipments API",semver::Version::parse(env!("CARGO_PKG_VERSION"))?)
+    description()?.openapi("Packages API",semver::Version::parse(env!("CARGO_PKG_VERSION"))?)
         .description("Persistent local shipment records, manual corrections, and carrier synchronization. Use a Bearer owner or ingestion token. Creates require Idempotency-Key; writes to an existing shipment require its quoted revision in If-Match.")
         .json().map_err(Into::into)
 }

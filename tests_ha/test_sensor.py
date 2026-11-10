@@ -6,7 +6,7 @@ import pytest
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryAuthFailed
 
-from custom_components.shipments.const import DOMAIN, SENSOR_KEYS
+from custom_components.packages.const import DOMAIN, SENSOR_KEYS
 
 from .conftest import SUMMARY, Backend, get_state
 
@@ -15,15 +15,15 @@ async def test_summary_entities_and_unload(hass: HomeAssistant, entry) -> None:
     states = hass.states.async_all("sensor")
     assert len(states) == len(SENSOR_KEYS) + 1
     assert {state.entity_id: state.state for state in states} == {
-        **{f"sensor.shipments_{key}": str(value) for key, value in SUMMARY.items()},
-        "sensor.shipments_inbound_delivered_today": "1",
-        "sensor.shipments_inbound_due_today": "1",
-        "sensor.shipments_inbound_active": "3",
-        "sensor.shipments_inbound_out_for_delivery": "1",
-        "sensor.shipments_inbound_exceptions": "0",
-        "sensor.shipments_outbound_active": "1",
-        "sensor.shipments_outbound_exceptions": "0",
-        "sensor.shipments_amazon_discovery": "unavailable",
+        **{f"sensor.packages_{key}": str(value) for key, value in SUMMARY.items()},
+        "sensor.packages_inbound_delivered_today": "1",
+        "sensor.packages_inbound_due_today": "1",
+        "sensor.packages_inbound_active": "3",
+        "sensor.packages_inbound_out_for_delivery": "1",
+        "sensor.packages_inbound_exceptions": "0",
+        "sensor.packages_outbound_active": "1",
+        "sensor.packages_outbound_exceptions": "0",
+        "sensor.packages_amazon_discovery": "unavailable",
     }
     assert hass.services.has_service(DOMAIN, "archive")
     assert await hass.config_entries.async_unload(entry.entry_id)
@@ -47,7 +47,7 @@ async def test_failed_summary_marks_entities_unavailable(
     )
     del backend.responses[("GET", "/v1/summary")]
     await entry.runtime_data.async_refresh()
-    assert get_state(hass, "sensor.shipments_active").state == "4"
+    assert get_state(hass, "sensor.packages_active").state == "4"
 
 
 async def test_direction_counts_keep_existing_sensors_combined(
@@ -61,21 +61,21 @@ async def test_direction_counts_keep_existing_sensors_combined(
     assert {
         state.entity_id: state.state for state in hass.states.async_all("sensor")
     } == {
-        "sensor.shipments_active": "7",
-        "sensor.shipments_expected": "1",
-        "sensor.shipments_in_transit": "2",
-        "sensor.shipments_out_for_delivery": "1",
-        "sensor.shipments_delivered": "3",
-        "sensor.shipments_exceptions": "3",
-        "sensor.shipments_sync_errors": "1",
-        "sensor.shipments_inbound_delivered_today": "1",
-        "sensor.shipments_inbound_due_today": "1",
-        "sensor.shipments_inbound_active": "4",
-        "sensor.shipments_inbound_out_for_delivery": "1",
-        "sensor.shipments_inbound_exceptions": "1",
-        "sensor.shipments_outbound_active": "3",
-        "sensor.shipments_outbound_exceptions": "2",
-        "sensor.shipments_amazon_discovery": "unavailable",
+        "sensor.packages_active": "7",
+        "sensor.packages_expected": "1",
+        "sensor.packages_in_transit": "2",
+        "sensor.packages_out_for_delivery": "1",
+        "sensor.packages_delivered": "3",
+        "sensor.packages_exceptions": "3",
+        "sensor.packages_sync_errors": "1",
+        "sensor.packages_inbound_delivered_today": "1",
+        "sensor.packages_inbound_due_today": "1",
+        "sensor.packages_inbound_active": "4",
+        "sensor.packages_inbound_out_for_delivery": "1",
+        "sensor.packages_inbound_exceptions": "1",
+        "sensor.packages_outbound_active": "3",
+        "sensor.packages_outbound_exceptions": "2",
+        "sensor.packages_amazon_discovery": "unavailable",
     }
     assert [
         (request.path, request.query)
@@ -127,6 +127,6 @@ async def test_direction_summary_failure_keeps_the_last_complete_snapshot(
     del backend.responses[("GET", path)]
     await entry.runtime_data.async_refresh()
     assert entry.runtime_data.last_update_success
-    assert get_state(hass, "sensor.shipments_active").state == "100"
-    assert get_state(hass, "sensor.shipments_inbound_active").state == "3"
-    assert get_state(hass, "sensor.shipments_outbound_active").state == "1"
+    assert get_state(hass, "sensor.packages_active").state == "100"
+    assert get_state(hass, "sensor.packages_inbound_active").state == "3"
+    assert get_state(hass, "sensor.packages_outbound_active").state == "1"

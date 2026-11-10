@@ -1,5 +1,5 @@
 use anyhow::{Context as _, Result};
-use shipments::{
+use packages::{
     amazon::AmazonClient,
     amazon_sync::AmazonDiscoveryWorker,
     api,
@@ -20,7 +20,7 @@ async fn main() -> Result<()> {
         std::fs::write(path, serde_json::to_string_pretty(&api::openapi()?)?)?;
         return Ok(());
     }
-    let log = shipments::logging::logger();
+    let log = packages::logging::logger();
     let store = Store::open(&config.database).await?;
     let token = config
         .api_token
@@ -80,7 +80,7 @@ async fn main() -> Result<()> {
         None
     };
     let workers: Vec<_> = providers.into_iter().map(|provider| {
-        let discovery = (provider.id() == shipments::shipping_api::types::ProviderId::AmazonAccount)
+        let discovery = (provider.id() == packages::shipping_api::types::ProviderId::AmazonAccount)
             .then(|| AmazonDiscoveryWorker::new(store.clone(), amazon.clone()).with_logger(log.clone()));
         let worker = SyncWorker::new(store.pool().clone(), provider);
         let log = log.clone();

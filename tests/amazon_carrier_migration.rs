@@ -2,7 +2,7 @@
 
 use std::path::Path;
 
-use shipments::{
+use packages::{
     carrier::Carrier,
     models::{
         CarrierEvent, CarrierTracking, Direction, RegistrationState, Shipment, Source, Status,

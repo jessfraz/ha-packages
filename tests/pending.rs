@@ -4,8 +4,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use reqwest::{Client, StatusCode};
-use shipments::{
+use packages::{
     api,
     models::{
         CreateShipment, Direction, Event, InputTracking, Patch, RegistrationState, Shipment,
@@ -14,6 +13,7 @@ use shipments::{
     shipping_api::easypost::EasyPostClient,
     store::Store,
 };
+use reqwest::{Client, StatusCode};
 
 const OWNER: &str = "pending-api-owner-credential-at-least-32-bytes";
 
@@ -84,7 +84,7 @@ async fn verified_create_replays_preserve_sources_history_and_make_no_provider_r
             None,
             Some(std::sync::Arc::new(provider)),
         )),
-        shipments::logging::with_writer(capture.clone()),
+        packages::logging::with_writer(capture.clone()),
     )
     .unwrap();
     let base = format!("http://{}", server.local_addr());
@@ -93,12 +93,12 @@ async fn verified_create_replays_preserve_sources_history_and_make_no_provider_r
         .build()
         .unwrap();
     let request = input("9400111899223856926381");
-    let verified = shipments::shipping_api::types::Tracker {
-        provider: shipments::shipping_api::types::ProviderId::EasyPost,
+    let verified = packages::shipping_api::types::Tracker {
+        provider: packages::shipping_api::types::ProviderId::EasyPost,
         id: "trk_verified_fixture".into(),
         tracking_code: request.tracking.number.clone(),
         carrier: "USPS".parse().unwrap(),
-        status: shipments::models::Status::Unknown,
+        status: packages::models::Status::Unknown,
         public_url: None,
         carrier_tracking: Default::default(),
     };
@@ -109,7 +109,7 @@ async fn verified_create_replays_preserve_sources_history_and_make_no_provider_r
     let mut saved = None;
     for _ in 0..2 {
         let response = client
-            .post(format!("{base}/v1/shipments"))
+            .post(format!("{base}/v1/packages"))
             .bearer_auth(OWNER)
             .header("Idempotency-Key", "durable-pending")
             .json(&request)
@@ -165,7 +165,7 @@ async fn verified_create_replays_preserve_sources_history_and_make_no_provider_r
         RegistrationState::Registered
     );
     let duplicate = client
-        .post(format!("{base}/v1/shipments"))
+        .post(format!("{base}/v1/packages"))
         .bearer_auth(OWNER)
         .header("Idempotency-Key", "different-create-key")
         .json(&request)
@@ -195,7 +195,7 @@ async fn verified_create_replays_preserve_sources_history_and_make_no_provider_r
     another.source = None;
     let response = client
         .post(format!(
-            "http://{}/v1/shipments",
+            "http://{}/v1/packages",
             without_provider.local_addr()
         ))
         .bearer_auth(OWNER)
@@ -228,7 +228,7 @@ async fn local_validation_rejects_garbage_and_tracking_edits_reset_durable_rejec
         ("😈123456", "tracking_invalid"),
     ] {
         let response = client
-            .post(format!("{base}/v1/shipments"))
+            .post(format!("{base}/v1/packages"))
             .bearer_auth(OWNER)
             .header("Idempotency-Key", "bad-local-input")
             .json(&input(number))
@@ -262,7 +262,7 @@ async fn local_validation_rejects_garbage_and_tracking_edits_reset_durable_rejec
         Some("TRACKER.NO_CARRIER_FOR_CODE")
     );
     let refresh = client
-        .post(format!("{base}/v1/shipments/{}/refresh", created.id))
+        .post(format!("{base}/v1/packages/{}/refresh", created.id))
         .bearer_auth(OWNER)
         .header("If-Match", "\"1\"")
         .send()
@@ -396,7 +396,7 @@ async fn historical_snapshots_and_create_replays_infer_registration_without_chan
 
 #[tokio::test]
 async fn rejected_records_remain_unscheduled_after_restore_and_manual_corrections() {
-    use shipments::models::{SetOverride, Status};
+    use packages::models::{SetOverride, Status};
     let directory = tempfile::tempdir().unwrap();
     let store = Store::open(&directory.path().join("rejected.sqlite3"))
         .await

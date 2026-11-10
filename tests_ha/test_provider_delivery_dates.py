@@ -5,7 +5,7 @@ from datetime import date, datetime
 import pytest
 from homeassistant.core import HomeAssistant
 
-from custom_components.shipments.models import (
+from custom_components.packages.models import (
     DeliveryDay,
     ShipmentItem,
     delivery_estimate,

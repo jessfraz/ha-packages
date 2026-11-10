@@ -7,7 +7,7 @@ from uuid import UUID
 import pytest
 from homeassistant.core import HomeAssistant
 
-from custom_components.shipments.models import DeliveryDay, delivery_estimate
+from custom_components.packages.models import DeliveryDay, delivery_estimate
 
 from .conftest import FixtureShipment, get_state
 
@@ -89,7 +89,7 @@ async def test_due_today_union_is_deduplicated_and_preserves_statuses(
         {},
     )
     await entry.runtime_data.async_refresh()
-    state = get_state(hass, "sensor.shipments_inbound_due_today")
+    state = get_state(hass, "sensor.packages_inbound_due_today")
     assert state.state == "3"
     assert {item["id"] for item in state.attributes["items"]} == {
         str(UUID(int=i)) for i in (1, 2, 3)
@@ -98,7 +98,7 @@ async def test_due_today_union_is_deduplicated_and_preserves_statuses(
         "in_transit",
         "out_for_delivery",
     }
-    assert get_state(hass, "sensor.shipments_inbound_out_for_delivery").state == "2"
+    assert get_state(hass, "sensor.packages_inbound_out_for_delivery").state == "2"
     expected = next(
         item
         for item in entry.runtime_data.inbound_estimates
@@ -156,7 +156,7 @@ async def test_due_today_deduplicates_across_ofd_pages(hass, entry, backend, fre
         {},
     )
     await entry.runtime_data.async_refresh()
-    state = get_state(hass, "sensor.shipments_inbound_due_today")
+    state = get_state(hass, "sensor.packages_inbound_due_today")
     assert state.state == "22"
     assert len(state.attributes["items"]) == 20
     assert state.attributes["items_truncated"] is True
@@ -166,5 +166,5 @@ async def test_due_today_deduplicates_across_ofd_pages(hass, entry, backend, fre
     assert any(
         request.query.get("page_token") == "20"
         for request in backend.requests
-        if request.path == "/v1/shipments"
+        if request.path == "/v1/packages"
     )

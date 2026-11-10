@@ -145,7 +145,7 @@ function writeRoute(changes, replace = false) {
   if (hash === location.hash.slice(1)) return;
   history[replace || homeAssistantPrefix ? "replaceState" : "pushState"](null, "", hash ? `#${hash}` : location.pathname + location.search);
   if (homeAssistantPrefix) {
-    const path = hash ? `/shipments/${encodeURIComponent(hash)}` : "/";
+    const path = hash ? `/packages/${encodeURIComponent(hash)}` : "/";
     if (path !== homeAssistantPath) {
       homeAssistantPath = path;
       window.parent.postMessage({ type: "home-assistant/navigate", path: homeAssistantPrefix + path, options: { replace } }, location.origin);
@@ -231,7 +231,7 @@ function notice(text, error = false) {
 }
 
 async function api(path, options = {}) {
-  const headers = { "X-Shipments-Request": "1", ...options.headers };
+  const headers = { "X-Packages-Request": "1", ...options.headers };
   if (token) headers.Authorization = `Bearer ${token}`;
   if (options.body !== undefined) headers["Content-Type"] = "application/json";
   const response = await fetch(new URL(path, document.baseURI), {
@@ -269,7 +269,7 @@ function renderServiceStatus(system, checked) {
   byId("health").hidden = system.provider_enabled;
   byId("health").textContent = system.provider_enabled
     ? ""
-    : "Configure a tracking provider before adding shipments or changing tracking. Existing records remain available.";
+    : "Configure a tracking provider before adding packages or changing tracking. Existing records remain available.";
   const status = [
     system.provider_enabled
       ? `${system.pending_syncs} tracking checks scheduled · ${system.sync_errors} tracking issues`
@@ -308,7 +308,7 @@ async function openDashboard() {
     await applyRoute(true);
     initialRoutePending = false;
   } catch (error) {
-    notice(`Could not load shipments. ${error.message} The list will retry automatically.`, true);
+    notice(`Could not load packages. ${error.message} The list will retry automatically.`, true);
   } finally {
     scheduleRefresh();
   }
@@ -322,7 +322,7 @@ async function startConnection() {
   if (homeAssistant) {
     byId("login").hidden = true;
     byId("startup-connection").hidden = false;
-    byId("connection-status").textContent = "Waiting for Home Assistant to connect. Your shipments will open automatically.";
+    byId("connection-status").textContent = "Waiting for Home Assistant to connect. Your packages will open automatically.";
   }
   try {
     await waitForConnection(connect, {
@@ -332,8 +332,8 @@ async function startConnection() {
         byId("connection-status").textContent = error.status === 401
           ? "Waiting for Home Assistant to authenticate this view. Retrying automatically…"
           : error.status === 403
-            ? "Home Assistant has not granted access to this view. Check your access to Shipments; we’ll keep retrying."
-            : "Shipments is reconnecting after startup. Retrying automatically…";
+            ? "Home Assistant has not granted access to this view. Check your access to Packages; we’ll keep retrying."
+            : "Packages is reconnecting after startup. Retrying automatically…";
       },
     });
     if (!controller.signal.aborted) await openDashboard();
@@ -451,7 +451,7 @@ async function load(append = false) {
     const [summary, page, system] = await Promise.all([
       api(activeDirection === "all" ? "v1/summary" : `v1/summary?direction=${activeDirection}`, { signal: controller.signal }),
       view === "delivered_today" && !deliveryDay ? { items: [], next_page: null }
-        : api(`v1/shipments?${query}`, { signal: controller.signal }),
+        : api(`v1/packages?${query}`, { signal: controller.signal }),
       systemRequest,
     ]);
     // A search or archive-filter change owns its whole result, including any
@@ -483,8 +483,8 @@ async function load(append = false) {
       card.dataset.stat = key;
       card.setAttribute("aria-pressed", String(view === key));
       card.setAttribute("aria-label", key === "tracking_issues"
-        ? `${count} shipments with tracking issues, all directions`
-        : `${count} ${label.toLowerCase()} shipments`);
+        ? `${count} packages with tracking issues, all directions`
+        : `${count} ${label.toLowerCase()} packages`);
       card.append(element("strong", count), element("span", label));
       if (key === "tracking_issues") card.append(element("small", "All directions"));
       card.addEventListener("click", guarded(() => {
@@ -535,31 +535,31 @@ async function load(append = false) {
       const empty = element("div", undefined, "empty");
       const messages = {
         active: [
-          "No active shipments.",
-          "Add an expected delivery, or switch to All to review completed shipments.",
+          "No active packages.",
+          "Add an expected delivery, or switch to All to review completed packages.",
         ],
         delivered: [
-          "No delivered shipments yet.",
+          "No delivered packages yet.",
           "Received a parcel? Open it from All and mark it delivered.",
         ],
         delivered_today: deliveryDay
           ? ["Nothing delivered today.", "Deliveries appear here when the carrier reports a delivery or you confirm one."]
           : ["Today's deliveries are unavailable.", "Connect Home Assistant to use its timezone and delivery-day window."],
-        out_for_delivery: ["Nothing out for delivery.", "Shipments appear here when the carrier starts the delivery run."],
+        out_for_delivery: ["Nothing out for delivery.", "Packages appear here when the carrier starts the delivery run."],
         exceptions: ["No delivery exceptions.", "Carrier-reported exceptions and returns appear here."],
         tracking_issues: ["No tracking issues.", "Tracking errors appear here. New registrations in progress are not errors."],
         all: [
-          "No shipments yet.",
+          "No packages yet.",
           "Use Add shipment when you have a tracking number. New labels do not need a carrier scan.",
         ],
         archived: [
-          "No archived shipments.",
-          "Archived shipments are kept here and can be restored from their details.",
+          "No archived packages.",
+          "Archived packages are kept here and can be restored from their details.",
         ],
       };
       const [heading, description] = search && !(view === "delivered_today" && !deliveryDay)
         ? [
-            "No shipments match your search.",
+            "No packages match your search.",
             "Try a different title, merchant, or order reference in this view.",
           ]
         : messages[view];
@@ -897,7 +897,7 @@ function scheduleRefresh() {
       await refreshDashboard();
     } catch (error) {
       notice(
-        `Could not refresh shipments. ${error.message} Use Refresh to retry.`,
+        `Could not refresh packages. ${error.message} Use Refresh to retry.`,
         true,
       );
     } finally {
@@ -1038,7 +1038,7 @@ async function show(id, preserveView = false, section = route().get("section")) 
   if (!preserveView) selected = null;
   let shipment;
   try {
-    shipment = await api(`v1/shipments/${id}`);
+    shipment = await api(`v1/packages/${id}`);
   } catch (error) {
     if (generation === detailGeneration) throw error;
     return null;
@@ -1208,7 +1208,7 @@ async function loadEvents() {
   loadingEvents = true;
   byId("more-events").disabled = true;
   try {
-    const page = await api(`v1/shipments/${id}/events?${query}`);
+    const page = await api(`v1/packages/${id}/events?${query}`);
     if (!currentDetail(id, generation)) return;
     for (const event of page.items) {
       const actor = Object.hasOwn(providerNames, event.actor_id) ? providerNames[event.actor_id] : event.actor_id;
@@ -1276,7 +1276,7 @@ async function mutate(path, method, body) {
   const { id, revision } = selected;
   const generation = detailGeneration;
   try {
-    await api(`v1/shipments/${id}/${path}`, {
+    await api(`v1/packages/${id}/${path}`, {
       method,
       headers: { "If-Match": `"${revision}"` },
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
@@ -1420,7 +1420,7 @@ byId("edit-form").addEventListener("submit", async (event) => {
     const headers = shipment
       ? { "If-Match": `"${shipment.revision}"` }
       : { "Idempotency-Key": key };
-    const saved = await api(shipment ? `v1/shipments/${shipment.id}` : "v1/shipments", {
+    const saved = await api(shipment ? `v1/packages/${shipment.id}` : "v1/packages", {
       method: shipment ? "PATCH" : "POST",
       headers,
       body: payload,
@@ -1487,8 +1487,8 @@ window.addEventListener("message", guarded(async event => {
   homeAssistantPrefix = parentRoute.prefix.replace(/\/$/, "");
   homeAssistantPath = parentRoute.path;
   let hash = "";
-  if (parentRoute.path.startsWith("/shipments/")) {
-    try { hash = decodeURIComponent(parentRoute.path.slice("/shipments/".length)); }
+  if (parentRoute.path.startsWith("/packages/")) {
+    try { hash = decodeURIComponent(parentRoute.path.slice("/packages/".length)); }
     catch { return; }
     if (hash.length > 4096) return;
   } else if (parentRoute.path !== "/" && parentRoute.path !== "") return;

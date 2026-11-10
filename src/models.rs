@@ -39,7 +39,7 @@ pub struct Tracking<C = crate::carrier::Carrier> {
     pub recipient_url: Option<String>,
 }
 
-/// Carrier detection is allowed at admission. Persisted shipments always use
+/// Carrier detection is allowed at admission. Persisted packages always use
 /// the concrete carrier returned by the tracking provider.
 #[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -735,7 +735,7 @@ pub struct Filters {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub delivered_before: Option<i64>,
     /// ISO civil day for providers without a scan instant. Requires both UTC
-    /// bounds so timestamp-backed shipments retain the caller's local-day window.
+    /// bounds so timestamp-backed packages retain the caller's local-day window.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub delivered_on: Option<String>,
     /// Expected delivery first, or most recent actual delivery first. Unknown dates sort last.

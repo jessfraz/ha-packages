@@ -15,19 +15,19 @@ uv sync --frozen
 uv run --frozen ruff check custom_components tests_ha
 uv run --frozen ruff format --check custom_components tests_ha
 uv run --frozen ty check --error-on-warning
-cargo build --locked --bin shipments
-SHIPMENTS_TEST_BINARY="$PWD/target/debug/shipments" uv run --frozen pytest tests_ha
+cargo build --locked --bin packages
+PACKAGES_TEST_BINARY="$PWD/target/debug/packages" uv run --frozen pytest tests_ha
 actionlint
 shellcheck docker-entrypoint.sh scripts/container-smoke.sh
 ```
 
 Keep changes focused. Add regression tests for behavior changes and update
 the OpenAPI snapshot when the public API intentionally changes. Do not add
-real shipments, tracking numbers, credentials, or personal information to
+real packages, tracking numbers, credentials, or personal information to
 fixtures or issue reports.
 
 To prepare a release, update the version in `Cargo.toml`, `pyproject.toml`,
-`custom_components/shipments/manifest.json`, and `shipments/config.yaml`.
+`custom_components/packages/manifest.json`, and `packages/config.yaml`.
 Refresh both lockfiles and the OpenAPI snapshot, then update the changelog.
 Merge through the required checks and tag that commit `v<version>`.
 
@@ -39,6 +39,9 @@ in GHCR. With Docker running locally, the same check is available as
 
 The first publication also requires making the GHCR package public so Home
 Assistant can pull it without a login.
+
+The CLI workflow tests the release binary against the actual CLI contract and
+attaches checksummed Linux-musl and Apple Silicon archives to the tagged release.
 
 ## API contract
 
@@ -57,7 +60,7 @@ running the Python suite. The default suite needs no API keys and makes no
 external provider requests.
 
 CLI tests run the actual binary against loopback HTTP and the current server.
-To check an installed CLI, set `HA_SHIPMENTS_TEST_BINARY` when running
+To check an installed CLI, set `HA_PACKAGES_TEST_BINARY` when running
 `cargo test --locked --test cli`. This catches release skew in the client types.
 
 The separate **EasyPost sandbox** CI workflow uses the repository's

@@ -15,15 +15,15 @@ from homeassistant.helpers.event import async_track_state_change_event
 from homeassistant.helpers.storage import Store
 from pytest_homeassistant.common import MockConfigEntry, MockUser
 
-from custom_components.shipments import sensor
-from custom_components.shipments.const import (
+from custom_components.packages import sensor
+from custom_components.packages.const import (
     CONF_ADDON_SLUG,
     CONF_BACKEND_URL,
     CONF_TOKEN,
     DOMAIN,
     SUMMARY_KEYS,
 )
-from custom_components.shipments.coordinator import ShipmentsCoordinator
+from custom_components.packages.coordinator import PackagesCoordinator
 
 from .conftest import SHIPMENT_ID, Backend, get_state
 
@@ -72,17 +72,17 @@ def capture_events(hass: HomeAssistant) -> list[int]:
         if state and state.state != "unavailable" and "event_id" in state.attributes:
             delivered.append(state.attributes["event_id"])
 
-    async_track_state_change_event(hass, ["event.shipments"], changed)
+    async_track_state_change_event(hass, ["event.packages"], changed)
     return delivered
 
 
 async def test_count_sensors_expose_measurement_statistics(
     hass: HomeAssistant, entry
 ) -> None:
-    assert get_state(hass, "sensor.shipments_active").state == "4"
+    assert get_state(hass, "sensor.packages_active").state == "4"
     for key in SUMMARY_KEYS:
         assert (
-            get_state(hass, f"sensor.shipments_{key}").attributes.get("state_class")
+            get_state(hass, f"sensor.packages_{key}").attributes.get("state_class")
             == "measurement"
         )
 
@@ -98,7 +98,7 @@ async def test_native_ids_are_stable_when_sensor_platform_finishes_last(
 
     async def delayed_sensor_setup(
         hass: HomeAssistant,
-        entry: ConfigEntry[ShipmentsCoordinator],
+        entry: ConfigEntry[PackagesCoordinator],
         async_add_entities: AddConfigEntryEntitiesCallback,
     ) -> None:
         await sensor_release.wait()
@@ -128,16 +128,16 @@ async def test_native_ids_are_stable_when_sensor_platform_finishes_last(
     try:
         async with asyncio.timeout(5):
             await native_platforms_added.wait()
-        assert hass.states.get("event.shipments") is not None
-        assert hass.states.get("calendar.shipments_inbound_deliveries") is not None
-        assert hass.states.get("binary_sensor.shipments_exceptions") is not None
-        assert hass.states.get("binary_sensor.shipments_sync_errors") is not None
+        assert hass.states.get("event.packages") is not None
+        assert hass.states.get("calendar.packages_inbound_deliveries") is not None
+        assert hass.states.get("binary_sensor.packages_exceptions") is not None
+        assert hass.states.get("binary_sensor.packages_sync_errors") is not None
         device = dr.async_get(hass).async_get_device_by_identifier(
             (DOMAIN, entry.entry_id), entry.entry_id
         )
         assert device is not None
-        assert device.name == "Shipments"
-        assert device.manufacturer == "Shipments"
+        assert device.name == "Packages"
+        assert device.manufacturer == "Packages"
         assert device.model == "Shipment registry"
         assert device.configuration_url == backend.url
     finally:
@@ -146,24 +146,24 @@ async def test_native_ids_are_stable_when_sensor_platform_finishes_last(
         assert await setup
         await hass.async_block_till_done(wait_background_tasks=True)
     assert len(hass.states.async_all("event")) == 1
-    assert get_state(hass, "sensor.shipments_active").state == "4"
+    assert get_state(hass, "sensor.packages_active").state == "4"
 
 
 async def test_native_problem_indicators_and_label(
     hass: HomeAssistant, entry, backend: Backend
 ) -> None:
     assert (
-        get_state(hass, "sensor.shipments_expected").attributes["friendly_name"]
-        == "Shipments Awaiting pickup"
+        get_state(hass, "sensor.packages_expected").attributes["friendly_name"]
+        == "Packages Awaiting pickup"
     )
-    assert get_state(hass, "binary_sensor.shipments_exceptions").state == "off"
-    assert get_state(hass, "binary_sensor.shipments_sync_errors").state == "on"
+    assert get_state(hass, "binary_sensor.packages_exceptions").state == "off"
+    assert get_state(hass, "binary_sensor.packages_sync_errors").state == "on"
     backend.summaries[""].update(exceptions=2, sync_errors=0)
     await entry.runtime_data.async_refresh()
-    assert get_state(hass, "binary_sensor.shipments_exceptions").state == "on"
-    assert get_state(hass, "binary_sensor.shipments_sync_errors").state == "off"
+    assert get_state(hass, "binary_sensor.packages_exceptions").state == "on"
+    assert get_state(hass, "binary_sensor.packages_sync_errors").state == "off"
     assert (
-        get_state(hass, "binary_sensor.shipments_exceptions").attributes["device_class"]
+        get_state(hass, "binary_sensor.packages_exceptions").attributes["device_class"]
         == "problem"
     )
 
@@ -177,7 +177,7 @@ async def test_event_pages_emit_each_persisted_transition_and_resume_after_reloa
     await entry.runtime_data.async_refresh()
     await hass.async_block_till_done()
     assert delivered == [1, 2, 3]
-    attributes = get_state(hass, "event.shipments").attributes
+    attributes = get_state(hass, "event.packages").attributes
     assert {
         key: attributes[key]
         for key in (
@@ -198,7 +198,7 @@ async def test_event_pages_emit_each_persisted_transition_and_resume_after_reloa
         "direction": "inbound",
         "status": "failure",
     }
-    checkpoint = Store(hass, 1, f"shipments.{entry.entry_id}.events")
+    checkpoint = Store(hass, 1, f"packages.{entry.entry_id}.events")
     assert await checkpoint.async_load() == {"after": 3}
     assert await hass.config_entries.async_unload(entry.entry_id)
     feed_page(
@@ -211,15 +211,15 @@ async def test_event_pages_emit_each_persisted_transition_and_resume_after_reloa
     assert await hass.config_entries.async_setup(entry.entry_id)
     await hass.async_block_till_done(wait_background_tasks=True)
     assert delivered[-3:] == [4, 5, 6]
-    assert get_state(hass, "event.shipments").attributes.get("event_id") == 6
-    assert await Store(hass, 1, f"shipments.{entry.entry_id}.events").async_load() == {
+    assert get_state(hass, "event.packages").attributes.get("event_id") == 6
+    assert await Store(hass, 1, f"packages.{entry.entry_id}.events").async_load() == {
         "after": 6
     }
     queries = [
         request.query for request in backend.requests if request.path == "/v1/events"
     ]
     assert queries == [{"limit": "200", "after": "3"}]
-    assert get_state(hass, "event.shipments").attributes["event_id"] == 6
+    assert get_state(hass, "event.packages").attributes["event_id"] == 6
 
 
 async def test_feed_failure_does_not_reset_cursor_or_break_counts_calendar(
@@ -228,10 +228,10 @@ async def test_feed_failure_does_not_reset_cursor_or_break_counts_calendar(
     delivered = capture_events(hass)
     backend.responses[("GET", "/v1/events?limit=200&after=0")] = (503, b"{}", {})
     await entry.runtime_data.async_refresh()
-    assert get_state(hass, "event.shipments").state == "unavailable"
-    assert get_state(hass, "sensor.shipments_active").state == "4"
+    assert get_state(hass, "event.packages").state == "unavailable"
+    assert get_state(hass, "sensor.packages_active").state == "4"
     assert (
-        get_state(hass, "calendar.shipments_inbound_deliveries").state != "unavailable"
+        get_state(hass, "calendar.packages_inbound_deliveries").state != "unavailable"
     )
     assert ir.async_get(hass).async_get_issue(DOMAIN, "event_stream_unavailable")
     feed_page(backend, 0, [status_event(1)])
@@ -247,8 +247,8 @@ async def test_summary_recovery_delivers_each_queued_native_event(
     delivered = capture_events(hass)
     backend.responses[("GET", "/v1/summary")] = (503, b"{}", {})
     await entry.runtime_data.async_refresh()
-    assert get_state(hass, "sensor.shipments_active").state == "unavailable"
-    assert get_state(hass, "event.shipments").state == "unavailable"
+    assert get_state(hass, "sensor.packages_active").state == "unavailable"
+    assert get_state(hass, "event.packages").state == "unavailable"
     del backend.responses[("GET", "/v1/summary")]
     feed_page(backend, 0, [status_event(1), status_event(2, "delivered")], more=True)
     feed_page(backend, 2, [status_event(3, "exception")])
@@ -271,7 +271,7 @@ async def test_saved_cursor_ahead_of_restored_history_warns_and_rebaselines_tail
     await hass.async_block_till_done()
     assert delivered == []
     assert ir.async_get(hass).async_get_issue(DOMAIN, "event_history_reset")
-    checkpoint = Store(hass, 1, f"shipments.{entry.entry_id}.events")
+    checkpoint = Store(hass, 1, f"packages.{entry.entry_id}.events")
     assert await checkpoint.async_load() == {"after": 12}
     feed_page(backend, 12, [status_event(13)])
     await entry.runtime_data.async_refresh()
@@ -292,7 +292,7 @@ async def test_failed_checkpoint_readback_replays_delivered_event(
     await entry.runtime_data.async_refresh()
     await hass.async_block_till_done()
     assert delivered == [1]
-    assert get_state(hass, "event.shipments").state == "unavailable"
+    assert get_state(hass, "event.packages").state == "unavailable"
     monkeypatch.setattr(store, "async_save", original_save)
     await entry.runtime_data.async_refresh()
     await hass.async_block_till_done()
@@ -327,10 +327,10 @@ async def test_invalid_event_page_never_checkpoints_past_unseen_data(
     await entry.runtime_data.async_refresh()
     await hass.async_block_till_done()
     assert delivered == []
-    assert await Store(hass, 1, f"shipments.{entry.entry_id}.events").async_load() == {
+    assert await Store(hass, 1, f"packages.{entry.entry_id}.events").async_load() == {
         "after": 0
     }
-    assert get_state(hass, "sensor.shipments_active").state == "4"
+    assert get_state(hass, "sensor.packages_active").state == "4"
 
 
 async def test_unload_during_event_read_does_not_deliver_or_advance_checkpoint(
@@ -349,7 +349,7 @@ async def test_unload_during_event_read_does_not_deliver_or_advance_checkpoint(
     assert await hass.config_entries.async_unload(entry.entry_id)
     await hass.async_block_till_done(wait_background_tasks=True)
     assert delivered == []
-    assert await Store(hass, 1, f"shipments.{entry.entry_id}.events").async_load() == {
+    assert await Store(hass, 1, f"packages.{entry.entry_id}.events").async_load() == {
         "after": 0
     }
 
@@ -405,7 +405,7 @@ async def test_calendar_follows_pages_and_returns_only_intersecting_estimates(
     await entry.runtime_data.async_refresh()
     client = await hass_client()
     response = await client.get(
-        "/api/calendars/calendar.shipments_inbound_deliveries",
+        "/api/calendars/calendar.packages_inbound_deliveries",
         params={"start": "2026-10-20T00:00:00Z", "end": "2026-10-22T00:00:00Z"},
     )
     assert response.status == 200
@@ -461,7 +461,7 @@ async def test_calendar_uses_full_local_delivery_day_and_preserves_raw_estimate(
     await entry.runtime_data.async_refresh()
     client = await hass_client()
     response = await client.get(
-        "/api/calendars/calendar.shipments_inbound_deliveries",
+        "/api/calendars/calendar.packages_inbound_deliveries",
         params={"start": "2026-01-01T00:00:00Z", "end": "2027-01-01T00:00:00Z"},
     )
     assert response.status == 200
@@ -522,15 +522,15 @@ async def test_supervised_route_leaves_sidebar_to_app_and_preserves_user_access(
         data={
             CONF_BACKEND_URL: backend.url,
             CONF_TOKEN: "integration-token",
-            CONF_ADDON_SLUG: "actualprefix_shipments",
+            CONF_ADDON_SLUG: "actualprefix_packages",
         },
     )
     entry.add_to_hass(hass)
     assert await hass.config_entries.async_setup(entry.entry_id)
     await hass.async_block_till_done(wait_background_tasks=True)
-    panel = hass.data[frontend.DATA_PANELS]["shipments"]
+    panel = hass.data[frontend.DATA_PANELS]["packages"]
     assert panel.component_name == "app"
-    assert panel.config == {"addon": "actualprefix_shipments"}
+    assert panel.config == {"addon": "actualprefix_packages"}
     assert panel.require_admin is False
     assert panel.sidebar_title is None
     assert panel.sidebar_icon is None
@@ -540,18 +540,18 @@ async def test_supervised_route_leaves_sidebar_to_app_and_preserves_user_access(
         frontend.async_register_built_in_panel(
             hass,
             "app",
-            sidebar_title="Shipments",
-            frontend_url_path="actualprefix_shipments",
-            config={"addon": "actualprefix_shipments"},
+            sidebar_title="Packages",
+            frontend_url_path="actualprefix_packages",
+            config={"addon": "actualprefix_packages"},
             require_admin=False,
         )
     assert [
         path
         for path, registered in hass.data[frontend.DATA_PANELS].items()
-        if registered.config == {"addon": "actualprefix_shipments"}
+        if registered.config == {"addon": "actualprefix_packages"}
         and registered.sidebar_title
         and registered.show_in_sidebar
-    ] == (["actualprefix_shipments"] if app_sidebar_visible else [])
+    ] == (["actualprefix_packages"] if app_sidebar_visible else [])
     presence = next(
         request
         for request in backend.requests
@@ -559,30 +559,30 @@ async def test_supervised_route_leaves_sidebar_to_app_and_preserves_user_access(
     )
     assert json.loads(presence.body)["administrator_ids"] == [hass_admin_user.id]
     assert await hass.config_entries.async_unload(entry.entry_id)
-    assert "shipments" not in hass.data[frontend.DATA_PANELS]
-    assert ("actualprefix_shipments" in hass.data[frontend.DATA_PANELS]) is (
+    assert "packages" not in hass.data[frontend.DATA_PANELS]
+    assert ("actualprefix_packages" in hass.data[frontend.DATA_PANELS]) is (
         app_sidebar_visible
     )
     assert await hass.config_entries.async_setup(entry.entry_id)
     await hass.async_block_till_done(wait_background_tasks=True)
-    reloaded = hass.data[frontend.DATA_PANELS]["shipments"]
+    reloaded = hass.data[frontend.DATA_PANELS]["packages"]
     assert reloaded.sidebar_title is None
     assert reloaded.show_in_sidebar is False
-    assert reloaded.config == {"addon": "actualprefix_shipments"}
+    assert reloaded.config == {"addon": "actualprefix_packages"}
     assert reloaded.require_admin is False
 
 
 async def test_removing_entry_deletes_only_its_checkpoint_and_repairs(
     hass: HomeAssistant, entry, backend: Backend
 ) -> None:
-    other = Store(hass, 1, "shipments.other.events")
+    other = Store(hass, 1, "packages.other.events")
     await other.async_save({"after": 99})
     backend.version = "0.0.1"
     await entry.runtime_data.async_refresh()
     assert ir.async_get(hass).async_get_issue(DOMAIN, "version_mismatch")
     assert await hass.config_entries.async_remove(entry.entry_id)
     assert (
-        await Store(hass, 1, f"shipments.{entry.entry_id}.events").async_load() is None
+        await Store(hass, 1, f"packages.{entry.entry_id}.events").async_load() is None
     )
-    assert await Store(hass, 1, "shipments.other.events").async_load() == {"after": 99}
+    assert await Store(hass, 1, "packages.other.events").async_load() == {"after": 99}
     assert not ir.async_get(hass).async_get_issue(DOMAIN, "version_mismatch")

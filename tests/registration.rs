@@ -1,4 +1,4 @@
-use shipments::shipping_api::easypost::EasyPostClient;
+use packages::shipping_api::easypost::EasyPostClient;
 use std::{
     io::{Read, Write},
     net::{TcpListener, TcpStream},
@@ -12,8 +12,7 @@ use std::{
     time::Duration,
 };
 
-use serde::{Deserialize, Serialize};
-use shipments::{
+use packages::{
     models::{
         CreateShipment, Direction, InputTracking, Patch, RegistrationState, Shipment, Status,
         UpdateShipment,
@@ -21,6 +20,7 @@ use shipments::{
     store::Store,
     sync::SyncWorker,
 };
+use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
 
 const NUMBER: &str = "9400100000000000000001";
@@ -258,7 +258,7 @@ fn read_request(mut stream: TcpStream) -> Option<(TcpStream, String, String, Vec
     stream.read_exact(&mut body).ok()?;
     Some((stream, method, target, body))
 }
-fn spawn(worker: SyncWorker) -> tokio::task::JoinHandle<Result<bool, shipments::error::Error>> {
+fn spawn(worker: SyncWorker) -> tokio::task::JoinHandle<Result<bool, packages::error::Error>> {
     tokio::spawn(async move { worker.tick().await })
 }
 
@@ -857,7 +857,7 @@ async fn terminal_correction_during_outbound_pacing_cancels_registration() {
         .set_override(
             shipment.id,
             shipment.revision,
-            Some(shipments::models::SetOverride {
+            Some(packages::models::SetOverride {
                 status: Status::Delivered,
                 reason: "Received during registration".into(),
             }),
@@ -898,7 +898,7 @@ async fn terminal_correction_during_outbound_pacing_cancels_registration() {
 #[tokio::test]
 async fn terminal_correction_cancels_a_reconciled_post_and_releases_its_lease_for_explicit_refresh()
 {
-    use shipments::models::SetOverride;
+    use packages::models::SetOverride;
     let fixture = Fixture::new().await;
     let shipment = fixture.shipment().await;
     sqlx::query("UPDATE shipments SET registration_started_at=unixepoch()-60 WHERE id=?")
@@ -966,7 +966,7 @@ async fn terminal_correction_cancels_a_reconciled_post_and_releases_its_lease_fo
 
 #[tokio::test]
 async fn legacy_fedex_configuration_block_is_cleared_by_a_verified_carrier_correction() {
-    use shipments::api;
+    use packages::api;
     let fixture = Fixture::new().await;
     let shipment = fixture
         .store
@@ -1042,11 +1042,7 @@ async fn legacy_fedex_configuration_block_is_cleared_by_a_verified_carrier_corre
         )),
     )
     .unwrap();
-    let endpoint = format!(
-        "http://{}/v1/shipments/{}",
-        server.local_addr(),
-        shipment.id
-    );
+    let endpoint = format!("http://{}/v1/packages/{}", server.local_addr(), shipment.id);
     let task = tokio::spawn(async move {
         reqwest::Client::new()
             .patch(endpoint)
@@ -1127,9 +1123,9 @@ async fn ordinary_fedex_resolves_before_registration_and_replay_never_registers_
         let mut provider = Provider::new();
         let client = EasyPostClient::for_loopback("registration-test-key", &provider.base).unwrap();
         let owner = "carrier-default-owner-credential-at-least-32-bytes";
-        let server = shipments::api::start(
+        let server = packages::api::start(
             "127.0.0.1:0".parse().unwrap(),
-            Arc::new(shipments::api::Context::new(
+            Arc::new(packages::api::Context::new(
                 fixture.store.clone(),
                 owner,
                 None,
@@ -1137,7 +1133,7 @@ async fn ordinary_fedex_resolves_before_registration_and_replay_never_registers_
             )),
         )
         .unwrap();
-        let endpoint = format!("http://{}/v1/shipments", server.local_addr());
+        let endpoint = format!("http://{}/v1/packages", server.local_addr());
         let body = serde_json::json!({"direction":"inbound","title":"Synthetic default route parcel", "tracking":{"number":NUMBER,"carrier":"fedex"}});
         let send = |body: serde_json::Value| {
             let request = reqwest::Client::new()

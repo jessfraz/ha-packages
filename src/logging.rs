@@ -484,7 +484,7 @@ fn route_template(uri: &str) -> &'static str {
         "/app.js" => "/app.js",
         "/style.css" => "/style.css",
         "/openapi.json" => "/openapi.json",
-        "/v1/shipments" => "/v1/shipments",
+        "/v1/packages" => "/v1/packages",
         "/v1/carriers" => "/v1/carriers",
         "/v1/delivery-estimates" => "/v1/delivery-estimates",
         "/v1/events" => "/v1/events",
@@ -515,17 +515,17 @@ fn route_template(uri: &str) -> &'static str {
                 (Some(""), Some("v1"), Some("agents"), Some(id), None, None) if !id.is_empty() => {
                     "/v1/agents/{id}"
                 }
-                (Some(""), Some("v1"), Some("shipments"), Some(id), suffix, None)
+                (Some(""), Some("v1"), Some("packages"), Some(id), suffix, None)
                     if !id.is_empty() =>
                 {
                     match suffix {
-                        None => "/v1/shipments/{id}",
-                        Some("sources") => "/v1/shipments/{id}/sources",
-                        Some("status-override") => "/v1/shipments/{id}/status-override",
-                        Some("archive") => "/v1/shipments/{id}/archive",
-                        Some("refresh") => "/v1/shipments/{id}/refresh",
-                        Some("amazon") => "/v1/shipments/{id}/amazon",
-                        Some("events") => "/v1/shipments/{id}/events",
+                        None => "/v1/packages/{id}",
+                        Some("sources") => "/v1/packages/{id}/sources",
+                        Some("status-override") => "/v1/packages/{id}/status-override",
+                        Some("archive") => "/v1/packages/{id}/archive",
+                        Some("refresh") => "/v1/packages/{id}/refresh",
+                        Some("amazon") => "/v1/packages/{id}/amazon",
+                        Some("events") => "/v1/packages/{id}/events",
                         _ => "unmatched",
                     }
                 }

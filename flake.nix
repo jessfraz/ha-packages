@@ -1,5 +1,5 @@
 {
-  description = "Shipments development environment";
+  description = "Packages development environment";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
@@ -53,9 +53,9 @@
         };
       };
     in rec {
-      shipments = package "shipments";
-      ha-shipments = package "ha-shipments";
-      default = shipments;
+      packages = package "packages";
+      ha-packages = package "ha-packages";
+      default = packages;
     });
     apps = forAllSystems (system: let
       app = name: {
@@ -63,9 +63,9 @@
         program = "${self.packages.${system}.${name}}/bin/${name}";
       };
     in {
-      shipments = app "shipments";
-      ha-shipments = app "ha-shipments";
-      default = app "shipments";
+      packages = app "packages";
+      ha-packages = app "ha-packages";
+      default = app "packages";
     });
     devShells = forAllSystems (system: let
       pkgs = import nixpkgs {

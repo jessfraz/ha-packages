@@ -18,7 +18,7 @@ from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.service_info.hassio import HassioServiceInfo
 from pytest_homeassistant.common import MockConfigEntry
 
-from custom_components.shipments.const import (
+from custom_components.packages.const import (
     CONF_ADDON_SLUG,
     CONF_BACKEND_URL,
     CONF_TOKEN,
@@ -137,7 +137,7 @@ async def test_reauth_updates_existing_entry(
 
 
 DISCOVERY_UUID = "019c6e27e55b73d187d84e01f1f75043"
-APP_SLUG = "testrepo_shipments"
+APP_SLUG = "testrepo_packages"
 
 
 def app_discovery(
@@ -145,7 +145,7 @@ def app_discovery(
 ) -> HassioServiceInfo:
     return HassioServiceInfo(
         config={CONF_BACKEND_URL: backend.url, CONF_TOKEN: token},
-        name="Shipments",
+        name="Packages",
         slug=APP_SLUG,
         uuid=DISCOVERY_UUID,
     )
@@ -178,7 +178,7 @@ async def supervisor(hass: HomeAssistant, aiohttp_server, socket_enabled, monkey
         session=async_get_clientsession(hass),
     )
     monkeypatch.setattr(
-        "custom_components.shipments.config_flow.is_hassio", lambda hass: True
+        "custom_components.packages.config_flow.is_hassio", lambda hass: True
     )
     monkeypatch.setattr(
         "homeassistant.components.hassio.get_supervisor_client",

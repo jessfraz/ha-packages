@@ -1,4 +1,4 @@
-use shipments::{
+use packages::{
     models::{CreateShipment, InputTracking, Shipment},
     store::Store,
 };
@@ -12,13 +12,13 @@ struct Fixture {
 impl Fixture {
     async fn new() -> Self {
         let directory = tempfile::tempdir().unwrap();
-        let store = Store::open(&directory.path().join("shipments.sqlite3"))
+        let store = Store::open(&directory.path().join("packages.sqlite3"))
             .await
             .unwrap();
         let shipment = store
             .create(
                 CreateShipment {
-                    direction: shipments::models::Direction::Inbound,
+                    direction: packages::models::Direction::Inbound,
                     title: "Refresh test parcel".into(),
                     merchant: None,
                     order_reference: None,
@@ -59,7 +59,7 @@ impl Fixture {
 }
 
 #[tokio::test]
-async fn refresh_cooldown_covers_success_failures_and_terminal_shipments() {
+async fn refresh_cooldown_covers_success_failures_and_terminal_packages() {
     let fixture = Fixture::new().await;
     for (terminal, failed, already_due) in [
         (false, false, false),

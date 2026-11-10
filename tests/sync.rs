@@ -1,6 +1,6 @@
-use shipments::shipping_api::easypost::EasyPostClient;
-use shipments::shipping_api::error::Rejection as TrackerRejection;
-use shipments::shipping_api::error::{Error as ShippingError, ErrorKind};
+use packages::shipping_api::easypost::EasyPostClient;
+use packages::shipping_api::error::Rejection as TrackerRejection;
+use packages::shipping_api::error::{Error as ShippingError, ErrorKind};
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
@@ -9,13 +9,13 @@ use std::sync::{Arc, mpsc};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
-use serde::{Deserialize, Serialize};
-use shipments::models::{
+use packages::models::{
     CarrierEvent, CreateShipment, EventKind, InputTracking, Patch, SetOverride, Shipment, Status,
     TrackingLocation, UpdateShipment,
 };
-use shipments::store::Store;
-use shipments::sync::SyncWorker;
+use packages::store::Store;
+use packages::sync::SyncWorker;
+use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
 
 struct Fixture {
@@ -27,7 +27,7 @@ struct Fixture {
 impl Fixture {
     async fn new() -> Self {
         let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("shipments.sqlite3");
+        let path = directory.path().join("packages.sqlite3");
         let store = Store::open(&path).await.unwrap();
         Self {
             _directory: directory,
@@ -40,7 +40,7 @@ impl Fixture {
         self.store
             .create(
                 CreateShipment {
-                    direction: shipments::models::Direction::Inbound,
+                    direction: packages::models::Direction::Inbound,
                     title: "Replacement cable".into(),
                     merchant: None,
                     order_reference: None,
@@ -375,7 +375,7 @@ fn read_request(mut stream: TcpStream) -> Option<ParsedRequest> {
 
 fn start_tick(
     worker: &SyncWorker,
-) -> tokio::task::JoinHandle<Result<bool, shipments::error::Error>> {
+) -> tokio::task::JoinHandle<Result<bool, packages::error::Error>> {
     let worker = worker.clone();
     tokio::spawn(async move { worker.tick().await })
 }
@@ -407,7 +407,7 @@ async fn observe(
     let request = provider.request().await;
     let request = if request.path.starts_with("/v2/trackers?") {
         // New registrations must complete their filtered lookup before POST.
-        // Already registered shipments go straight to their tracker GET.
+        // Already registered packages go straight to their tracker GET.
         request.empty_tracker_search(number);
         let registration = provider.request().await;
         assert_eq!(registration.method, "POST");
@@ -561,7 +561,7 @@ async fn verified_creates_preserve_poll_cadence_and_retrieve_without_registering
             .store
             .create(
                 CreateShipment {
-                    direction: shipments::models::Direction::Inbound,
+                    direction: packages::models::Direction::Inbound,
                     title: "Verified shipment".into(),
                     merchant: None,
                     order_reference: None,
@@ -640,7 +640,7 @@ async fn canonical_carrier_changes_invalidate_stale_tracking_edits_and_preserve_
         )
         .await
         .expect_err("the observed carrier must invalidate the earlier tracking edit");
-    assert!(matches!(error, shipments::error::Error::Precondition));
+    assert!(matches!(error, packages::error::Error::Precondition));
     let current = fixture.store.get(shipment.id).await.unwrap();
     assert_eq!(current.revision, stale.revision + 1);
     assert_eq!(current.tracking.carrier.as_str(), "USPS");
@@ -1137,7 +1137,7 @@ async fn registration_accepts_unscanned_trackers_and_checks_the_returned_carrier
         provider.request().await.tracker("TRACK-NO-SCANS", status);
         let tracker = task.await.unwrap().unwrap();
         assert_eq!(tracker.status, status);
-        assert_eq!(tracker.carrier, shipments::carrier::Carrier::Usps);
+        assert_eq!(tracker.carrier, packages::carrier::Carrier::Usps);
         assert!(tracker.public_url.is_none());
     }
 
@@ -1521,7 +1521,7 @@ async fn connection_check_rejects_invalid_and_oversized_success_responses() {
 }
 
 #[tokio::test]
-async fn rate_limit_pauses_all_provider_operations_and_leaves_other_shipments_due() {
+async fn rate_limit_pauses_all_provider_operations_and_leaves_other_packages_due() {
     let fixture = Fixture::new().await;
     let shipment = fixture.shipment("WAITING-TRACK").await;
     let mut provider = Provider::start();
@@ -1665,7 +1665,7 @@ async fn unscanned_labels_slow_down_until_carrier_status_changes() {
 }
 
 #[tokio::test]
-async fn provider_logs_correlate_requests_and_shipments_without_exposing_private_data() {
+async fn provider_logs_correlate_requests_and_packages_without_exposing_private_data() {
     #[derive(Clone, Default)]
     struct Capture(Arc<std::sync::Mutex<Vec<u8>>>);
     impl Write for Capture {
@@ -1679,7 +1679,7 @@ async fn provider_logs_correlate_requests_and_shipments_without_exposing_private
     }
     #[derive(Deserialize)]
     struct Entry {
-        provider: shipments::shipping_api::types::ProviderId,
+        provider: packages::shipping_api::types::ProviderId,
         timestamp: String,
         event: String,
         request_id: uuid::Uuid,
@@ -1696,7 +1696,7 @@ async fn provider_logs_correlate_requests_and_shipments_without_exposing_private
     let mut provider = Provider::start();
     let client = provider
         .client()
-        .with_logger(shipments::logging::with_writer(capture.clone()));
+        .with_logger(packages::logging::with_writer(capture.clone()));
     let request_id = uuid::Uuid::now_v7();
     let provider_request_id = uuid::Uuid::now_v7();
     let task_client = client.with_request_id(&request_id.to_string());
@@ -1722,9 +1722,9 @@ async fn provider_logs_correlate_requests_and_shipments_without_exposing_private
     )
     .await;
     let owner = "logging-test-owner-credential-at-least-32-bytes";
-    let server = shipments::api::start(
+    let server = packages::api::start(
         "127.0.0.1:0".parse().unwrap(),
-        Arc::new(shipments::api::Context::new(
+        Arc::new(packages::api::Context::new(
             fixture.store.clone(),
             owner,
             None,
@@ -1802,7 +1802,7 @@ async fn provider_logs_correlate_requests_and_shipments_without_exposing_private
     for entry in entries {
         assert_eq!(
             entry.provider,
-            shipments::shipping_api::types::ProviderId::EasyPost
+            packages::shipping_api::types::ProviderId::EasyPost
         );
         time::OffsetDateTime::parse(
             &entry.timestamp,
@@ -1829,7 +1829,7 @@ async fn carrier_history_merges_deduplicates_and_survives_restart_and_partial_sn
     ));
     let tracker = registration.await.unwrap().unwrap();
     let input = CreateShipment {
-        direction: shipments::models::Direction::Inbound,
+        direction: packages::models::Direction::Inbound,
         title: "History test parcel".into(),
         merchant: None,
         order_reference: None,

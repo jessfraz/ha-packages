@@ -10,8 +10,8 @@ from homeassistant.setup import async_setup_component
 
 from .conftest import Backend, FixtureShipment
 
-GATEWAY = "sensor.shipments_inbound_active"
-TOOL = "shipments__query"
+GATEWAY = "sensor.packages_inbound_active"
+TOOL = "packages__query"
 
 
 async def assist_api(hass: HomeAssistant, user_id: str) -> llm.APIInstance:
@@ -39,7 +39,7 @@ async def test_real_assist_api_discovers_tool_only_when_exposed(
     exposed_entities.async_expose_entity(hass, "conversation", GATEWAY, True)
     api = await assist_api(hass, hass_user.id)
     tool = next(tool for tool in api.tools if tool.name == TOOL)
-    assert tool.integration == "shipments"
+    assert tool.integration == "packages"
     assert tool.annotations.read_only
     assert tool.annotations.idempotent
     assert not tool.annotations.destructive
@@ -54,7 +54,7 @@ async def test_native_intent_and_actual_tool_return_the_same_safe_answer(
     hass: HomeAssistant, entry, hass_user, backend: Backend
 ) -> None:
     exposed_entities.async_expose_entity(hass, "conversation", GATEWAY, True)
-    backend.responses[("GET", "/v1/shipments")] = (
+    backend.responses[("GET", "/v1/packages")] = (
         200,
         json.dumps(
             {
@@ -68,7 +68,7 @@ async def test_native_intent_and_actual_tool_return_the_same_safe_answer(
     native = await intent.async_handle(
         hass,
         "conversation",
-        "ShipmentsQuery",
+        "PackagesQuery",
         {"query": {"value": "out_for_delivery"}},
         context=Context(user_id=hass_user.id),
         language="en",
@@ -92,7 +92,7 @@ async def test_native_intent_and_actual_tool_return_the_same_safe_answer(
     ):
         assert private not in payload
     assert all(
-        request.method == "GET" and request.path == "/v1/shipments"
+        request.method == "GET" and request.path == "/v1/packages"
         for request in backend.requests
     )
 
@@ -117,7 +117,7 @@ async def test_real_tool_reports_backend_failure_without_exposing_response(
     hass: HomeAssistant, entry, hass_user, backend: Backend
 ) -> None:
     exposed_entities.async_expose_entity(hass, "conversation", GATEWAY, True)
-    backend.responses[("GET", "/v1/shipments")] = (503, b"SECRET provider details", {})
+    backend.responses[("GET", "/v1/packages")] = (503, b"SECRET provider details", {})
     api = await assist_api(hass, hass_user.id)
     result = await api.async_call_tool(
         llm.ToolInput(TOOL, {"query": "out_for_delivery"})

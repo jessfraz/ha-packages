@@ -1,6 +1,6 @@
 use std::{sync::Arc, time::Duration};
 
-use shipments::{
+use packages::{
     models::{
         CarrierEvent, CarrierTracking, CreateShipment, Direction, EventKind, InputTracking,
         RegistrationState, SetOverride, Shipment, Status,
@@ -57,8 +57,8 @@ impl ContractApi {
 impl ShippingApi for ContractApi {
     fn detect_carrier<'a>(
         &'a self,
-        _: &'a shipments::models::InputTracking,
-    ) -> ApiFuture<'a, Option<shipments::carrier::Carrier>> {
+        _: &'a packages::models::InputTracking,
+    ) -> ApiFuture<'a, Option<packages::carrier::Carrier>> {
         Box::pin(async { Ok(None) })
     }
 
@@ -157,7 +157,7 @@ impl Drop for Reservation {
 
 fn observation(status: Status) -> Tracker {
     Tracker {
-        provider: shipments::shipping_api::types::ProviderId::EasyPost,
+        provider: packages::shipping_api::types::ProviderId::EasyPost,
         id: OPAQUE_ID.into(),
         tracking_code: NUMBER.into(),
         carrier: "USPS".parse().unwrap(),

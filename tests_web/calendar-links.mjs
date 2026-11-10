@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { installCalendarNavigation } from "../custom_components/shipments/frontend/calendar-links.js";
+import { installCalendarNavigation } from "../custom_components/packages/frontend/calendar-links.js";
 
 const ID = "0193c69f-e5c4-7e93-b6cb-8172dacb617e";
-const CALENDAR = "calendar.shipments_inbound_deliveries";
+const CALENDAR = "calendar.packages_inbound_deliveries";
 
 class CalendarElement extends EventTarget {
   hass = {
@@ -11,8 +11,8 @@ class CalendarElement extends EventTarget {
       [CALENDAR]: {
         state: "off",
         attributes: {
-          shipments_calendar: true,
-          shipments_app_url: "/shipments/shipments/",
+          packages_calendar: true,
+          packages_app_url: "/packages/packages/",
         },
       },
     },
@@ -38,17 +38,17 @@ test("native calendar event opens its shipment through supervised ingress", t =>
   const destinations = [];
   t.after(installCalendarNavigation(calendar, url => destinations.push(url)));
   const event = calendar.open();
-  assert.deepEqual(destinations, [`/shipments/shipments/shipment%3D${ID}`]);
+  assert.deepEqual(destinations, [`/packages/packages/shipment%3D${ID}`]);
   assert.equal(event.cancelBubble, true);
 });
 
 test("standalone calendar opens the configured service and exact shipment hash", t => {
   const calendar = new CalendarElement();
-  calendar.hass.states[CALENDAR].attributes.shipments_app_url = "https://shipments.example:8443/";
+  calendar.hass.states[CALENDAR].attributes.packages_app_url = "https://packages.example:8443/";
   const destinations = [];
   t.after(installCalendarNavigation(calendar, url => destinations.push(url)));
   calendar.open();
-  assert.deepEqual(destinations, [`https://shipments.example:8443/#shipment=${ID}`]);
+  assert.deepEqual(destinations, [`https://packages.example:8443/#shipment=${ID}`]);
 });
 
 test("other calendars, dialogs and malformed event identities retain native behavior", t => {
@@ -71,7 +71,7 @@ test("unavailable, unknown, unloaded and unrelated entities retain native behavi
     assert.equal(calendar.open().cancelBubble, false);
   }
   calendar.hass.states[CALENDAR].state = "off";
-  calendar.hass.states[CALENDAR].attributes.shipments_calendar = false;
+  calendar.hass.states[CALENDAR].attributes.packages_calendar = false;
   assert.equal(calendar.open().cancelBubble, false);
   delete calendar.hass.states[CALENDAR];
   assert.equal(calendar.open().cancelBubble, false);
@@ -85,7 +85,7 @@ test("unsafe or absent destination metadata cannot take over a calendar click", 
     "https://user:secret@example.test/", "https://example.test/other/",
     "https://example.test/?redirect=evil", "https://example.test/#other",
   ]) {
-    calendar.hass.states[CALENDAR].attributes.shipments_app_url = base;
+    calendar.hass.states[CALENDAR].attributes.packages_app_url = base;
     assert.equal(calendar.open().cancelBubble, false);
   }
 });

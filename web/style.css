@@ -376,7 +376,7 @@ label {
   min-width: 130px;
 }
 .view-note { margin: 0 0 18px; font-size: 13px; }
-.shipments {
+.packages {
   display: grid;
   gap: 10px;
 }

@@ -21,7 +21,7 @@ from pytest_homeassistant.common import (
     async_fire_time_changed,
 )
 
-from custom_components.shipments.const import (
+from custom_components.packages.const import (
     CONF_ADDON_SLUG,
     CONF_BACKEND_URL,
     CONF_TOKEN,
@@ -30,7 +30,7 @@ from custom_components.shipments.const import (
 
 from .conftest import Backend
 
-APP_SLUG = "testrepo_shipments"
+APP_SLUG = "testrepo_packages"
 PRESENCE_PATH = "/v1/integration/presence"
 
 
@@ -68,7 +68,7 @@ async def inventory(hass: HomeAssistant, aiohttp_server, socket_enabled, monkeyp
         session=async_get_clientsession(hass),
     )
     monkeypatch.setattr(
-        "custom_components.shipments.coordinator.is_hassio", lambda hass: True
+        "custom_components.packages.coordinator.is_hassio", lambda hass: True
     )
     monkeypatch.setattr(
         "homeassistant.components.hassio.get_supervisor_client",
@@ -176,7 +176,7 @@ async def test_loaded_presence_contains_only_matching_backup_coverage(
         },
     }
     assert reports[0].headers["Authorization"] == "Bearer private-integration-token"
-    assert reports[0].headers["X-Shipments-Actor"] == "ha:integration"
+    assert reports[0].headers["X-Packages-Actor"] == "ha:integration"
     assert "Private household" not in reports[0].body.decode()
     assert "private-backup-id" not in reports[0].body.decode()
     assert APP_SLUG not in reports[0].body.decode()
@@ -278,11 +278,11 @@ async def test_unavailable_backups_are_reported_honestly(
     elif failure == "timeout":
         inventory.delay = 0.03
         monkeypatch.setattr(
-            "custom_components.shipments.coordinator._BACKUP_TIMEOUT_SECONDS", 0.01
+            "custom_components.packages.coordinator._BACKUP_TIMEOUT_SECONDS", 0.01
         )
     else:
         monkeypatch.setattr(
-            "custom_components.shipments.coordinator.is_hassio", lambda hass: False
+            "custom_components.packages.coordinator.is_hassio", lambda hass: False
         )
     await setup_paired(hass, backend)
     report = json.loads(check_ins(backend)[0].body)

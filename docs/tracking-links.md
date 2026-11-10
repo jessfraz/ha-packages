@@ -24,7 +24,7 @@ the other app scripts.
 | OnTrac, OntracV3, LaserShipV2 | [Official tracking form](https://www.ontrac.com/tracking/) submits the `number` query parameter |
 
 Routes were checked against official deployed applications and representative
-real shipments on 2026-10-30. Real Logistics testing established that a TBA
+real packages on 2026-10-30. Real Logistics testing established that a TBA
 number can resolve on Amazon's recipient tracker while Swiship reports it
 missing. Sway's public number lookup resolves its opaque recipient URL, so the
 UI links to that lookup rather than constructing the opaque destination.

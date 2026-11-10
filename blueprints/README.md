@@ -1,20 +1,20 @@
 # Notification blueprints
 
-Optional automations for the Home Assistant Companion app. Requires Shipments
+Optional automations for the Home Assistant Companion app. Requires Packages
 0.6.1 or newer and a phone or tablet registered with Home Assistant.
 
 | Blueprint | What it sends | Import |
 | --- | --- | --- |
-| [Delivery updates](automation/shipments/shipment_updates.yaml) | A package title, carrier, direction, and delivery status. Tap to open the package. | [Import](https://my.home-assistant.io/redirect/blueprint_import/?blueprint_url=https%3A%2F%2Fgithub.com%2Fjessfraz%2Fha-packages%2Fblob%2Fmain%2Fblueprints%2Fautomation%2Fshipments%2Fshipment_updates.yaml) |
-| [Tracking problems](automation/shipments/tracking_issues.yaml) | An alert when tracking errors persist for five minutes. Tap to see the affected packages. | [Import](https://my.home-assistant.io/redirect/blueprint_import/?blueprint_url=https%3A%2F%2Fgithub.com%2Fjessfraz%2Fha-packages%2Fblob%2Fmain%2Fblueprints%2Fautomation%2Fshipments%2Ftracking_issues.yaml) |
-| [Daily delivery summary](automation/shipments/delivery_summary.yaml) | Inbound packages out for delivery and packages delivered today, at a time you choose. | [Import](https://my.home-assistant.io/redirect/blueprint_import/?blueprint_url=https%3A%2F%2Fgithub.com%2Fjessfraz%2Fha-packages%2Fblob%2Fmain%2Fblueprints%2Fautomation%2Fshipments%2Fdelivery_summary.yaml) |
+| [Delivery updates](automation/packages/shipment_updates.yaml) | A package title, carrier, direction, and delivery status. Tap to open the package. | [Import](https://my.home-assistant.io/redirect/blueprint_import/?blueprint_url=https%3A%2F%2Fgithub.com%2Fjessfraz%2Fha-packages%2Fblob%2Fmain%2Fblueprints%2Fautomation%2Fpackages%2Fshipment_updates.yaml) |
+| [Tracking problems](automation/packages/tracking_issues.yaml) | An alert when tracking errors persist for five minutes. Tap to see the affected packages. | [Import](https://my.home-assistant.io/redirect/blueprint_import/?blueprint_url=https%3A%2F%2Fgithub.com%2Fjessfraz%2Fha-packages%2Fblob%2Fmain%2Fblueprints%2Fautomation%2Fpackages%2Ftracking_issues.yaml) |
+| [Daily delivery summary](automation/packages/delivery_summary.yaml) | Inbound packages out for delivery and packages delivered today, at a time you choose. | [Import](https://my.home-assistant.io/redirect/blueprint_import/?blueprint_url=https%3A%2F%2Fgithub.com%2Fjessfraz%2Fha-packages%2Fblob%2Fmain%2Fblueprints%2Fautomation%2Fpackages%2Fdelivery_summary.yaml) |
 
 Import a blueprint, select **Create automation**, and choose your phone and
 shipment entities. Defaults use the integration's standard entity IDs; choose
 the corresponding entities if you renamed them. Nothing is enabled just by
 importing a blueprint. Create a separate automation for another phone.
 
-Delivery updates default to inbound shipments. Choose outbound or both, and
+Delivery updates default to inbound packages. Choose outbound or both, and
 select the statuses you want. Updates for a package replace its previous
 notification. Restored states and consecutive repeated event IDs do not send
 alerts. Events are delivered at least once, so these notifications should not

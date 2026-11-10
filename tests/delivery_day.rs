@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use dropshot::ResultsPage;
-use shipments::{
+use packages::{
     api,
     carrier::Carrier,
     delivery::DeliveryWindow,
@@ -195,7 +195,7 @@ async fn actual_delivery_window_is_half_open_inbound_and_independent_of_manual_s
     let mut visible = Vec::new();
     loop {
         let request = client
-            .get(format!("{origin}/v1/shipments"))
+            .get(format!("{origin}/v1/packages"))
             .bearer_auth(owner)
             .query(&[("limit", "1")]);
         let request = if let Some(token) = &token {
@@ -219,7 +219,7 @@ async fn actual_delivery_window_is_half_open_inbound_and_independent_of_manual_s
     }
     expected.reverse();
     assert_eq!(visible, expected);
-    for route in ["shipments", "summary"] {
+    for route in ["packages", "summary"] {
         let response = client
             .get(format!("{origin}/v1/{route}"))
             .bearer_auth(owner)

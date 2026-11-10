@@ -440,7 +440,7 @@ impl AfterShipClient {
             .timeout(Duration::from_secs(20))
             .redirect(reqwest::redirect::Policy::none())
             .retry(reqwest::retry::never())
-            .user_agent(concat!("shipments/", env!("CARGO_PKG_VERSION")))
+            .user_agent(concat!("packages/", env!("CARGO_PKG_VERSION")))
             .build()
             .map_err(|_| provider_error(ErrorKind::Configuration))?;
         Ok(Self {

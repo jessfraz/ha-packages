@@ -27,14 +27,14 @@ from homeassistant.helpers.service_info.hassio import HassioServiceInfo
 from homeassistant.util import dt as dt_util
 from pytest_homeassistant.common import async_fire_time_changed
 
-from custom_components.shipments.const import (
+from custom_components.packages.const import (
     CONF_ADDON_SLUG,
     CONF_BACKEND_URL,
     CONF_TOKEN,
     DOMAIN,
     SENSOR_KEYS,
 )
-from custom_components.shipments.voice import (
+from custom_components.packages.voice import (
     ShipmentDay,
     ShipmentQuery,
     VoiceRequest,
@@ -45,7 +45,7 @@ from .conftest import get_state
 
 OWNER_TOKEN = "test-owner-credential-at-least-32-characters"
 INTEGRATION_TOKEN = "test-integration-credential-at-least-32-characters"
-PREFIX = "/api/shipments/v1"
+PREFIX = "/api/packages/v1"
 
 
 @dataclass
@@ -63,17 +63,17 @@ async def produce_database(database: Path, scenario: str) -> None:
         "calendar": (
             "ha_events",
             "calendar_projection_filters_and_pages_normalized_instants_without_tracking_history",
-            "SHIPMENTS_TEST_CALENDAR_DATABASE",
+            "PACKAGES_TEST_CALENDAR_DATABASE",
         ),
         "native": (
             "ha_events",
             "native_adapter_fixture_uses_the_real_store",
-            "SHIPMENTS_TEST_NATIVE_DATABASE",
+            "PACKAGES_TEST_NATIVE_DATABASE",
         ),
         "typed_dates": (
             "typed_delivery_dates",
             "typed_provider_dates_flow_through_calendar_sorts_and_civil_day_queries",
-            "SHIPMENTS_TEST_TYPED_DATE_DATABASE",
+            "PACKAGES_TEST_TYPED_DATE_DATABASE",
         ),
     }[scenario]
     process = await asyncio.create_subprocess_exec(
@@ -110,16 +110,15 @@ async def rust_backend(
     request: pytest.FixtureRequest,
 ) -> AsyncIterator[RustBackend]:
     """Launch the actual binary with disposable SQLite and no provider access."""
-    binary = Path(os.environ.get("SHIPMENTS_TEST_BINARY", "target/debug/shipments"))
+    binary = Path(os.environ.get("PACKAGES_TEST_BINARY", "target/debug/packages"))
     if not await asyncio.to_thread(binary.is_file):
-        pytest.fail("Build the backend first: cargo build --locked --bin shipments")
+        pytest.fail("Build the backend first: cargo build --locked --bin packages")
     environment = {
         key: value
         for key, value in os.environ.items()
-        if not key.startswith(("SHIPMENTS_", "SUPERVISOR"))
-        and key != "EASYPOST_API_KEY"
+        if not key.startswith(("PACKAGES_", "SUPERVISOR")) and key != "EASYPOST_API_KEY"
     }
-    database = tmp_path / "shipments.sqlite3"
+    database = tmp_path / "packages.sqlite3"
     mode = getattr(request, "param", False)
     if mode in {"calendar", "native", "typed_dates"}:
         await produce_database(database, mode)
@@ -137,8 +136,8 @@ async def rust_backend(
         await asyncio.to_thread(options.write_text, "{}")
         arguments.extend(("--options", str(options)))
     else:
-        environment["SHIPMENTS_API_TOKEN"] = OWNER_TOKEN
-        environment["SHIPMENTS_INTEGRATION_TOKEN"] = INTEGRATION_TOKEN
+        environment["PACKAGES_API_TOKEN"] = OWNER_TOKEN
+        environment["PACKAGES_INTEGRATION_TOKEN"] = INTEGRATION_TOKEN
     origin = f"http://127.0.0.1:{unused_tcp_port}"
     process = await asyncio.create_subprocess_exec(
         str(await asyncio.to_thread(binary.resolve)),
@@ -216,7 +215,7 @@ async def test_ha_to_rust_contract(
     admin = await hass_client()
     user = await hass_client(hass_user_token)
     response = await user.post(
-        f"{PREFIX}/shipments",
+        f"{PREFIX}/packages",
         json={
             "title": "Office supplies",
             "direction": "inbound",
@@ -226,7 +225,7 @@ async def test_ha_to_rust_contract(
     )
     assert response.status == 400
     response = await user.post(
-        f"{PREFIX}/shipments",
+        f"{PREFIX}/packages",
         json={
             "title": "Office supplies",
             "direction": "inbound",
@@ -248,20 +247,20 @@ async def test_ha_to_rust_contract(
             blocking=True,
             return_response=True,
         )
-    items = (await (await user.get(f"{PREFIX}/shipments")).json())["items"]
+    items = (await (await user.get(f"{PREFIX}/packages")).json())["items"]
     assert len(items) == 2
     shipment = next(item for item in items if item["direction"] == "inbound")
     added = next(item for item in items if item["direction"] == "outbound")
     shipment_id = shipment["id"]
 
-    response = await user.get(f"{PREFIX}/shipments/{shipment_id}")
+    response = await user.get(f"{PREFIX}/packages/{shipment_id}")
     assert response.status == 200
     shipment = await response.json()
     assert shipment["status"] == "expected"
     assert shipment["tracking"] == {"number": "TEST123", "carrier": "USPS"}
     assert shipment["direction"] == "inbound"
     response = await user.patch(
-        f"{PREFIX}/shipments/{shipment_id}",
+        f"{PREFIX}/packages/{shipment_id}",
         json={"title": "Updated office supplies"},
         headers={"If-Match": response.headers["ETag"]},
     )
@@ -274,13 +273,13 @@ async def test_ha_to_rust_contract(
     # Burst writes share the integration's existing refresh cooldown.
     async_fire_time_changed(hass, dt_util.utcnow() + timedelta(seconds=11))
     await hass.async_block_till_done()
-    assert get_state(hass, "sensor.shipments_expected").state == "2"
-    assert get_state(hass, "sensor.shipments_inbound_active").state == "1"
-    assert get_state(hass, "sensor.shipments_outbound_active").state == "1"
+    assert get_state(hass, "sensor.packages_expected").state == "2"
+    assert get_state(hass, "sensor.packages_inbound_active").state == "1"
+    assert get_state(hass, "sensor.packages_outbound_active").state == "1"
 
     # Core authenticates the regular user; the bridge denies their confirmation.
     forbidden = await user.put(
-        f"{PREFIX}/shipments/{shipment_id}/status-override",
+        f"{PREFIX}/packages/{shipment_id}/status-override",
         json={"status": "delivered", "reason": "Received in person"},
         headers={"If-Match": etag},
     )
@@ -300,7 +299,7 @@ async def test_ha_to_rust_contract(
         return_response=True,
     )
     assert action_result == {"id": shipment_id, "revision": 3, "status": "delivered"}
-    response = await admin.get(f"{PREFIX}/shipments/{shipment_id}")
+    response = await admin.get(f"{PREFIX}/packages/{shipment_id}")
     assert response.status == 200
     shipment = await response.json()
     assert shipment["status"] == "delivered"
@@ -309,17 +308,17 @@ async def test_ha_to_rust_contract(
     # HA coalesces burst refreshes; advance its clock through the cooldown.
     async_fire_time_changed(hass, dt_util.utcnow() + timedelta(seconds=22))
     await hass.async_block_till_done()
-    assert get_state(hass, "sensor.shipments_delivered").state == "1"
-    assert get_state(hass, "sensor.shipments_inbound_active").state == "0"
-    assert get_state(hass, "sensor.shipments_outbound_active").state == "1"
+    assert get_state(hass, "sensor.packages_delivered").state == "1"
+    assert get_state(hass, "sensor.packages_inbound_active").state == "0"
+    assert get_state(hass, "sensor.packages_outbound_active").state == "1"
 
     conflict = await admin.patch(
-        f"{PREFIX}/shipments/{shipment_id}",
+        f"{PREFIX}/packages/{shipment_id}",
         json={"title": "Stale edit"},
         headers={"If-Match": etag},
     )
     assert conflict.status == 412
-    events_response = await admin.get(f"{PREFIX}/shipments/{shipment_id}/events")
+    events_response = await admin.get(f"{PREFIX}/packages/{shipment_id}/events")
     assert events_response.status == 200
     events = (await events_response.json())["items"]
     assert [event["actor_id"] for event in events] == [
@@ -342,13 +341,13 @@ async def test_ha_to_rust_contract(
         )
     async_fire_time_changed(hass, dt_util.utcnow() + timedelta(seconds=33))
     await hass.async_block_till_done()
-    assert get_state(hass, "sensor.shipments_active").state == "2"
-    assert get_state(hass, "sensor.shipments_inbound_active").state == "1"
-    assert get_state(hass, "sensor.shipments_inbound_out_for_delivery").state == "1"
-    assert get_state(hass, "sensor.shipments_outbound_active").state == "1"
-    assert get_state(hass, "sensor.shipments_exceptions").state == "1"
-    assert get_state(hass, "sensor.shipments_inbound_exceptions").state == "0"
-    assert get_state(hass, "sensor.shipments_outbound_exceptions").state == "1"
+    assert get_state(hass, "sensor.packages_active").state == "2"
+    assert get_state(hass, "sensor.packages_inbound_active").state == "1"
+    assert get_state(hass, "sensor.packages_inbound_out_for_delivery").state == "1"
+    assert get_state(hass, "sensor.packages_outbound_active").state == "1"
+    assert get_state(hass, "sensor.packages_exceptions").state == "1"
+    assert get_state(hass, "sensor.packages_inbound_exceptions").state == "0"
+    assert get_state(hass, "sensor.packages_outbound_exceptions").state == "1"
 
     # Three persisted transitions occur between polls and finish at the same
     # summary. Native events must deliver all three, independent of count deltas.
@@ -360,18 +359,18 @@ async def test_ha_to_rust_contract(
         if state and state.state != "unavailable" and "event_type" in state.attributes:
             transitions.append(state.attributes["event_type"])
 
-    unsubscribe = async_track_state_change_event(hass, ["event.shipments"], changed)
+    unsubscribe = async_track_state_change_event(hass, ["event.packages"], changed)
     session = async_get_clientsession(hass)
     owner_headers = {"Authorization": f"Bearer {rust_backend.owner_token}"}
 
     async def override(status: str) -> None:
         async with session.get(
-            f"{rust_backend.origin}/v1/shipments/{shipment_id}", headers=owner_headers
+            f"{rust_backend.origin}/v1/packages/{shipment_id}", headers=owner_headers
         ) as current:
             assert current.status == 200
             current_etag = current.headers["ETag"]
         async with session.put(
-            f"{rust_backend.origin}/v1/shipments/{shipment_id}/status-override",
+            f"{rust_backend.origin}/v1/packages/{shipment_id}/status-override",
             headers={**owner_headers, "If-Match": current_etag},
             json={"status": status, "reason": "Verified delivery transition"},
         ) as updated:
@@ -384,8 +383,8 @@ async def test_ha_to_rust_contract(
         await entry.runtime_data.async_refresh()
         await hass.async_block_till_done()
         assert transitions == ["delivered", "exception", "out_for_delivery"]
-        assert get_state(hass, "sensor.shipments_active").state == "2"
-        attributes = get_state(hass, "event.shipments").attributes
+        assert get_state(hass, "sensor.packages_active").state == "2"
+        attributes = get_state(hass, "event.packages").attributes
         assert attributes["shipment_id"] == shipment_id
         assert attributes["title"] == "Updated office supplies"
         assert attributes["carrier"] == "USPS"
@@ -398,7 +397,7 @@ async def test_ha_to_rust_contract(
     await override("delivered")
     assert await hass.config_entries.async_setup(entry.entry_id)
     await hass.async_block_till_done(wait_background_tasks=True)
-    attributes = get_state(hass, "event.shipments").attributes
+    attributes = get_state(hass, "event.packages").attributes
     assert attributes["event_type"] == "delivered"
     assert attributes["event_id"] > last_event_id
 
@@ -411,10 +410,10 @@ async def test_missing_provider_rejects_create_without_persisting_a_shipment(
     headers = {
         "Authorization": f"Bearer {rust_backend.integration_token}",
         "Idempotency-Key": "provider-disabled-admission-regression",
-        "X-Shipments-Actor": "ha:admission-regression-user",
+        "X-Packages-Actor": "ha:admission-regression-user",
     }
     async with session.post(
-        f"{rust_backend.origin}/v1/shipments",
+        f"{rust_backend.origin}/v1/packages",
         headers=headers,
         json={
             "title": "Unverified parcel",
@@ -424,7 +423,7 @@ async def test_missing_provider_rejects_create_without_persisting_a_shipment(
     ) as response:
         assert response.status == 503
     async with session.get(
-        f"{rust_backend.origin}/v1/shipments", headers=headers
+        f"{rust_backend.origin}/v1/packages", headers=headers
     ) as response:
         assert response.status == 200
         assert (await response.json())["items"] == []
@@ -436,7 +435,7 @@ async def test_app_generated_pairing_and_loaded_check_in(
 ) -> None:
     """Pair an empty-options app without asking the user for any credential."""
     discovery_uuid = "019c6e27e55b73d187d84e01f1f75043"
-    addon_slug = "testrepo_shipments"
+    addon_slug = "testrepo_packages"
     session = async_get_clientsession(hass)
     async with session.get(
         f"{rust_backend.origin}/v1/system",
@@ -453,7 +452,7 @@ async def test_app_generated_pairing_and_loaded_check_in(
                 CONF_BACKEND_URL: rust_backend.origin,
                 CONF_TOKEN: rust_backend.integration_token,
             },
-            name="Shipments",
+            name="Packages",
             slug=addon_slug,
             uuid=discovery_uuid,
         ),
@@ -470,7 +469,7 @@ async def test_app_generated_pairing_and_loaded_check_in(
     assert entry.data[CONF_ADDON_SLUG] == addon_slug
     assert entry.data[CONF_BACKEND_URL] == rust_backend.origin
     for key in SENSOR_KEYS:
-        assert get_state(hass, f"sensor.shipments_{key}").state == "0"
+        assert get_state(hass, f"sensor.packages_{key}").state == "0"
 
     async with session.get(
         f"{rust_backend.origin}/v1/installation",
@@ -506,7 +505,7 @@ async def test_real_store_projection_reaches_native_inbound_calendar(
     await hass.async_block_till_done(wait_background_tasks=True)
     client = await hass_client(hass_user_token)
     response = await client.get(
-        "/api/calendars/calendar.shipments_inbound_deliveries",
+        "/api/calendars/calendar.packages_inbound_deliveries",
         params={"start": "2031-02-17T00:00:00Z", "end": "2031-02-20T00:00:00Z"},
     )
     assert response.status == 200
@@ -549,13 +548,13 @@ async def test_real_civil_dates_reach_calendar_day_items_and_assist(
     )
     assert configured["type"] is FlowResultType.CREATE_ENTRY
     await hass.async_block_till_done(wait_background_tasks=True)
-    delivered = get_state(hass, "sensor.shipments_inbound_delivered_today")
+    delivered = get_state(hass, "sensor.packages_inbound_delivered_today")
     items = delivered.attributes["items"]
     item = next(item for item in items if item["title"] == "Civil delivered")
     assert item["delivered_at"] == "2026-10-31"
     assert "Civil estimate" not in {
         item["title"]
-        for item in get_state(hass, "sensor.shipments_inbound_due_today").attributes[
+        for item in get_state(hass, "sensor.packages_inbound_due_today").attributes[
             "items"
         ]
     }
@@ -564,7 +563,7 @@ async def test_real_civil_dates_reach_calendar_day_items_and_assist(
     )
     client = await hass_client(hass.auth.async_create_access_token(refresh_token))
     response = await client.get(
-        "/api/calendars/calendar.shipments_inbound_deliveries",
+        "/api/calendars/calendar.packages_inbound_deliveries",
         params={"start": "2026-10-31T07:00:00Z", "end": "2026-11-03T08:00:00Z"},
     )
     assert response.status == 200
@@ -576,7 +575,7 @@ async def test_real_civil_dates_reach_calendar_day_items_and_assist(
     assert actual["start"] == {"date": "2026-10-31"}
     assert expected["start"] == {"date": "2026-11-01"}
     exposed_entities.async_expose_entity(
-        hass, "conversation", "sensor.shipments_inbound_active", True
+        hass, "conversation", "sensor.packages_inbound_active", True
     )
     answer = await async_query(
         hass, VoiceRequest(ShipmentQuery.DELIVERED), Context(), "conversation"

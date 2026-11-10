@@ -1157,7 +1157,7 @@ impl Store {
         }
         // Refreshes coalesce without disturbing an in-flight check or a retry.
         // An earlier scheduled check stays earlier; otherwise wait at least one
-        // minute after the last provider attempt, even for terminal shipments.
+        // minute after the last provider attempt, even for terminal packages.
         sqlx::query(
             "UPDATE shipments SET registration_state=CASE WHEN ? THEN 'pending' ELSE registration_state END,next_attempt_at=CASE
                  WHEN lease_until>unixepoch()
@@ -2127,7 +2127,7 @@ mod tests {
                 events
             );
         }
-        if let Ok(path) = std::env::var("SHIPMENTS_TEST_TYPED_DATE_QUERY_EVIDENCE") {
+        if let Ok(path) = std::env::var("PACKAGES_TEST_TYPED_DATE_QUERY_EVIDENCE") {
             std::fs::write(path, serde_json::to_string_pretty(&evidence).unwrap()).unwrap();
         }
         store.close().await.unwrap();

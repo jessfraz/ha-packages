@@ -1,7 +1,7 @@
 //! Verified account imports preserve shipment identity and user-owned state.
 //! All numbers, order references and package paths here are synthetic.
 
-use shipments::{
+use packages::{
     amazon::AmazonParcel,
     carrier::Carrier,
     error::Error,
@@ -22,7 +22,7 @@ struct Fixture {
 impl Fixture {
     async fn new() -> Self {
         let directory = tempfile::tempdir().unwrap();
-        let store = Store::open(&directory.path().join("shipments.sqlite3"))
+        let store = Store::open(&directory.path().join("packages.sqlite3"))
             .await
             .unwrap();
         Self {
@@ -150,7 +150,7 @@ async fn repeated_import_and_reopened_store_reuse_one_parcel_without_extra_histo
     assert_eq!((second.id, second.revision), (first.id, first.revision));
     assert_eq!(f.counts().await, (1, 1, 1));
     f.store.close().await.unwrap();
-    let reopened = Store::open(&f._directory.path().join("shipments.sqlite3"))
+    let reopened = Store::open(&f._directory.path().join("packages.sqlite3"))
         .await
         .unwrap();
     let third = reopened.import_amazon(&p, None).await.unwrap();
@@ -367,7 +367,7 @@ async fn reviewed_adoption_preserves_the_existing_record_and_history_after_resta
     assert_eq!(f.counts().await, (counts.0, counts.1 + 1, counts.2 + 1));
 
     f.store.close().await.unwrap();
-    let reopened = Store::open(&f._directory.path().join("shipments.sqlite3"))
+    let reopened = Store::open(&f._directory.path().join("packages.sqlite3"))
         .await
         .unwrap();
     let durable = reopened.get(before.id).await.unwrap();

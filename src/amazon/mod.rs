@@ -4287,7 +4287,7 @@ mod tests {
         assert_eq!(separate.tracker.tracking_code, "9400111122223333444466");
         assert_ne!(long.source_key, separate.source_key);
         client.enable_imports().await.unwrap();
-        let store = Store::open(&dir.path().join("shipments.sqlite3"))
+        let store = Store::open(&dir.path().join("packages.sqlite3"))
             .await
             .unwrap();
         assert!(
@@ -4367,7 +4367,7 @@ mod tests {
         let client = Arc::new(configured(&dir, &fixture));
         assert_eq!(client.discover().await.unwrap().parcels.len(), 1);
         client.enable_imports().await.unwrap();
-        let store = Store::open(&dir.path().join("shipments.sqlite3"))
+        let store = Store::open(&dir.path().join("packages.sqlite3"))
             .await
             .unwrap();
         let worker = AmazonDiscoveryWorker::new(store.clone(), client.clone());
@@ -4430,7 +4430,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let client = Arc::new(configured(&dir, &fixture));
         client.enable_imports().await.unwrap();
-        let store = Store::open(&dir.path().join("shipments.sqlite3"))
+        let store = Store::open(&dir.path().join("packages.sqlite3"))
             .await
             .unwrap();
         assert!(
@@ -4488,7 +4488,7 @@ mod tests {
             let dir = tempfile::tempdir().unwrap();
             let client = Arc::new(configured(&dir, &fixture));
             client.enable_imports().await.unwrap();
-            let store = Store::open(&dir.path().join("shipments.sqlite3"))
+            let store = Store::open(&dir.path().join("packages.sqlite3"))
                 .await
                 .unwrap();
             assert!(
@@ -5163,7 +5163,7 @@ mod tests {
                 .await
                 .unwrap()
                 .is_empty(),
-            "terminal and pending observations never fabricate shipments"
+            "terminal and pending observations never fabricate packages"
         );
 
         recovered.store(true, Ordering::Release);

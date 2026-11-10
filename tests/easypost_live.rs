@@ -1,11 +1,10 @@
-//! Opt-in coverage of the real EasyPost test API through Shipments' HTTP API.
+//! Opt-in coverage of the real EasyPost test API through Packages' HTTP API.
 //! Only synthetic tracking codes and an EZTK test key are used.
 
 use std::{path::Path, sync::Arc, time::Duration};
 
 use dropshot::{HttpServer, ResultsPage};
-use reqwest::{Client, Method, StatusCode};
-use shipments::{
+use packages::{
     api,
     carrier::Carrier,
     models::{
@@ -15,6 +14,7 @@ use shipments::{
     shipping_api::easypost::EasyPostClient,
     store::Store,
 };
+use reqwest::{Client, Method, StatusCode};
 
 const OWNER: &str = "sandbox-owner-credential-at-least-32-bytes";
 
@@ -90,7 +90,7 @@ async fn easypost_sandbox_admission_persistence_and_replay() {
     let provider = Arc::new(EasyPostClient::new(key).unwrap());
     provider.check_connection().await.unwrap();
     let directory = tempfile::tempdir().unwrap();
-    let database = directory.path().join("shipments.sqlite3");
+    let database = directory.path().join("packages.sqlite3");
     let app = App::start(&database, provider.clone()).await;
     let mut saved = Vec::new();
 
@@ -122,7 +122,7 @@ async fn easypost_sandbox_admission_persistence_and_replay() {
         let registered = provider.register(number, carrier).await.unwrap();
         let body = input(number, carrier);
         let response = app
-            .request(Method::POST, "/v1/shipments")
+            .request(Method::POST, "/v1/packages")
             .header("Idempotency-Key", number)
             .json(&body)
             .send()
@@ -157,7 +157,7 @@ async fn easypost_sandbox_admission_persistence_and_replay() {
     let app = App::start(&database, provider).await;
     for (body, original) in &saved {
         let response = app
-            .request(Method::POST, "/v1/shipments")
+            .request(Method::POST, "/v1/packages")
             .header("Idempotency-Key", &body.tracking.number)
             .json(body)
             .send()
@@ -173,7 +173,7 @@ async fn easypost_sandbox_admission_persistence_and_replay() {
     // A provider-rejected synthetic code must save nothing, including on PATCH.
     let invalid = input("EZ0000000000", Some(Carrier::Usps));
     let response = app
-        .request(Method::POST, "/v1/shipments")
+        .request(Method::POST, "/v1/packages")
         .header("Idempotency-Key", "invalid-test-code")
         .json(&invalid)
         .send()
@@ -190,7 +190,7 @@ async fn easypost_sandbox_admission_persistence_and_replay() {
     assert!(failure.message.contains("No shipment was saved or changed"));
 
     let original = &saved[0].1;
-    let path = format!("/v1/shipments/{}", original.id);
+    let path = format!("/v1/packages/{}", original.id);
     let response = app
         .request(Method::PATCH, &path)
         .header("If-Match", format!("\"{}\"", original.revision))
@@ -240,7 +240,7 @@ async fn easypost_sandbox_admission_persistence_and_replay() {
     assert_eq!(unchanged.revision, updated.revision);
     assert_eq!(unchanged.sync.tracker_id, updated.sync.tracker_id);
     let page: ResultsPage<Shipment> = app
-        .request(Method::GET, "/v1/shipments?limit=100")
+        .request(Method::GET, "/v1/packages?limit=100")
         .send()
         .await
         .unwrap()

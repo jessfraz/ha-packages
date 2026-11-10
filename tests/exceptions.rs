@@ -1,12 +1,12 @@
 use std::sync::Arc;
 
 use dropshot::ResultsPage;
-use reqwest::Client;
-use shipments::{
+use packages::{
     api,
     models::{CreateShipment, InputTracking, SetOverride, Shipment, Status},
     store::Store,
 };
+use reqwest::Client;
 
 #[tokio::test]
 async fn exception_filter_uses_effective_status_search_and_keyset_pagination() {
@@ -29,7 +29,7 @@ async fn exception_filter_uses_effective_status_search_and_keyset_pagination() {
         let created = store
             .create(
                 CreateShipment {
-                    direction: shipments::models::Direction::Inbound,
+                    direction: packages::models::Direction::Inbound,
                     title: format!("Filter parcel {index}"),
                     merchant: None,
                     order_reference: None,
@@ -76,7 +76,7 @@ async fn exception_filter_uses_effective_status_search_and_keyset_pagination() {
         Arc::new(api::Context::new(store.clone(), owner, None, None)),
     )
     .unwrap();
-    let base = format!("http://{}/v1/shipments", server.local_addr());
+    let base = format!("http://{}/v1/packages", server.local_addr());
     let client = Client::new();
     let mut found = Vec::new();
     let mut token: Option<String> = None;

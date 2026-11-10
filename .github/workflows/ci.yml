@@ -42,11 +42,11 @@ jobs:
           enable-cache: true
       - run: rustup toolchain install stable --profile minimal
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
-      - run: cargo build --locked --bin shipments
+      - run: cargo build --locked --bin packages
       - run: uv sync --frozen
       - run: uv run --frozen ruff check custom_components tests_ha
       - run: uv run --frozen ruff format --check custom_components tests_ha
       - run: uv run --frozen ty check --error-on-warning
       - run: uv run --frozen pytest tests_ha
         env:
-          SHIPMENTS_TEST_BINARY: ${{ github.workspace }}/target/debug/shipments
+          PACKAGES_TEST_BINARY: ${{ github.workspace }}/target/debug/packages

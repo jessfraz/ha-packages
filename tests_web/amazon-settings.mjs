@@ -175,7 +175,7 @@ test("untrusted sign-in responses never expose an external link", async () => {
 
 test("a non-writing preview renders parcel text safely and leaves enabling explicit", async () => {
   const ui = setup(connected);
-  ui.replies.push({ shipments: [{ title: "<img src=x onerror=alert(1)>", order_reference: "SYNTHETIC-ORDER", tracking: { carrier: "USPS", number: "SYNTHETIC123" } }], deferred: 2, complete: false, has_more: false });
+  ui.replies.push({ packages: [{ title: "<img src=x onerror=alert(1)>", order_reference: "SYNTHETIC-ORDER", tracking: { carrier: "USPS", number: "SYNTHETIC123" } }], deferred: 2, complete: false, has_more: false });
   await ui.click("preview");
   assert.equal(ui.calls.length, 1);
   assert.equal(ui.calls[0].path, "v1/amazon/preview");
@@ -192,7 +192,7 @@ test("a non-writing preview renders parcel text safely and leaves enabling expli
 
 test("malformed previews cannot enable imports or render partial data", async () => {
   const ui = setup(connected);
-  ui.replies.push({ shipments: [{ title: "Incomplete", tracking: { carrier: "USPS" } }], deferred: 0, complete: true, has_more: false });
+  ui.replies.push({ packages: [{ title: "Incomplete", tracking: { carrier: "USPS" } }], deferred: 0, complete: true, has_more: false });
   await ui.click("preview");
   assert.equal(ui.node("preview-list").children.length, 0);
   assert.equal(ui.node("enable").hidden, true);
@@ -201,7 +201,7 @@ test("malformed previews cannot enable imports or render partial data", async ()
 
 test("enabling, refresh and disconnect follow the explicit connection state", async () => {
   const ui = setup(connected);
-  ui.replies.push({ shipments: [], deferred: 0, complete: true, has_more: false });
+  ui.replies.push({ packages: [], deferred: 0, complete: true, has_more: false });
   await ui.click("preview");
   ui.replies.push({ ...connected, imports_enabled: true });
   await ui.click("enable");
@@ -216,12 +216,12 @@ test("enabling, refresh and disconnect follow the explicit connection state", as
   assert.equal(ui.calls[3].method, "DELETE");
   assert.equal(ui.node("state").textContent, "Not connected");
   assert.equal(ui.node("preview").hidden, true);
-  assert.match(ui.node("message").textContent, /Saved shipments and history/);
+  assert.match(ui.node("message").textContent, /Saved packages and history/);
 });
 
 test("role loss disables owner actions and clears preview data", async () => {
   const ui = setup(connected);
-  ui.replies.push({ shipments: [{ title: "Synthetic package", tracking: { carrier: "UPS", number: "SYNTHETIC" } }], deferred: 0, complete: true, has_more: false });
+  ui.replies.push({ packages: [{ title: "Synthetic package", tracking: { carrier: "UPS", number: "SYNTHETIC" } }], deferred: 0, complete: true, has_more: false });
   await ui.click("preview");
   ui.settings.setAccess(false);
   assert.equal(ui.root.hidden, true);
@@ -233,7 +233,7 @@ test("role loss disables owner actions and clears preview data", async () => {
 
 test("expired authentication removes stale preview and action messages", async () => {
   const ui = setup({ ...connected, imports_enabled: true });
-  ui.replies.push({ shipments: [{ title: "Synthetic package", tracking: { carrier: "USPS", number: "SYNTHETIC" } }], deferred: 0, complete: true, has_more: false });
+  ui.replies.push({ packages: [{ title: "Synthetic package", tracking: { carrier: "USPS", number: "SYNTHETIC" } }], deferred: 0, complete: true, has_more: false });
   await ui.click("preview");
   assert.equal(ui.node("preview-list").children.length, 1);
   ui.settings.updateStatus({ state: "auth_required", imports_enabled: true });
@@ -341,7 +341,7 @@ test("unsupported Amazon orders pages retain the saved sign-in without requestin
   await ui.click("preview");
   assert.match(ui.node("error").textContent, /does not yet support this orders-page layout/);
   assert.match(ui.node("error").textContent, /saved sign-in/);
-  assert.match(ui.node("error").textContent, /no unverified shipments were imported/);
+  assert.match(ui.node("error").textContent, /no unverified packages were imported/);
   assert.match(ui.node("error").textContent, /compatibility update/);
   assert.ok(ui.node("error").textContent.includes(requestId));
   assert.doesNotMatch(ui.node("error").textContent, /new sign-in|reuse|Reconnect Amazon|SYNTHETIC_SECRET|DO_NOT_DISPLAY/i);
@@ -372,7 +372,7 @@ test("preview transport and layout failures keep the connection and recommend pr
     ["amazon_preview_cookies_unexpected_response", /app logs/],
     ["amazon_preview_orders_connection", /could not reach Amazon/],
     ["amazon_preview_orders_rate_limited", /Wait before retrying Preview/],
-    ["amazon_preview_orders_upstream_http", /retry Preview shipments later/i],
+    ["amazon_preview_orders_upstream_http", /retry Preview packages later/i],
     ["amazon_preview_orders_configuration", /app configuration and logs/],
     ["amazon_preview_credentials_persistence", /data storage and free space/],
     ["amazon_preview_credentials_configuration", /permissions and logs/],
@@ -391,7 +391,7 @@ test("a website challenge offers only the fixed Amazon orders link and a manual 
     url: "https://evil.test/?token=SYNTHETIC_SECRET",
   }, "Verification required");
   assert.match(ui.node("error").textContent, /website challenge/);
-  assert.match(ui.node("error").textContent, /complete the requested check, then retry Preview shipments/);
+  assert.match(ui.node("error").textContent, /complete the requested check, then retry Preview packages/);
   assert.doesNotMatch(ui.node("error").textContent, /new sign-in|reuse|Reconnect Amazon/i);
   assert.equal(ui.node("error").children.length, 1);
   const link = ui.node("error").children[0];
@@ -399,7 +399,7 @@ test("a website challenge offers only the fixed Amazon orders link and a manual 
   assert.equal(link.href, "https://www.amazon.com/your-orders/orders");
   assert.equal(link.target, "_blank");
   assert.equal(link.rel, "noopener noreferrer");
-  ui.replies.push({ shipments: [{ title: "Synthetic parcel", tracking: { carrier: "USPS", number: "SYNTHETIC" } }], deferred: 0, complete: true, has_more: false });
+  ui.replies.push({ packages: [{ title: "Synthetic parcel", tracking: { carrier: "USPS", number: "SYNTHETIC" } }], deferred: 0, complete: true, has_more: false });
   await ui.click("preview");
   assert.equal(ui.node("error").children.length, 0, "the old challenge link is cleared on the next action");
   assert.equal(ui.node("state").textContent, "Signed in · preview checked");
@@ -411,7 +411,7 @@ test("only confirmed authentication rejection recommends reconnecting during a p
   for (const stage of ["access_token", "cookies", "orders"]) {
     const ui = await failPreview({ error_code: `amazon_preview_${stage}_upstream_rejected` });
     assert.match(ui.node("error").textContent, /no longer accepts the saved sign-in/);
-    assert.match(ui.node("error").textContent, /Reconnect Amazon, then retry Preview shipments/);
+    assert.match(ui.node("error").textContent, /Reconnect Amazon, then retry Preview packages/);
     assert.equal(ui.node("start").textContent, "Reconnect Amazon");
     assert.equal(ui.calls.length, 1);
   }
@@ -419,7 +419,7 @@ test("only confirmed authentication rejection recommends reconnecting during a p
 
 test("a failed preview invalidates previous preview permission to enable imports", async () => {
   const ui = setup(connected);
-  ui.replies.push({ shipments: [{ title: "Synthetic parcel", tracking: { carrier: "USPS", number: "SYNTHETIC" } }], deferred: 0, complete: true, has_more: false });
+  ui.replies.push({ packages: [{ title: "Synthetic parcel", tracking: { carrier: "USPS", number: "SYNTHETIC" } }], deferred: 0, complete: true, has_more: false });
   await ui.click("preview");
   assert.equal(ui.node("enable").hidden, false);
   ui.replies.push(new ApiError("Private provider text", 502, { error_code: "amazon_preview_orders_unsupported_orders_layout" }));
@@ -433,14 +433,14 @@ test("a failed preview invalidates previous preview permission to enable imports
 
 test("unknown-only candidates cannot enable imports while a recognized empty account can", async () => {
   const ui = setup(connected);
-  ui.replies.push({ shipments: [], deferred: 2, complete: false, has_more: false });
+  ui.replies.push({ packages: [], deferred: 2, complete: false, has_more: false });
   await ui.click("preview");
   assert.equal(ui.node("enable").hidden, true);
   assert.match(ui.node("message").textContent, /Automatic imports remain off/);
   assert.equal(ui.node("state").textContent, "Signed in · preview required");
   await ui.click("enable");
   assert.equal(ui.calls.length, 1);
-  ui.replies.push({ shipments: [], deferred: 0, complete: true, has_more: false });
+  ui.replies.push({ packages: [], deferred: 0, complete: true, has_more: false });
   await ui.click("preview");
   assert.equal(ui.node("enable").hidden, false);
   assert.equal(ui.node("state").textContent, "Signed in · preview checked");
@@ -449,7 +449,7 @@ test("unknown-only candidates cannot enable imports while a recognized empty acc
 test("unsupported preview pairs and unsafe metadata never display provider text or login blame", async () => {
   for (const error_code of ["amazon_preview_registration_upstream_rejected", "amazon_preview_credentials_upstream_rejected", "amazon_preview_access_token_unsupported_orders_layout", "amazon_preview_orders_unknown_reason", `amazon_preview_orders_challenge_page ${landing}`]) {
     const ui = await failPreview({ error_code, request_id: landing, message: landing });
-    assert.equal(ui.node("error").textContent, "Could not read a preview. Your saved shipments have not been changed.");
+    assert.equal(ui.node("error").textContent, "Could not read a preview. Your saved packages have not been changed.");
     assert.equal(ui.node("error").children.length, 0);
     assert.doesNotMatch(ui.node("error").textContent, /new sign-in|reuse|Reconnect Amazon/i);
   }
@@ -460,7 +460,7 @@ test("a saved website challenge pauses automatic actions and offers manual verif
   const ui = setup({ ...connected, imports_enabled: true, challenge_required: true });
   assert.equal(ui.node("state").textContent, "Verification required");
   assert.match(ui.node("description").textContent, /saved sign-in/i);
-  assert.match(ui.node("description").textContent, /complete any requested check.*Preview shipments/i);
+  assert.match(ui.node("description").textContent, /complete any requested check.*Preview packages/i);
   assert.match(ui.node("check-note").textContent, /Automatic checks are paused/);
   assert.equal(ui.node("check-note").children.length, 1);
   const link = ui.node("check-note").children[0];
@@ -481,7 +481,7 @@ test("a saved website challenge pauses automatic actions and offers manual verif
 
 test("a challenge invalidates prior preview permission until manual preview succeeds", async () => {
   const ui = setup(connected);
-  const preview = { shipments: [{ title: "Synthetic parcel", tracking: { carrier: "USPS", number: "SYNTHETIC" } }], deferred: 0, complete: true, has_more: false };
+  const preview = { packages: [{ title: "Synthetic parcel", tracking: { carrier: "USPS", number: "SYNTHETIC" } }], deferred: 0, complete: true, has_more: false };
   ui.replies.push(preview);
   await ui.click("preview");
   assert.equal(ui.node("enable").hidden, false);
@@ -504,7 +504,7 @@ test("a challenge invalidates prior preview permission until manual preview succ
 
 test("manual verification recovery retains already enabled imports", async () => {
   const ui = setup({ ...connected, imports_enabled: true, challenge_required: true });
-  ui.replies.push({ shipments: [], deferred: 0, complete: true, has_more: false });
+  ui.replies.push({ packages: [], deferred: 0, complete: true, has_more: false });
   await ui.click("preview");
   assert.equal(ui.node("state").textContent, "Connected");
   assert.equal(ui.node("refresh").hidden, false);
@@ -514,7 +514,7 @@ test("manual verification recovery retains already enabled imports", async () =>
 
 test("a challenge rejected during enabling retains sign-in and requires another preview", async () => {
   const ui = setup(connected);
-  const preview = { shipments: [{ title: "Synthetic parcel", tracking: { carrier: "USPS", number: "SYNTHETIC" } }], deferred: 0, complete: true, has_more: false };
+  const preview = { packages: [{ title: "Synthetic parcel", tracking: { carrier: "USPS", number: "SYNTHETIC" } }], deferred: 0, complete: true, has_more: false };
   ui.replies.push(preview);
   await ui.click("preview");
   ui.replies.push(new ApiError(`DO_NOT_DISPLAY ${landing}`, 409, { error_code: "provider_challenge_required" }));
@@ -523,7 +523,7 @@ test("a challenge rejected during enabling retains sign-in and requires another 
   assert.equal(ui.node("enable").hidden, true);
   assert.equal(ui.node("preview-list").children.length, 0);
   assert.match(ui.node("error").textContent, /saved sign-in.*retained/i);
-  assert.match(ui.node("error").textContent, /complete the requested check.*retry Preview shipments/i);
+  assert.match(ui.node("error").textContent, /complete the requested check.*retry Preview packages/i);
   assert.doesNotMatch(ui.node("error").textContent, /Reconnect|new sign-in|DO_NOT_DISPLAY|SYNTHETIC_SECRET/i);
   assert.equal(ui.node("error").children[0].href, "https://www.amazon.com/your-orders/orders");
   await ui.click("enable");
@@ -545,14 +545,14 @@ test("an existing account check asks the user to wait without starting another a
 
 test("an incomplete empty preview cannot claim the account is empty or enable imports", async () => {
   const ui = setup(connected);
-  ui.replies.push({ shipments: [], deferred: 0, complete: false, has_more: true });
+  ui.replies.push({ packages: [], deferred: 0, complete: false, has_more: true });
   await ui.click("preview");
   assert.equal(ui.node("enable").hidden, true);
   assert.match(ui.node("preview-note").textContent, /More recent orders remain/);
   assert.match(ui.node("message").textContent, /preview is incomplete/);
   await ui.click("enable");
   assert.equal(ui.calls.length, 1);
-  ui.replies.push({ shipments: [{ title: "Amazon: Synthetic parcel", tracking: { carrier: "USPS", number: "SYNTHETIC" } }], deferred: 0, complete: false, has_more: true });
+  ui.replies.push({ packages: [{ title: "Amazon: Synthetic parcel", tracking: { carrier: "USPS", number: "SYNTHETIC" } }], deferred: 0, complete: false, has_more: true });
   await ui.click("preview");
   assert.equal(ui.node("enable").hidden, false);
   assert.match(ui.node("message").textContent, /remaining recent orders/);
@@ -560,7 +560,7 @@ test("an incomplete empty preview cannot claim the account is empty or enable im
 
 test("an incomplete preview does not claim enabled discovery is off", async () => {
   const ui = setup({ ...connected, imports_enabled: true });
-  ui.replies.push({ shipments: [], deferred: 0, complete: false, has_more: true });
+  ui.replies.push({ packages: [], deferred: 0, complete: false, has_more: true });
   await ui.click("preview");
   assert.match(ui.node("message").textContent, /Automatic discovery will continue/);
   assert.doesNotMatch(ui.node("message").textContent, /remain off/);
@@ -571,7 +571,7 @@ test("an incomplete preview does not claim enabled discovery is off", async () =
 test("an all-deferred preview cannot clear a saved verification challenge", async () => {
   for (const imports_enabled of [false, true]) {
     const ui = setup({ ...connected, imports_enabled, challenge_required: true });
-    ui.replies.push({ shipments: [], deferred: 2, complete: true, has_more: false });
+    ui.replies.push({ packages: [], deferred: 2, complete: true, has_more: false });
     await ui.click("preview");
     assert.equal(ui.node("state").textContent, "Verification required");
     assert.equal(ui.node("refresh").hidden, true);

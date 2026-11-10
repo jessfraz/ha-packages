@@ -1,6 +1,6 @@
-# ha-shipments
+# ha-packages
 
-`ha-shipments` is a JSON client for the Shipments API. The service owns tracking,
+`ha-packages` is a JSON client for the Packages API. The service owns tracking,
 validation and duplicate protection. The CLI uses the server's API types,
 including Amazon Account parcels and provider status; use the same release as
 the server.
@@ -8,13 +8,13 @@ the server.
 ## Install and configure
 
 ```sh
-nix build .#ha-shipments
-nix run .#ha-shipments -- --help
+nix build .#ha-packages
+nix run .#ha-packages -- --help
 # Or, from the development shell:
-cargo run --locked --bin ha-shipments -- --help
+cargo run --locked --bin ha-packages -- --help
 ```
 
-The flake also exposes `packages.shipments` and `apps.shipments`. Both default
+The flake also exposes `packages.packages` and `apps.packages`. Both default
 outputs remain the server; `cargo run` still runs the server. All existing flake
 systems are supported: aarch64-darwin, aarch64-linux, and x86_64-linux.
 
@@ -25,8 +25,8 @@ No login or credential discovery runs.
 
 | Transport | URL | Credential | API prefix |
 | --- | --- | --- | --- |
-| Native | `SHIPMENTS_URL` | `SHIPMENTS_AGENT_TOKEN` or `SHIPMENTS_API_TOKEN`, not both | `/v1` |
-| Home Assistant | `HOME_ASSISTANT_URL` | `HOME_ASSISTANT_TOKEN` | `/api/shipments/v1` |
+| Native | `PACKAGES_URL` | `PACKAGES_AGENT_TOKEN` or `PACKAGES_API_TOKEN`, not both | `/v1` |
+| Home Assistant | `HOME_ASSISTANT_URL` | `HOME_ASSISTANT_TOKEN` | `/api/packages/v1` |
 
 With both URLs configured, pass `--transport native` or
 `--transport home-assistant`. Explicit selection uses only the selected
@@ -36,7 +36,7 @@ still require owner access, and HA archive/status corrections require an HA
 administrator. No actor or ingress authentication headers are fabricated.
 
 Use HTTPS beyond trusted local transport. Home Assistant tokens grant access
-beyond Shipments; prefer restricted ingestion credentials for narrow clients.
+beyond Packages; prefer restricted ingestion credentials for narrow clients.
 Provider keys belong on the server, not in this client.
 
 ## JSON and conditions
@@ -67,12 +67,12 @@ means a missing server precondition. Read the current record before deciding
 whether an edit is still appropriate.
 
 ```sh
-export SHIPMENTS_URL=http://127.0.0.1:8080
-# Supply SHIPMENTS_AGENT_TOKEN securely through the calling environment.
-ha-shipments list --limit 20
-ha-shipments create --idempotency-key example-parcel-1 --input parcel.json
-ha-shipments get 00000000-0000-4000-8000-000000000001
-printf '%s\n' '{"merchant":null}' | ha-shipments patch \
+export PACKAGES_URL=http://127.0.0.1:8080
+# Supply PACKAGES_AGENT_TOKEN securely through the calling environment.
+ha-packages list --limit 20
+ha-packages create --idempotency-key example-parcel-1 --input parcel.json
+ha-packages get 00000000-0000-4000-8000-000000000001
+printf '%s\n' '{"merchant":null}' | ha-packages patch \
   00000000-0000-4000-8000-000000000001 --if-match '"7"'
 ```
 
@@ -90,7 +90,7 @@ choices, DoorDash links, source references, and admission guarantees.
 
 | Command | API operation / JSON input |
 | --- | --- |
-| `list [--input FILE] [--limit N] [--page-token TOKEN]` | GET shipments; optional API `Filters` JSON |
+| `list [--input FILE] [--limit N] [--page-token TOKEN]` | GET packages; optional API `Filters` JSON |
 | `get ID` | GET shipment |
 | `create --idempotency-key KEY [--input FILE]` | POST shipment; `CreateShipment` |
 | `patch ID --if-match ETAG [--input FILE]` | PATCH shipment; `UpdateShipment` |
@@ -121,7 +121,7 @@ false values and delivered-date bounds. For example:
 
 ```sh
 printf '%s\n' '{"direction":"inbound","active":true,"sort":"expected"}' |
-  ha-shipments list --input - --limit 50
+  ha-packages list --input - --limit 50
 ```
 
 Pagination always makes **one request**. List/history/estimate responses retain

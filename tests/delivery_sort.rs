@@ -1,8 +1,7 @@
 use std::sync::Arc;
 
 use dropshot::{HttpServer, ResultsPage};
-use reqwest::{Client, StatusCode};
-use shipments::{
+use packages::{
     api,
     carrier::Carrier,
     models::{
@@ -12,6 +11,7 @@ use shipments::{
     shipping_api::types::Tracker,
     store::Store,
 };
+use reqwest::{Client, StatusCode};
 use sqlx::SqlitePool;
 use uuid::Uuid;
 
@@ -63,7 +63,7 @@ impl App {
             number: key.to_ascii_uppercase(),
         };
         let tracker = Tracker {
-            provider: shipments::shipping_api::types::ProviderId::EasyPost,
+            provider: packages::shipping_api::types::ProviderId::EasyPost,
             id: format!("trk_{key}"),
             tracking_code: tracking.number.clone(),
             carrier: "usps".parse().unwrap(),
@@ -86,7 +86,7 @@ impl App {
         self.store
             .create(
                 CreateShipment {
-                    direction: shipments::models::Direction::Inbound,
+                    direction: packages::models::Direction::Inbound,
                     title: format!("Date parcel {key}"),
                     merchant: None,
                     order_reference: None,
@@ -108,7 +108,7 @@ impl App {
     async fn page(&self, query: &[(&str, &str)]) -> ResultsPage<Shipment> {
         let response = self
             .client
-            .get(format!("{}/v1/shipments", self.url))
+            .get(format!("{}/v1/packages", self.url))
             .bearer_auth(OWNER)
             .query(query)
             .send()
@@ -137,8 +137,8 @@ impl App {
     }
 }
 
-fn ids(shipments: &[Shipment]) -> Vec<Uuid> {
-    shipments.iter().map(|shipment| shipment.id).collect()
+fn ids(packages: &[Shipment]) -> Vec<Uuid> {
+    packages.iter().map(|shipment| shipment.id).collect()
 }
 
 #[tokio::test]
@@ -370,7 +370,7 @@ async fn canonical_carrier_catalog_requires_auth_and_filters_use_provider_names(
     );
     let rejected = app
         .client
-        .get(format!("{}/v1/shipments", app.url))
+        .get(format!("{}/v1/packages", app.url))
         .bearer_auth(OWNER)
         .query(&[("carrier", "nonsense")])
         .send()

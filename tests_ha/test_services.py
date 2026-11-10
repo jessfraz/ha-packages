@@ -13,7 +13,7 @@ from homeassistant.exceptions import (
 )
 from homeassistant.setup import async_setup_component
 
-from custom_components.shipments.const import DOMAIN
+from custom_components.packages.const import DOMAIN
 
 from .conftest import SHIPMENT_ID, Backend
 
@@ -38,7 +38,7 @@ async def test_add_action_fields_and_response(
     }
     if explicit_key:
         fields["idempotency_key"] = "create-one"
-    backend.responses[("POST", "/v1/shipments")] = (
+    backend.responses[("POST", "/v1/packages")] = (
         201,
         json.dumps(
             {
@@ -61,8 +61,8 @@ async def test_add_action_fields_and_response(
     requests = [request for request in backend.requests if request.method == "POST"]
     assert len(requests) == 1
     request = requests[0]
-    assert request.path == "/v1/shipments"
-    assert request.headers["X-Shipments-Actor"] == f"ha:{hass_user.id}"
+    assert request.path == "/v1/packages"
+    assert request.headers["X-Packages-Actor"] == f"ha:{hass_user.id}"
     if explicit_key:
         assert request.headers["Idempotency-Key"] == "create-one"
     else:
@@ -229,7 +229,7 @@ async def test_action_reports_public_backend_error(
         "This does not mean the tracking number is invalid. "
         "Check provider support and the selected carrier before changing the number."
     )
-    backend.responses[("POST", "/v1/shipments")] = (
+    backend.responses[("POST", "/v1/packages")] = (
         422,
         json.dumps(
             {
@@ -274,7 +274,7 @@ async def test_action_reports_public_backend_error(
 async def test_action_error_falls_back_without_reflecting_private_data(
     hass: HomeAssistant, hass_user, entry, backend: Backend, body: bytes
 ) -> None:
-    backend.responses[("POST", "/v1/shipments")] = (503, body, {})
+    backend.responses[("POST", "/v1/packages")] = (503, body, {})
     with pytest.raises(HomeAssistantError) as caught:
         await hass.services.async_call(
             DOMAIN,
@@ -287,7 +287,7 @@ async def test_action_error_falls_back_without_reflecting_private_data(
             context=Context(user_id=hass_user.id),
             blocking=True,
         )
-    assert str(caught.value) == "The Shipments backend rejected the action (HTTP 503)"
+    assert str(caught.value) == "The Packages backend rejected the action (HTTP 503)"
 
 
 @pytest.mark.parametrize("with_user", [False, True])
@@ -345,9 +345,9 @@ async def test_admin_override_uses_current_or_explicit_version_once(
         ["PUT"] if explicit_version else ["GET", "PUT"]
     )
     mutation = requests[-1]
-    assert mutation.path == f"/v1/shipments/{SHIPMENT_ID}/status-override"
+    assert mutation.path == f"/v1/packages/{SHIPMENT_ID}/status-override"
     assert mutation.headers["If-Match"] == ('"4"' if explicit_version else '"7"')
-    assert mutation.headers["X-Shipments-Actor"] == f"ha:{hass_admin_user.id}"
+    assert mutation.headers["X-Packages-Actor"] == f"ha:{hass_admin_user.id}"
     assert json.loads(mutation.body) == {
         "status": "delivered",
         "reason": "Received in person",
@@ -363,7 +363,7 @@ async def test_conflicting_action_is_never_retried(
     backend: Backend,
     explicit_version: bool,
 ) -> None:
-    backend.responses[("PUT", f"/v1/shipments/{SHIPMENT_ID}/archive")] = (
+    backend.responses[("PUT", f"/v1/packages/{SHIPMENT_ID}/archive")] = (
         412,
         (
             b'{"message":"Review the latest shipment revision.",'
@@ -394,7 +394,7 @@ async def test_conflicting_action_is_never_retried(
 async def test_failed_version_lookup_never_mutates(
     hass: HomeAssistant, hass_admin_user, entry, backend: Backend, status: int, headers
 ) -> None:
-    backend.responses[("GET", f"/v1/shipments/{SHIPMENT_ID}")] = (
+    backend.responses[("GET", f"/v1/packages/{SHIPMENT_ID}")] = (
         status,
         b"{}",
         headers,
@@ -416,7 +416,7 @@ async def test_actions_exist_without_a_loaded_entry(
 ) -> None:
     assert await async_setup_component(hass, DOMAIN, {})
     assert hass.services.has_service(DOMAIN, "add")
-    with pytest.raises(ServiceValidationError, match="Shipments is not loaded"):
+    with pytest.raises(ServiceValidationError, match="Packages is not loaded"):
         await hass.services.async_call(
             DOMAIN,
             "add",
@@ -437,7 +437,7 @@ async def test_actions_remain_available_after_unload(
     assert await hass.config_entries.async_unload(entry.entry_id)
     count = len(backend.requests)
     assert hass.services.has_service(DOMAIN, "add")
-    with pytest.raises(ServiceValidationError, match="Shipments is not loaded"):
+    with pytest.raises(ServiceValidationError, match="Packages is not loaded"):
         await hass.services.async_call(
             DOMAIN,
             "add",

@@ -16,7 +16,7 @@ from homeassistant.setup import async_setup_component
 from homeassistant.util import dt as dt_util
 from pytest_homeassistant.common import MockConfigEntry, async_fire_time_changed
 
-from custom_components.shipments.const import (
+from custom_components.packages.const import (
     CONF_ADDON_SLUG,
     CONF_BACKEND_URL,
     CONF_TOKEN,
@@ -111,12 +111,12 @@ async def test_confirmed_discovery_failure_creates_one_owned_native_repair(
     assert first.translation_placeholders["error_code"] == "timeout"
     assert first.translation_placeholders["deferred_parcels"] == "2"
     assert first.translation_placeholders["logs_url"] == "/config/logs"
-    assert first.learn_more_url == "/config/integrations/integration/shipments"
+    assert first.learn_more_url == "/config/integrations/integration/packages"
     assert "PRIVATE-" not in json.dumps(first.to_json(), default=str)
     assert notifications.current == {}
     await entry.runtime_data.async_refresh()
     assert issue(hass, entry).created == first.created
-    assert get_state(hass, "sensor.shipments_active").state == "4"
+    assert get_state(hass, "sensor.packages_active").state == "4"
 
 
 @pytest.mark.parametrize(
@@ -138,9 +138,9 @@ async def test_account_action_migrates_only_its_legacy_notice_to_a_repair(
     key: str,
 ) -> None:
     hass.config_entries.async_update_entry(
-        entry, data={**entry.data, CONF_ADDON_SLUG: "fixture_shipments"}
+        entry, data={**entry.data, CONF_ADDON_SLUG: "fixture_packages"}
     )
-    old_notice = f"shipments_{entry.entry_id}_amazon_auth_required"
+    old_notice = f"packages_{entry.entry_id}_amazon_auth_required"
     pn.async_create(hass, "Old Amazon notice", notification_id=old_notice)
     pn.async_create(hass, "Delivery automation notice", notification_id="delivery")
     report(backend, amazon=amazon)
@@ -150,10 +150,10 @@ async def test_account_action_migrates_only_its_legacy_notice_to_a_repair(
     assert current.translation_key == key
     assert current.translation_placeholders is not None
     assert current.translation_placeholders["settings_url"] == (
-        "/shipments/shipments/amazon%3Dconnect"
+        "/packages/packages/amazon%3Dconnect"
     )
     assert current.translation_placeholders["logs_url"] == (
-        "/config/app/fixture_shipments/logs"
+        "/config/app/fixture_packages/logs"
     )
     assert "PRIVATE-" not in json.dumps(current.to_json(), default=str)
     assert list(notifications.current) == ["delivery"]
@@ -342,7 +342,7 @@ async def test_unknown_error_text_is_never_a_repair_or_health_attribute(
     assert current.translation_placeholders["error_code"] == "unspecified"
     assert "PRIVATE-" not in json.dumps(current.to_json(), default=str)
     assert "PRIVATE-" not in json.dumps(
-        dict(get_state(hass, "sensor.shipments_amazon_discovery").attributes)
+        dict(get_state(hass, "sensor.packages_amazon_discovery").attributes)
     )
 
 
@@ -381,7 +381,7 @@ async def test_unavailable_source_health_creates_a_native_repair_after_healthy_r
     assert current.translation_key == "amazon_discovery_unavailable"
     assert current.translation_placeholders is not None
     assert current.translation_placeholders["error_code"] == reason
-    assert get_state(hass, "sensor.shipments_amazon_discovery").state == "unavailable"
+    assert get_state(hass, "sensor.packages_amazon_discovery").state == "unavailable"
     report(backend, discovery_report())
     await entry.runtime_data.async_refresh()
     assert ir.async_get(hass).async_get_issue(DOMAIN, current.issue_id) is None
@@ -480,7 +480,7 @@ async def test_initial_backend_auth_uses_only_core_reauth(
         data={CONF_BACKEND_URL: backend.url, CONF_TOKEN: "test-owner-token"},
     )
     entry.add_to_hass(hass)
-    old_notice = f"shipments_{entry.entry_id}_amazon_auth_required"
+    old_notice = f"packages_{entry.entry_id}_amazon_auth_required"
     pn.async_create(hass, "Old Amazon notice", notification_id=old_notice)
     backend.responses[("GET", "/v1/system")] = (status, b"PRIVATE-ERROR", {})
     assert not await hass.config_entries.async_setup(entry.entry_id)
@@ -516,7 +516,7 @@ async def test_backend_reauth_replaces_only_the_availability_repair(
         await entry.runtime_data.async_refresh()
         assert issue(hass, entry).translation_key == "amazon_discovery_unavailable"
         report(backend, discovery_report())
-    old_notice = f"shipments_{entry.entry_id}_amazon_auth_required"
+    old_notice = f"packages_{entry.entry_id}_amazon_auth_required"
     pn.async_create(hass, "Old Amazon notice", notification_id=old_notice)
     pn.async_create(hass, "Delivery automation notice", notification_id="delivery")
     backend.responses[("GET", path)] = (401, b"PRIVATE-ERROR", {})

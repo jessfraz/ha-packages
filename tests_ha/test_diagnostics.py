@@ -9,7 +9,7 @@ from homeassistant.setup import async_setup_component
 from pytest_homeassistant.common import MockConfigEntry
 from pytest_homeassistant.typing import ClientSessionGenerator
 
-from custom_components.shipments.const import (
+from custom_components.packages.const import (
     CONF_BACKEND_URL,
     CONF_TOKEN,
     DOMAIN,

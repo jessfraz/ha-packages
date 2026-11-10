@@ -1,5 +1,5 @@
 {
-  "name": "Shipments",
+  "name": "Packages",
   "render_readme": true,
   "homeassistant": "2026.11.0"
 }

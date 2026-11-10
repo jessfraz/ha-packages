@@ -11,15 +11,15 @@ use std::{
 };
 
 use dropshot::HttpServer;
-use reqwest::{Client, Response, StatusCode};
-use serde::{Deserialize, Serialize};
-use shipments::{
+use packages::{
     api,
     carrier::Carrier,
     models::{CreateShipment, Direction, InputTracking, Patch, Shipment, Status, UpdateShipment},
     shipping_api::{aftership::AfterShipClient, easypost::EasyPostClient, types::ProviderId},
     store::Store,
 };
+use reqwest::{Client, Response, StatusCode};
+use serde::{Deserialize, Serialize};
 use tokio::sync::oneshot;
 use uuid::Uuid;
 
@@ -404,7 +404,7 @@ impl App {
 
     fn create(&self, input: &CreateShipment, key: &str) -> reqwest::RequestBuilder {
         self.client
-            .post(format!("{}/v1/shipments", self.url))
+            .post(format!("{}/v1/packages", self.url))
             .bearer_auth(OWNER)
             .header("Idempotency-Key", key)
             .json(input)
@@ -412,7 +412,7 @@ impl App {
 
     fn patch(&self, original: &Shipment, tracking: InputTracking) -> reqwest::RequestBuilder {
         self.client
-            .patch(format!("{}/v1/shipments/{}", self.url, original.id))
+            .patch(format!("{}/v1/packages/{}", self.url, original.id))
             .bearer_auth(OWNER)
             .header("If-Match", format!("\"{}\"", original.revision))
             .json(&UpdateShipment {
@@ -853,7 +853,7 @@ async fn configured_provider_discovers_without_easypost_but_retains_its_uncertai
         let server = api::start("127.0.0.1:0".parse().unwrap(), Arc::new(context)).unwrap();
         let response = app
             .client
-            .post(format!("http://{}/v1/shipments", server.local_addr()))
+            .post(format!("http://{}/v1/packages", server.local_addr()))
             .bearer_auth(OWNER)
             .header("Idempotency-Key", "default-removed")
             .json(&input)

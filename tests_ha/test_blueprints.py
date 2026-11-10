@@ -23,12 +23,12 @@ from pytest_homeassistant.common import (
     async_mock_service,
 )
 
-BLUEPRINTS = Path(__file__).resolve().parents[1] / "blueprints/automation/shipments"
+BLUEPRINTS = Path(__file__).resolve().parents[1] / "blueprints/automation/packages"
 MOBILE_APP = Path(dr.__file__).resolve().parents[1] / "components/mobile_app"
-EVENTS = "event.shipments"
-ERRORS = "sensor.shipments_sync_errors"
-ARRIVING = "sensor.shipments_inbound_out_for_delivery"
-DELIVERED = "sensor.shipments_inbound_delivered_today"
+EVENTS = "event.packages"
+ERRORS = "sensor.packages_sync_errors"
+ARRIVING = "sensor.packages_inbound_out_for_delivery"
+DELIVERED = "sensor.packages_inbound_delivered_today"
 SHIPMENT_ID = "0193c69f-e5c4-7e93-b6cb-8172dacb617e"
 OTHER_ID = "0193c69f-e5c4-7e93-b6cb-8172dacb617f"
 PRIVATE = "PRIVATE-TRACKING-NUMBER"
@@ -96,7 +96,7 @@ async def setup_blueprint(
     )
     blueprint = Blueprint(
         data,
-        path=f"shipments/{name}.yaml",
+        path=f"packages/{name}.yaml",
         expected_domain="automation",
         schema=AUTOMATION_BLUEPRINT_SCHEMA,
     )
@@ -107,7 +107,7 @@ async def setup_blueprint(
             "id": f"blueprint_{name}",
             "alias": f"Blueprint {name}",
             "use_blueprint": {
-                "path": f"shipments/{name}.yaml",
+                "path": f"packages/{name}.yaml",
                 "input": {"notify_device": phone.device_id, **(inputs or {})},
             },
         },
@@ -218,10 +218,10 @@ async def test_delivery_update_snapshots_bursts_and_exact_deep_links(
     ]
     for call, shipment_id in zip(phone.calls, [SHIPMENT_ID, OTHER_ID], strict=True):
         assert call.data["data"] == {
-            "url": f"/shipments/shipments/shipment%3D{shipment_id}",
-            "clickAction": f"/shipments/shipments/shipment%3D{shipment_id}",
-            "tag": f"shipments-{shipment_id}",
-            "group": "shipments",
+            "url": f"/packages/packages/shipment%3D{shipment_id}",
+            "clickAction": f"/packages/packages/shipment%3D{shipment_id}",
+            "tag": f"packages-{shipment_id}",
+            "group": "packages",
         }
 
 
@@ -278,9 +278,9 @@ async def test_tracking_problems_debounce_clear_and_rearm(
     await hass.async_block_till_done()
     await advance(hass, freezer, 301)
     assert len(phone.calls) == 1
-    assert "2 shipments have" in phone.calls[0].data["message"]
+    assert "2 packages have" in phone.calls[0].data["message"]
     assert phone.calls[0].data["data"]["url"] == (
-        "/shipments/shipments/view%3Dtracking_issues"
+        "/packages/packages/view%3Dtracking_issues"
     )
     hass.states.async_set(ERRORS, "3")
     await hass.async_block_till_done()
@@ -348,7 +348,7 @@ async def test_daily_summary_local_time_titles_truncation_and_privacy(
             "carrier": "USPS",
             "status": "out_for_delivery",
             "tracking_number": PRIVATE,
-            "url": f"/shipments/shipments/shipment%3D{index}",
+            "url": f"/packages/packages/shipment%3D{index}",
         }
         for index in range(20)
     ]
@@ -372,14 +372,14 @@ async def test_daily_summary_local_time_titles_truncation_and_privacy(
         "• Keep MY title: package 2! (USPS)\n"
         "• Keep MY title: package 3! (USPS)\n"
         "• Keep MY title: package 4! (USPS)\n"
-        "+ 20 more in Shipments\n"
+        "+ 20 more in Packages\n"
         "\n"
         "Delivered today: 1\n"
         "• New view – 50 cards (FedEx)"
     )
     assert PRIVATE not in json.dumps(dict(call.data))
     assert call.data["data"]["url"] == (
-        "/shipments/shipments/view%3Dall%26direction%3Dinbound"
+        "/packages/packages/view%3Dall%26direction%3Dinbound"
     )
 
 
@@ -403,4 +403,4 @@ async def test_daily_summary_uses_configured_time_and_renamed_sensors(
     await advance(hass, freezer, 61)
     assert len(phone.calls) == 1
     assert "Out for delivery: 1" in phone.calls[0].data["message"]
-    assert "+ 1 more in Shipments" in phone.calls[0].data["message"]
+    assert "+ 1 more in Packages" in phone.calls[0].data["message"]

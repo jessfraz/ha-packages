@@ -2,8 +2,7 @@
 
 use std::path::Path;
 
-use sha2::{Digest, Sha256};
-use shipments::{
+use packages::{
     carrier::Carrier,
     error::Error,
     models::{
@@ -13,6 +12,7 @@ use shipments::{
     shipping_api::types::ProviderId,
     store::Store,
 };
+use sha2::{Digest, Sha256};
 use sqlx::{
     SqlitePool,
     migrate::Migrator,
@@ -280,7 +280,7 @@ async fn upgrade_deletes_only_doordash_without_original_links_and_cleans_depende
     }
     for (index, carrier) in [(3, Carrier::Usps), (4, Carrier::SpeedX), (5, Carrier::Sway)] {
         let input = legacy_input(index, carrier);
-        shipments::admission::bind_request(
+        packages::admission::bind_request(
             &upgraded,
             "owner",
             &format!("create:legacy-{index}"),
@@ -299,8 +299,8 @@ async fn upgrade_deletes_only_doordash_without_original_links_and_cleans_depende
     }
     let mut corrected = legacy_input(0, Carrier::DoorDash);
     corrected.tracking.recipient_url = Some(LINK.into());
-    shipments::store::validate_create(&mut corrected, "legacy-0").unwrap();
-    shipments::admission::bind_request(&upgraded, "owner", "create:legacy-0", &corrected)
+    packages::store::validate_create(&mut corrected, "legacy-0").unwrap();
+    packages::admission::bind_request(&upgraded, "owner", "create:legacy-0", &corrected)
         .await
         .unwrap();
     let recreated = upgraded

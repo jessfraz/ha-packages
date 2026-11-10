@@ -210,7 +210,7 @@ pub(crate) async fn register(
             domain: "Device",
             app_version: VERSION,
             device_type: "A2IVLV5VM2W81",
-            device_name: "%FIRST_NAME%'s%DUPE_STRATEGY_1ST%Home Assistant Shipments",
+            device_name: "%FIRST_NAME%'s%DUPE_STRATEGY_1ST%Home Assistant Packages",
             os_version: "16.6",
             device_serial: serial,
             device_model: "iPhone",

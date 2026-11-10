@@ -2378,8 +2378,8 @@ dependencies = [
 ]
 
 [[package]]
-name = "shipments"
-version = "0.6.34"
+name = "packages"
+version = "0.7.0"
 dependencies = [
  "anyhow",
  "base64 0.23.1",

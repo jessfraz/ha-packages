@@ -8,7 +8,7 @@ from zoneinfo import ZoneInfo
 import pytest
 from homeassistant.core import HomeAssistant
 
-from custom_components.shipments.models import DeliveryEstimate, delivery_estimate
+from custom_components.packages.models import DeliveryEstimate, delivery_estimate
 
 SHIPMENT = "0193c69f-e5c4-7e93-b6cb-8172dacb617f"
 
@@ -277,7 +277,7 @@ def test_delivered_windows_never_replace_verified_actual(actual: str | None) -> 
 async def test_ended_today_windows_remain_in_full_day_query(
     hass: HomeAssistant, entry, backend, hass_client, monkeypatch
 ) -> None:
-    from custom_components.shipments.calendar import InboundDeliveryCalendar
+    from custom_components.packages.calendar import InboundDeliveryCalendar
 
     await hass.config.async_set_time_zone("America/Los_Angeles")
     projection = window_projection(
@@ -308,7 +308,7 @@ async def test_ended_today_windows_remain_in_full_day_query(
     assert entry.runtime_data.inbound_estimates == (projection,)
     calendar = InboundDeliveryCalendar(entry.runtime_data, entry)
     now = datetime.fromisoformat("2026-10-27T16:00:00-07:00")
-    monkeypatch.setattr("custom_components.shipments.calendar.dt_util.now", lambda: now)
+    monkeypatch.setattr("custom_components.packages.calendar.dt_util.now", lambda: now)
     assert calendar.event is None  # A passed window does not become a current event.
     start = datetime.fromisoformat("2026-10-27T00:00:00-07:00")
     end = datetime.fromisoformat("2026-10-28T00:00:00-07:00")
@@ -323,7 +323,7 @@ async def test_ended_today_windows_remain_in_full_day_query(
     assert await calendar.async_get_events(hass, events[0].end, end) == []
     client = await hass_client()
     response = await client.get(
-        "/api/calendars/calendar.shipments_inbound_deliveries",
+        "/api/calendars/calendar.packages_inbound_deliveries",
         params={"start": start.isoformat(), "end": end.isoformat()},
     )
     assert response.status == 200
