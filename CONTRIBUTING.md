@@ -12,6 +12,7 @@ cargo test --locked --all-features
 node --test tests_web/*.mjs
 cargo deny check advisories licenses sources
 uv sync --frozen
+uv run --frozen python scripts/build-integration
 uv run --frozen ruff check custom_components tests_ha
 uv run --frozen ruff format --check custom_components tests_ha
 uv run --frozen ty check --error-on-warning
@@ -30,6 +31,10 @@ To prepare a release, update the version in `Cargo.toml`, `pyproject.toml`,
 `custom_components/packages/manifest.json`, and `packages/config.yaml`.
 Refresh both lockfiles and the OpenAPI snapshot, then update the changelog.
 Merge through the required checks and tag that commit `v<version>`.
+On the release checkout, run
+`uv run --frozen python scripts/build-integration --output dist` and attach
+`dist/packages.zip` before publishing. Marketplace loads the companion from
+this archive, which contains the repair helper from the locked App Kit release.
 
 The container workflow checks the versions agree, builds on native amd64 and
 arm64 runners, and checks authentication and durable state after restart.

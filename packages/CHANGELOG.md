@@ -1,3 +1,8 @@
+## 0.8.3
+
+- Fix app and integration version mismatches from Home Assistant Repairs.
+- Move legacy Shipments statistics to Packages without losing history.
+
 ## 0.8.2
 
 - Schedule pickups directly from the header and keep pickup history in the tabs.

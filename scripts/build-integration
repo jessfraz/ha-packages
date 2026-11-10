@@ -1,0 +1,63 @@
+#!/usr/bin/env python3
+"""Bundle the locked HA App Kit helper and optionally build the Marketplace ZIP."""
+
+import argparse
+import json
+import subprocess
+import sys
+import zipfile
+from pathlib import Path
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--output", type=Path, help="Write the integration ZIP here")
+    args = parser.parse_args()
+    root = Path(__file__).resolve().parents[1]
+    (manifest,) = (root / "custom_components").glob("*/manifest.json")
+    integration = manifest.parent
+    metadata = json.loads(
+        subprocess.check_output(
+            ["cargo", "metadata", "--locked", "--format-version", "1"], cwd=root
+        )
+    )
+    (kit,) = [p for p in metadata["packages"] if p["name"] == "ha-app-kit-ha"]
+    (ui,) = [p for p in metadata["packages"] if p["name"] == "ha-app-ui"]
+    if kit["source"] != ui["source"]:
+        raise SystemExit("HA App Kit crates must share one locked source")
+    producer = Path(kit["manifest_path"]).parent / "bundle.py"
+    receipt = json.loads(
+        subprocess.check_output(
+            [sys.executable, str(producer), "--integration", str(integration)], cwd=root
+        )
+    )
+    if args.output is None:
+        return
+
+    # Only tracked integration files and the producer's exact output may ship.
+    files = subprocess.check_output(
+        ["git", "ls-files", "-z", "--", str(integration.relative_to(root))], cwd=root
+    ).decode()
+    members = [root / name for name in files.split("\0") if name]
+    helper = integration / "_app_kit"
+    members.extend(helper / name for name in [*receipt["files"], "source.json"])
+    entries = [(path.relative_to(integration).as_posix(), path) for path in members]
+    entries.append(("LICENSE", root / "LICENSE"))
+    names = [name for name, _ in entries]
+    if (
+        len(names) != len(set(names))
+        or {"__init__.py", "manifest.json", "repairs.py"} - set(names)
+        or any(not path.is_file() or path.is_symlink() for _, path in entries)
+    ):
+        raise SystemExit("Invalid integration archive contents")
+    args.output.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(args.output / f"{integration.name}.zip", "w") as archive:
+        for name, path in sorted(entries):
+            info = zipfile.ZipInfo(name, date_time=(2020, 1, 1, 0, 0, 0))
+            info.external_attr = 0o100644 << 16
+            info.compress_type = zipfile.ZIP_DEFLATED
+            archive.writestr(info, path.read_bytes())
+
+
+if __name__ == "__main__":
+    main()
