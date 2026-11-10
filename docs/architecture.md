@@ -43,6 +43,9 @@ SQLite transactions commit the record, history snapshot, and idempotency
 response together. Duplicate checks hold the SQLite writer lock. History
 preserves previous values as well as who changed them.
 
+Source messages can link to several parcels in a split order. Tracking identity
+and request keys deduplicate parcels; source links retain the shared evidence.
+
 Upgrades remove legacy records missing a carrier or tracking number, together
 with their sources, history and create replays. Complete records are retained.
 The DoorDash recipient-tracking migration also removes legacy DoorDash records

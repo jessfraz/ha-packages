@@ -371,7 +371,7 @@ async fn tracking_issues_filter_pages_every_error_across_directions_and_delivery
 }
 
 #[tokio::test]
-async fn concurrent_source_claims_allow_only_one_paid_tracking_registration() {
+async fn concurrent_source_claims_preserve_registration_fences_and_allow_split_parcels() {
     let app = App::new(None).await;
     let mut first = input("Source reservation 1");
     first.source = Some(Source {
@@ -380,7 +380,7 @@ async fn concurrent_source_claims_allow_only_one_paid_tracking_registration() {
     });
     let mut second = input("Source reservation 2");
     second.source = first.source.clone();
-    let (first, second) = tokio::join!(
+    let (one, two) = tokio::join!(
         app.request(Method::POST, "/v1/packages")
             .header("Idempotency-Key", "source-first")
             .json(&first)
@@ -390,24 +390,37 @@ async fn concurrent_source_claims_allow_only_one_paid_tracking_registration() {
             .json(&second)
             .send(),
     );
-    let mut statuses = [first.unwrap().status(), second.unwrap().status()];
+    let mut statuses = [one.unwrap().status(), two.unwrap().status()];
     statuses.sort_by_key(StatusCode::as_u16);
     assert_eq!(statuses[0], StatusCode::CREATED);
     assert!(matches!(
         statuses[1],
-        StatusCode::CONFLICT | StatusCode::SERVICE_UNAVAILABLE
+        StatusCode::CREATED | StatusCode::CONFLICT | StatusCode::SERVICE_UNAVAILABLE
     ));
-    assert_eq!(app.provider_fixture.as_ref().unwrap().calls(), 2);
-    let saved: i64 = sqlx::query_scalar("SELECT count(*) FROM shipments")
-        .fetch_one(app.store.pool())
-        .await
-        .unwrap();
-    assert_eq!(saved, 1);
-    let sources: i64 = sqlx::query_scalar("SELECT count(*) FROM sources")
-        .fetch_one(app.store.pool())
-        .await
-        .unwrap();
-    assert_eq!(sources, 1);
+    // An overlapping verification may be fenced. Retrying its own unchanged
+    // request after the lease releases must save the other parcel, not consume
+    // the source forever or register either tracking number twice.
+    for (body, key) in [(&first, "source-first"), (&second, "source-second")] {
+        let response = app
+            .request(Method::POST, "/v1/packages")
+            .header("Idempotency-Key", key)
+            .json(body)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
+    }
+    assert_eq!(app.provider_fixture.as_ref().unwrap().calls(), 4);
+    for query in [
+        "SELECT count(*) FROM shipments",
+        "SELECT count(*) FROM sources",
+    ] {
+        let count: i64 = sqlx::query_scalar(query)
+            .fetch_one(app.store.pool())
+            .await
+            .unwrap();
+        assert_eq!(count, 2);
+    }
     app.close().await;
 }
 
@@ -677,16 +690,15 @@ async fn duplicate_sources_tracking_archive_and_pagination_use_real_http() {
         StatusCode::CONFLICT
     );
     body.tracking = input("Other tracking").tracking;
-    assert_eq!(
-        app.request(Method::POST, "/v1/packages")
-            .header("Idempotency-Key", "c")
-            .json(&body)
-            .send()
-            .await
-            .unwrap()
-            .status(),
-        StatusCode::CONFLICT
-    );
+    let second = app
+        .request(Method::POST, "/v1/packages")
+        .header("Idempotency-Key", "c")
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(second.status(), StatusCode::CREATED);
+    let second: Shipment = second.json().await.unwrap();
     let filtered: ResultsPage<Shipment> = app
         .request(
             Method::GET,
@@ -698,8 +710,10 @@ async fn duplicate_sources_tracking_archive_and_pagination_use_real_http() {
         .json()
         .await
         .unwrap();
-    assert_eq!(filtered.items[0].id, created.id);
-    for index in 0..3 {
+    assert_eq!(filtered.items.len(), 2);
+    assert!(filtered.items.iter().any(|record| record.id == created.id));
+    assert!(filtered.items.iter().any(|record| record.id == second.id));
+    for index in 0..2 {
         app.create("Another", &format!("other-{index}")).await;
     }
     let first: ResultsPage<Shipment> = app
