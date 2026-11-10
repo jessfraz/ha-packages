@@ -42,9 +42,22 @@ function serviceLabel(service) {
     .replace(/^usps /, "USPS ")
     .replace(/^ups /, "UPS ");
 }
-export function installPickups(root, opener, packages, request, onForbidden) {
-  const find = (id) => root.querySelector(`#${id}`);
+export function installPickups(
+  root,
+  opener,
+  packages,
+  request,
+  onForbidden,
+  options = {},
+) {
+  const find = (id) => root.ownerDocument.getElementById(id);
   const field = (form, name) => form.elements.namedItem(name);
+  // Dialogs live outside either page so an action never has to navigate first.
+  const dialogs = [
+    "pickup-site-dialog",
+    "pickup-schedule-dialog",
+    "pickup-cancel-dialog",
+  ].map(find);
   const siteForm = find("pickup-site-form");
   const form = find("pickup-schedule-form");
   let access = false;
@@ -52,12 +65,14 @@ export function installPickups(root, opener, packages, request, onForbidden) {
   let sites = [];
   let carriers = [];
   let editingSite = null;
+  let pendingTracking = null;
   let reviewed = null;
   let operationKey = null;
   let polling = null;
   let cancelRecord = null;
   let cancelKey = null;
   let busy = false;
+  let protectedDialogs = new Set();
   let loading = false;
   let loadEpoch = 0;
   let queuedLoad = false;
@@ -66,12 +81,14 @@ export function installPickups(root, opener, packages, request, onForbidden) {
     const message = errorText(error);
     if (current(version)) find(id).textContent = message;
   }
-  for (const dialog of root.querySelectorAll("dialog")) {
+  for (const dialog of dialogs) {
     dialog.addEventListener("cancel", (event) => {
       if (busy) event.preventDefault();
+      else if (dialog === find("pickup-site-dialog")) pendingTracking = null;
     });
     dialog.addEventListener("close", () => {
-      if (access && busy && !dialog.open) dialog.showModal();
+      if (access && busy && protectedDialogs.has(dialog) && !dialog.open)
+        dialog.showModal();
     });
   }
   const clearTimer = () => {
@@ -86,10 +103,20 @@ export function installPickups(root, opener, packages, request, onForbidden) {
     );
   }
   function setBusy(value) {
+    // A queued close from the address dialog must not reopen it over the
+    // next dialog when setup continues into scheduling.
+    if (value && !busy)
+      protectedDialogs = new Set(dialogs.filter((dialog) => dialog.open));
+    if (!value) protectedDialogs.clear();
     busy = value;
-    for (const button of root.querySelectorAll("dialog button"))
-      button.disabled = value;
-    find("pickup-plan-fields").disabled = value || reviewed !== null;
+    opener.disabled = value;
+    for (const dialog of dialogs)
+      for (const button of dialog.querySelectorAll("button"))
+        button.disabled = value;
+    const configured = carriers.some((carrier) => carrier.configured);
+    const ready = configured && sites.some((site) => site.is_default);
+    find("pickup-plan-fields").disabled = value || reviewed !== null || !ready;
+    find("pickup-review-button").disabled = value || !ready;
     field(form, "accept_fee").disabled = value;
   }
   function showPackages() {
@@ -117,7 +144,43 @@ export function installPickups(root, opener, packages, request, onForbidden) {
     find("pickup-site-summary").textContent = site
       ? `${site.details.name} · ${addressText(site)} · ${site.details.timezone}`
       : "Set a default pickup address to get started.";
-    find("pickup-new").disabled = !site;
+    find("pickup-edit-site").textContent = site
+      ? "Edit pickup address"
+      : "Add pickup address";
+    find("pickup-edit-site").classList.toggle("quiet", Boolean(site));
+  }
+  function fillCarriers() {
+    const select = field(form, "service");
+    const selectedService = select.value;
+    select.replaceChildren(node("option", "Use saved label service"));
+    select.firstElementChild.value = "";
+    for (const carrier of carriers)
+      for (const service of carrier.capabilities.services) {
+        const option = node("option", serviceLabel(service));
+        option.value = service;
+        select.append(option);
+      }
+    select.value = selectedService;
+    const missing = carriers
+      .filter((carrier) => !carrier.configured)
+      .map((carrier) => carrierNames[carrier.carrier]);
+    find("pickup-configuration").textContent = !carriers.some((carrier) => carrier.configured)
+      ? "Connect a carrier account before scheduling. Add developer credentials in the app’s private configuration."
+      : missing.length
+        ? `Not configured: ${missing.join(", ")}. Only configured carrier accounts can schedule pickups.`
+        : "Charges use the selected carrier account.";
+    setBusy(busy);
+  }
+  async function loadSetup(version) {
+    const [locations, status] = await Promise.all([
+      request("v1/pickups/locations"),
+      request("v1/pickups/carriers"),
+    ]);
+    if (!current(version)) return;
+    sites = locations;
+    carriers = status;
+    fillSites();
+    fillCarriers();
   }
   function render(records) {
     const list = find("pickup-records");
@@ -264,23 +327,7 @@ export function installPickups(root, opener, packages, request, onForbidden) {
       carriers = status;
       fillSites();
       render(page.items);
-      const select = field(form, "service");
-      const selectedService = select.value;
-      select.replaceChildren(node("option", "Use saved label service"));
-      select.firstElementChild.value = "";
-      for (const carrier of carriers)
-        for (const service of carrier.capabilities.services) {
-          const option = node("option", serviceLabel(service));
-          option.value = service;
-          select.append(option);
-        }
-      select.value = selectedService;
-      const missing = carriers
-        .filter((c) => !c.configured)
-        .map((c) => carrierNames[c.carrier]);
-      find("pickup-message").textContent = missing.length
-        ? `Not configured: ${missing.join(", ")}. Add developer credentials in the app’s private configuration.`
-        : "All three carrier accounts are configured. Charges use the selected carrier account.";
+      fillCarriers();
       if (!root.hidden) {
         clearTimer();
         polling = setTimeout(
@@ -300,16 +347,9 @@ export function installPickups(root, opener, packages, request, onForbidden) {
       }
     }
   }
-  opener.addEventListener("click", () => {
-    if (!access) return;
-    packages.hidden = true;
-    root.hidden = false;
-    find("pickup-error").textContent = "";
-    load();
-  });
-  find("packages-back").addEventListener("click", showPackages);
+  opener.addEventListener("click", () => open([]));
   find("pickup-reload").addEventListener("click", load);
-  find("pickup-edit-site").addEventListener("click", () => {
+  function editSite() {
     editingSite = sites.find((s) => s.is_default) || null;
     siteForm.reset();
     const value = editingSite?.details;
@@ -339,16 +379,22 @@ export function installPickups(root, opener, packages, request, onForbidden) {
       field(siteForm, "residential").checked = value.residential;
     } else {
       field(siteForm, "timezone").value =
+        options.getTimeZone?.() ||
         Intl.DateTimeFormat().resolvedOptions().timeZone;
       field(siteForm, "ready_time").value = "09:00";
       field(siteForm, "close_time").value = "18:00";
     }
     find("pickup-site-error").textContent = "";
     find("pickup-site-dialog").showModal();
+  }
+  find("pickup-edit-site").addEventListener("click", () => {
+    pendingTracking = null;
+    editSite();
   });
-  find("pickup-site-close").addEventListener("click", () =>
-    find("pickup-site-dialog").close(),
-  );
+  find("pickup-site-close").addEventListener("click", () => {
+    pendingTracking = null;
+    find("pickup-site-dialog").close();
+  });
   siteForm.addEventListener("submit", async (event) => {
     event.preventDefault();
     if (busy || !access) return;
@@ -388,8 +434,14 @@ export function installPickups(root, opener, packages, request, onForbidden) {
         },
       );
       if (current(version)) {
+        setBusy(false);
         find("pickup-site-dialog").close();
-        await load();
+        if (pendingTracking !== null) {
+          const tracking = pendingTracking;
+          pendingTracking = null;
+          await open(tracking);
+        } else if (root.hidden) await loadSetup(version);
+        else await load();
       }
     } catch (error) {
       showError(error, "pickup-site-error", version);
@@ -411,17 +463,10 @@ export function installPickups(root, opener, packages, request, onForbidden) {
     find("pickup-review").hidden = true;
     find("pickup-review-details").replaceChildren();
     find("pickup-review-edit").hidden = true;
-    find("pickup-plan-fields").disabled = false;
     find("pickup-review-button").textContent = "Review pickup";
     field(form, "accept_fee").checked = false;
+    setBusy(busy);
   }
-  find("pickup-new").addEventListener("click", () => {
-    form.reset();
-    fillSites();
-    editPlan();
-    find("pickup-schedule-error").textContent = "";
-    find("pickup-schedule-dialog").showModal();
-  });
   find("pickup-schedule-close").addEventListener("click", () =>
     find("pickup-schedule-dialog").close(),
   );
@@ -431,7 +476,10 @@ export function installPickups(root, opener, packages, request, onForbidden) {
   });
   form.addEventListener("submit", async (event) => {
     event.preventDefault();
-    if (busy || !access || reviewed) return;
+    if (
+      busy || !access || reviewed ||
+      !carriers.some((carrier) => carrier.configured)
+    ) return;
     const version = generation;
     setBusy(true);
     find("pickup-schedule-error").textContent = "";
@@ -560,12 +608,13 @@ export function installPickups(root, opener, packages, request, onForbidden) {
       setBusy(false);
       find("pickup-schedule-dialog").close();
       editPlan();
+      options.onScheduled?.();
       render(receipt.items);
       await load();
       if (current(version)) {
         find("pickup-message").textContent =
           "Pickup request saved. Each carrier’s confirmed or uncertain outcome is shown below.";
-        find("pickup-new").focus();
+        find("pickup-reload").focus();
       }
     } catch (error) {
       if (current(version) && error.code === "pickup_location_changed") {
@@ -609,24 +658,40 @@ export function installPickups(root, opener, packages, request, onForbidden) {
       if (current(version)) setBusy(false);
     }
   });
+  async function open(tracking) {
+    if (!access || busy) return;
+    const version = generation;
+    form.reset();
+    editPlan();
+    field(form, "tracking").value = tracking.join("\n");
+    find("pickup-schedule-error").textContent = "";
+    find("pickup-schedule-dialog").showModal();
+    setBusy(true);
+    try {
+      await loadSetup(version);
+      if (!current(version)) return;
+      setBusy(false);
+      if (!sites.some((site) => site.is_default)) {
+        pendingTracking = tracking;
+        find("pickup-schedule-dialog").close();
+        editSite();
+      } else field(form, "tracking").focus();
+    } catch (error) {
+      showError(error, "pickup-schedule-error", version);
+    } finally {
+      if (current(version)) setBusy(false);
+    }
+  }
   return {
-    async open(tracking) {
+    open,
+    show() {
       if (!access) return;
-      const version = generation;
       packages.hidden = true;
       root.hidden = false;
-      await load();
-      if (!current(version)) return;
-      if (!sites.some((site) => site.is_default)) {
-        find("pickup-error").textContent =
-          "Confirm a default pickup address before scheduling.";
-        find("pickup-edit-site").focus();
-        return;
-      }
-      find("pickup-new").click();
-      field(form, "tracking").value = tracking.join("\n");
-      field(form, "tracking").focus();
+      find("pickup-error").textContent = "";
+      return load();
     },
+    hide: showPackages,
     setAccess(allowed, reset = false) {
       if (access === allowed && !reset) return;
       generation++;
@@ -639,17 +704,21 @@ export function installPickups(root, opener, packages, request, onForbidden) {
       sites = [];
       carriers = [];
       editingSite = null;
+      pendingTracking = null;
       cancelRecord = null;
       cancelKey = null;
       reviewed = null;
       operationKey = null;
       opener.hidden = !allowed;
       root.hidden = true;
-      for (const dialog of root.querySelectorAll("dialog")) dialog.close();
-      for (const form of root.querySelectorAll("form")) form.reset();
+      for (const dialog of dialogs) {
+        dialog.close();
+        for (const form of dialog.querySelectorAll("form")) form.reset();
+      }
       for (const id of [
         "pickup-site-summary",
         "pickup-message",
+        "pickup-configuration",
         "pickup-error",
         "pickup-records",
         "pickup-review-details",

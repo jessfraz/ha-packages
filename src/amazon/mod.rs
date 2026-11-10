@@ -155,11 +155,12 @@ struct State {
     observed: BTreeMap<String, Tracker>,
 }
 struct DiscoveryScan {
-    pending: VecDeque<pages::ParcelPage>,
-    retry: VecDeque<pages::ParcelPage>,
+    pending: VecDeque<DiscoveryCandidate>,
+    retry: VecDeque<DiscoveryCandidate>,
     next_page: Option<String>,
     seen_pages: BTreeSet<u8>,
     seen_sources: BTreeSet<String>,
+    seen_items: BTreeSet<(String, String)>,
     canonical_orders: BTreeMap<String, pages::OrderResolution>,
     classified_terminal: usize,
     awaiting_shipment: usize,
@@ -174,6 +175,7 @@ impl Default for DiscoveryScan {
             next_page: Some("/your-orders/orders?timeFilter=months-3".into()),
             seen_pages: BTreeSet::new(),
             seen_sources: BTreeSet::new(),
+            seen_items: BTreeSet::new(),
             canonical_orders: BTreeMap::new(),
             classified_terminal: 0,
             awaiting_shipment: 0,
@@ -181,6 +183,11 @@ impl Default for DiscoveryScan {
             deferred: DeferredCounts::default(),
         }
     }
+}
+
+enum DiscoveryCandidate {
+    Parcel(pages::ParcelPage),
+    PendingItem(pages::PendingItemPage),
 }
 
 enum DiscoveryObservation {
@@ -903,7 +910,16 @@ impl AmazonClient {
                 for parcel in listing.parcels {
                     let key = source_key(&customer, &parcel);
                     if !imported.contains(&key) && scan.seen_sources.insert(key) {
-                        scan.pending.push_back(parcel);
+                        scan.pending.push_back(DiscoveryCandidate::Parcel(parcel));
+                    }
+                }
+                for item in listing.pending_items {
+                    if scan
+                        .seen_items
+                        .insert((item.order.clone(), item.item.clone()))
+                    {
+                        scan.pending
+                            .push_back(DiscoveryCandidate::PendingItem(item));
                     }
                 }
                 if failure.is_some() {
@@ -914,6 +930,43 @@ impl AmazonClient {
                 parcel
             } else {
                 break;
+            };
+            let candidate = match candidate {
+                DiscoveryCandidate::PendingItem(item) => {
+                    reads += 1;
+                    let result = self
+                        .discovery_page(&item.path, deadline)
+                        .await
+                        .and_then(|page| {
+                            pages::unshipped_item(&page, &item.path, &item).map_err(|error| {
+                                ConnectionError::with_status(ConnectionStage::Orders, error, 200)
+                                    .with_page_kind(PageKind::Tracking)
+                                    .with_path(&item.path)
+                                    .with_shape(pages::tracking_failure_shape(&page))
+                            })
+                        });
+                    match result {
+                        Ok(()) => scan.awaiting_shipment += 1,
+                        Err(error)
+                            if error.stage == ConnectionStage::Orders
+                                && matches!(
+                                    error.provider_error().kind,
+                                    ErrorKind::InvalidResponse
+                                ) =>
+                        {
+                            error.log(&self.log, started.elapsed());
+                            scan.deferred.missing_identity += 1;
+                            deferred += 1;
+                        }
+                        Err(error) => {
+                            scan.retry.push_back(DiscoveryCandidate::PendingItem(item));
+                            failure = Some(error);
+                            break;
+                        }
+                    }
+                    continue;
+                }
+                DiscoveryCandidate::Parcel(parcel) => parcel,
             };
             let source_key = source_key(&customer, &candidate);
             if imported.contains(&source_key) {
@@ -978,7 +1031,7 @@ impl AmazonClient {
                                         if parcel.titles.is_empty() {
                                             parcel.titles.push("Package".into());
                                         }
-                                        scan.pending.push_back(parcel);
+                                        scan.pending.push_back(DiscoveryCandidate::Parcel(parcel));
                                     }
                                 }
                                 scan.seen_sources.insert(source_key.clone());
@@ -1059,7 +1112,7 @@ impl AmazonClient {
                     deferred += 1;
                 }
                 Err(error) => {
-                    scan.retry.push_back(candidate);
+                    scan.retry.push_back(DiscoveryCandidate::Parcel(candidate));
                     failure = Some(error);
                     break;
                 }
@@ -5255,6 +5308,192 @@ mod tests {
             let diagnostic = format!("{error:?} {error}");
             assert!(!diagnostic.contains("111-1234567-1234567"));
             assert!(!diagnostic.contains(NUMBER));
+        }
+    }
+
+    #[tokio::test]
+    async fn unshipped_item_without_parcel_identity_is_not_a_discovery_gap() {
+        use crate::{amazon_sync::AmazonDiscoveryWorker, store::Store};
+
+        const ITEM: &str = "/progress-tracker/package?orderId=111-1234567-1234567&itemId=ITEM_1";
+        let fixture = Fixture::new(|path| {
+            match path {
+            "/auth/token" => (200, ACCESS.into()),
+            "/ap/exchangetoken/cookies" => (200, COOKIES.into()),
+            "/your-orders/orders" | "/your-orders/orders?timeFilter=months-3" => (
+                200,
+                format!(
+                    r#"<a class="item-card__link" href="{ITEM}" aria-label="Example item, Order placed 1 October 2026, Arriving October 20 - October 25"></a><a class="item-card__link" href="{ITEM}" aria-label="Example item, Order placed 1 October 2026, Arriving October 20 - October 25"></a>"#
+                ),
+            ),
+            ITEM => (
+                200,
+                r#"<h1 class="pt-status-main-status">Ordered</h1>
+                <div class="pt-status-milestone-label active current-label" aria-label="Ordered: Complete">Ordered</div>
+                <div class="pt-status-milestone-label" aria-label="Shipped: Incomplete">Shipped</div>
+                <script data-a-state='{"key":"page-state"}'>
+                {"orderId":"111-1234567-1234567","itemId":"ITEM_1","trackingId":"","shortStatus":"ORDER_PLACED","progressTracker":{"lastReachedMilestone":"ORDERED"}}
+                </script>"#
+                    .into(),
+            ),
+            _ => (404, "Unexpected request".into()),
+        }
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let client = Arc::new(configured(&dir, &fixture));
+        client.enable_imports().await.unwrap();
+        let store = Store::open(&dir.path().join("registry.sqlite3"))
+            .await
+            .unwrap();
+        let worker = AmazonDiscoveryWorker::new(store.clone(), client.clone());
+
+        for expected_reads in 1..=2 {
+            force_discovery_due(&store).await;
+            assert!(worker.tick().await.unwrap());
+            let health = AmazonDiscoveryWorker::health(&store, &client.status().await)
+                .await
+                .unwrap();
+            assert_eq!(health.state, crate::amazon_sync::DiscoveryState::Complete);
+            assert_eq!(health.deferred_parcels, 0);
+            assert!(!health.problem);
+            let rows: i64 = sqlx::query_scalar("SELECT count(*) FROM shipments")
+                .fetch_one(store.pool())
+                .await
+                .unwrap();
+            assert_eq!(rows, 0, "an unshipped order must not create a fake package");
+            assert_eq!(
+                fixture
+                    .calls
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .filter(|p| p.as_str() == ITEM)
+                    .count(),
+                expected_reads,
+                "deduplicate within each sweep, but revisit until a shipment exists"
+            );
+        }
+        store.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn unshipped_items_share_the_bounded_discovery_budget_and_continue() {
+        use crate::{amazon_sync::AmazonDiscoveryWorker, store::Store};
+
+        const PREFIX: &str = "/progress-tracker/package?orderId=111-1234567-1234567&itemId=ITEM_";
+        let fixture = Fixture::new(|path| {
+            match path {
+            "/auth/token" => (200, ACCESS.into()),
+            "/ap/exchangetoken/cookies" => (200, COOKIES.into()),
+            "/your-orders/orders" | "/your-orders/orders?timeFilter=months-3" => (
+                200,
+                (1..=7).map(|item|format!(r#"<a class="item-card__link" href="{PREFIX}{item}" aria-label="Example item, Order placed 1 October 2026, Ordered"></a>"#)).collect(),
+            ),
+            value if value.starts_with(PREFIX) => {
+                let item=value.strip_prefix(PREFIX).unwrap();
+                (200,format!(r#"<h1 class="pt-status-main-status">Ordered</h1>
+                  <div class="pt-status-milestone-label" aria-label="Ordered: Complete">Ordered</div>
+                  <div class="pt-status-milestone-label" aria-label="Shipped: Incomplete">Shipped</div>
+                  <script id="page-state">{{"orderId":"111-1234567-1234567","itemId":"ITEM_{item}","trackingId":"","shortStatus":"ORDER_PLACED","progressTracker":{{"lastReachedMilestone":"ORDERED"}}}}</script>"#))
+            }
+            _ => (404,"Unexpected request".into()),
+        }
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let client = Arc::new(configured(&dir, &fixture));
+        client.enable_imports().await.unwrap();
+        let store = Store::open(&dir.path().join("registry.sqlite3"))
+            .await
+            .unwrap();
+        let worker = AmazonDiscoveryWorker::new(store.clone(), client.clone());
+        for (expected_reads, complete) in [(5, false), (7, true)] {
+            force_discovery_due(&store).await;
+            assert!(worker.tick().await.unwrap());
+            let health = AmazonDiscoveryWorker::health(&store, &client.status().await)
+                .await
+                .unwrap();
+            assert_eq!(
+                health.state == crate::amazon_sync::DiscoveryState::Complete,
+                complete
+            );
+            assert_eq!(health.has_more, !complete);
+            let reads = fixture
+                .calls
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|p| p.starts_with(PREFIX))
+                .count();
+            assert_eq!(reads, expected_reads);
+            let rows: i64 = sqlx::query_scalar("SELECT count(*) FROM shipments")
+                .fetch_one(store.pool())
+                .await
+                .unwrap();
+            assert_eq!(rows, 0);
+        }
+        let listings = fixture
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|p| p.starts_with("/your-orders/orders"))
+            .count();
+        assert_eq!(listings, 1, "continuation must not restart the listing");
+        store.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn unverified_or_challenged_pending_items_cannot_clear_discovery_repairs() {
+        use crate::{amazon_sync::AmazonDiscoveryWorker, store::Store};
+        const ITEM: &str = "/progress-tracker/package?orderId=111-1234567-1234567&itemId=ITEM_1";
+        for challenge in [false, true] {
+            let fixture = Fixture::new(move |path| {
+                match path {
+                "/auth/token"=>(200,ACCESS.into()),
+                "/ap/exchangetoken/cookies"=>(200,COOKIES.into()),
+                "/your-orders/orders" | "/your-orders/orders?timeFilter=months-3" => (200,format!(r#"<a class="item-card__link" href="{ITEM}"></a>"#)),
+                ITEM if challenge=>(503,"<input id=captchacharacters>".into()),
+                ITEM=>(200,r#"<h1 class="pt-status-main-status">Ordered</h1><script id="page-state">{"orderId":"111-1234567-1234567","itemId":"OTHER_ITEM","trackingId":"","shortStatus":"ORDER_PLACED","progressTracker":{"lastReachedMilestone":"ORDERED"}}</script>"#.into()),
+                _=>(404,"Unexpected request".into()),
+            }
+            });
+            let dir = tempfile::tempdir().unwrap();
+            let client = Arc::new(configured(&dir, &fixture));
+            client.enable_imports().await.unwrap();
+            let store = Store::open(&dir.path().join("registry.sqlite3"))
+                .await
+                .unwrap();
+            let worker = AmazonDiscoveryWorker::new(store.clone(), client.clone());
+            force_discovery_due(&store).await;
+            assert!(worker.tick().await.unwrap());
+            let health = AmazonDiscoveryWorker::health(&store, &client.status().await)
+                .await
+                .unwrap();
+            assert!(health.problem);
+            assert_eq!(
+                health.state,
+                if challenge {
+                    crate::amazon_sync::DiscoveryState::ChallengeRequired
+                } else {
+                    crate::amazon_sync::DiscoveryState::Partial
+                }
+            );
+            let rows: i64 = sqlx::query_scalar("SELECT count(*) FROM shipments")
+                .fetch_one(store.pool())
+                .await
+                .unwrap();
+            assert_eq!(rows, 0);
+            if challenge {
+                let calls = fixture.calls.lock().unwrap().len();
+                force_discovery_due(&store).await;
+                assert!(!worker.tick().await.unwrap());
+                assert_eq!(
+                    fixture.calls.lock().unwrap().len(),
+                    calls,
+                    "challenge must retain the request pause"
+                );
+            }
+            store.close().await.unwrap();
         }
     }
 }

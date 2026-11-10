@@ -39,6 +39,7 @@ let appliedSearch = "";
 let shownDeliveryWindow = null;
 let deliveryTimeZone;
 let activeDirection = "inbound";
+let activePage = "packages";
 let routeGeneration = 0;
 let applyingRoute = false;
 let connected = false;
@@ -58,12 +59,19 @@ let agentBusy = false;
 let agentSession = 0;
 let agentTokenGeneration = 0;
 let issuedAgentId = null;
-const pickups = installPickups(byId("pickups-dashboard"), byId("show-pickups"), byId("dashboard"), api, () => setOwnerAccess(false));
+const pickups = installPickups(byId("pickups-dashboard"), byId("schedule-pickup"), byId("dashboard"), api, () => setOwnerAccess(false), {
+  getTimeZone: () => deliveryTimeZone,
+  onScheduled: () => {
+    userNavigation();
+    writeRoute({ page: "pickups", shipment: null, edit: null, section: null });
+    selectPage("pickups");
+  },
+});
 const amazonSettings = installAmazonSettings(byId("amazon"), api, () => setOwnerAccess(false));
 
 function editError(error) {
   if (error.status === 412) {
-    return "This shipment changed. Your draft is still here. Close and reopen the shipment to review its latest version before retrying.";
+    return "This package changed. Your draft is still here. Close and reopen the package to review its latest version before retrying.";
   }
   return error.message;
 }
@@ -91,18 +99,18 @@ function configurationIssue(sync) {
   if (sync.provider === "amazon_account" && sync.error_code === "provider_authentication_required")
     return {
       label: "Amazon sign-in required",
-      instruction: "Your shipment is saved. Reconnect Amazon to resume tracking updates.",
+      instruction: "Your package is saved. Reconnect Amazon to resume tracking updates.",
       reconnect: true,
     };
   if (sync.registration_state !== "configuration_required") return null;
   if (["tracking_carrier_account_required", "tracking_carrier_credentials_required"].includes(sync.error_code))
     return {
       label: "Carrier setup required",
-      instruction: "Your shipment is saved. Configure this carrier account in the tracking provider, then choose Refresh tracking. Automatic retries are paused.",
+      instruction: "Your package is saved. Configure this carrier account in the tracking provider, then choose Refresh tracking. Automatic retries are paused.",
     };
   return {
     label: "Provider setup required",
-    instruction: "Your shipment is saved. Update the tracking provider API key in the app configuration, then choose Refresh tracking. Automatic retries are paused.",
+    instruction: "Your package is saved. Update the tracking provider API key in the app configuration, then choose Refresh tracking. Automatic retries are paused.",
   };
 }
 
@@ -165,7 +173,27 @@ function userNavigation() {
 
 function saveListRoute() {
   userNavigation();
-  writeRoute({ direction: activeDirection, view: byId("view").value, q: appliedSearch });
+  writeRoute({ page: null, direction: activeDirection, view: byId("view").value, q: appliedSearch });
+}
+
+function updateNavigation() {
+  for (const button of byId("directions").querySelectorAll("button")) {
+    const current = activePage === "pickups" ? button.id === "show-pickups"
+      : button.dataset.direction === activeDirection;
+    if (current) button.setAttribute("aria-current", "page");
+    else button.removeAttribute("aria-current");
+  }
+}
+
+function selectPage(page) {
+  activePage = page === "pickups" && showInstallation ? "pickups" : "packages";
+  updateNavigation();
+  if (activePage === "pickups") {
+    clearTimeout(refreshTimer);
+    return pickups.show();
+  }
+  pickups.hide();
+  scheduleRefresh();
 }
 
 async function applyRoute(initial = false) {
@@ -185,12 +213,16 @@ async function applyRoute(initial = false) {
   byId("query").value = search;
   applyingRoute = true;
   try {
+    const pickupPage = params.get("page") === "pickups" && showInstallation;
+    const returning = activePage === "pickups";
+    await selectPage(pickupPage ? "pickups" : "packages");
+    if (generation !== routeGeneration) return;
     if (showInstallation) {
       if (params.has("installation")) byId("installation").open = params.get("installation") === "open";
       byId("agent-access").open = params.get("agents") === "open";
       byId("amazon").open = ["open", "connect"].includes(params.get("amazon"));
     }
-    if (initial || changed) await load();
+    if (!pickupPage && (initial || changed || returning)) await load();
     if (generation !== routeGeneration) return;
     if (showInstallation) {
       byId("installation").open = params.has("installation") ? params.get("installation") === "open" : installationNeedsAttention;
@@ -300,7 +332,9 @@ async function connect(signal) {
   byId("login").hidden = true;
   byId("startup-connection").hidden = true;
   byId("dashboard").hidden = false;
+  byId("directions").hidden = false;
   byId("add").hidden = false;
+  deliveryTimeZone = system.delivery_day?.time_zone;
   setOwnerAccess(system.credential_role === "owner", true);
   renderServiceStatus(system, false);
   connected = true;
@@ -352,6 +386,11 @@ function setOwnerAccess(owner, reset = false) {
   showInstallation = owner;
   amazonSettings.setAccess(owner, reset);
   pickups.setAccess(owner, reset);
+  byId("show-pickups").hidden = !owner;
+  if (!owner && activePage === "pickups") {
+    writeRoute({ page: null }, true);
+    selectPage("packages");
+  }
   // Role and connection changes invalidate pending credential responses and
   // clear any one-time token before privileged controls can disappear.
   agentSession += 1;
@@ -469,8 +508,7 @@ async function load(append = false) {
     enabledProviders = new Set(system.enabled_providers);
     if (showInstallation) refreshInstallation(generation, controller.signal);
     renderServiceStatus(system, true);
-    for (const button of byId("directions").querySelectorAll("button"))
-      button.setAttribute("aria-pressed", String(button.dataset.direction === activeDirection));
+    updateNavigation();
     const stats = byId("summary");
     const focusedStat = document.activeElement?.dataset?.stat;
     stats.replaceChildren();
@@ -554,7 +592,7 @@ async function load(append = false) {
         tracking_issues: ["No tracking issues.", "Tracking errors appear here. New registrations in progress are not errors."],
         all: [
           "No packages yet.",
-          "Use Add shipment when you have a tracking number. New labels do not need a carrier scan.",
+          "Use Add package when you have a tracking number. New labels do not need a carrier scan.",
         ],
         archived: [
           "No archived packages.",
@@ -942,7 +980,7 @@ function openEditor(shipment = null) {
   const form = byId("edit-form");
   form.reset();
   byId("edit-error").textContent = "";
-  byId("edit-title").textContent = shipment ? "Edit shipment" : "Add shipment";
+  byId("edit-title").textContent = shipment ? "Edit package" : "Add package";
   if (shipment) {
     for (const [key, value] of Object.entries({
       title: shipment.title,
@@ -974,8 +1012,8 @@ function setEditorSaving(saving) {
   savingEditor = saving;
   byId("shipment-fields").disabled = saving;
   byId("save").disabled = saving;
-  byId("save").textContent = saving ? "Saving…" : "Save shipment";
-  byId("edit-status").textContent = saving ? "Verifying tracking and saving your shipment." : "";
+  byId("save").textContent = saving ? "Saving…" : "Save package";
+  byId("edit-status").textContent = saving ? "Verifying tracking and saving your package." : "";
 }
 
 function currentDetail(id, generation) {
@@ -1114,11 +1152,11 @@ async function show(id, preserveView = false, section = route().get("section")) 
     issue.append(element("p", configuration
       ? configuration.instruction
       : !configured
-      ? "Your shipment is saved. Configure the tracking provider to resume updates."
+      ? "Your package is saved. Configure the tracking provider to resume updates."
       : retrying
-        ? next * 1000 > Date.now() ? `Your shipment is saved. Next retry ${dateLabel(next * 1000)}.`
-          : "Your shipment is saved. Waiting for the next retry."
-        : "Your shipment is saved. Review the carrier and provider support before retrying.", "retry-timing"));
+        ? next * 1000 > Date.now() ? `Your package is saved. Next retry ${dateLabel(next * 1000)}.`
+          : "Your package is saved. Waiting for the next retry."
+        : "Your package is saved. Review the carrier and provider support before retrying.", "retry-timing"));
     if (configuration?.reconnect && showInstallation) {
       const reconnect = element("button", "Reconnect Amazon", "quiet");
       reconnect.type = "button";
@@ -1442,7 +1480,7 @@ byId("edit-form").addEventListener("submit", async (event) => {
       await show(saved.id);
     }
     await load();
-    if (current) notice("Shipment saved.");
+    if (current) notice("Package saved.");
   } catch (error) {
     if (generation === editorGeneration && byId("editor").open)
       byId("edit-error").textContent = editError(error);
@@ -1478,13 +1516,22 @@ for (const [id, key] of [["installation", "installation"], ["agent-access", "age
   });
 }
 
-for (const button of byId("directions").querySelectorAll("button")) {
+for (const button of byId("directions").querySelectorAll("[data-direction]")) {
   button.addEventListener("click", guarded(() => {
     activeDirection = button.dataset.direction;
     saveListRoute();
+    selectPage("packages");
     return load();
   }));
 }
+byId("show-pickups").addEventListener("click", guarded(() => {
+  if (!showInstallation) return;
+  userNavigation();
+  closeEditor(false);
+  closeDetail(false);
+  writeRoute({ page: "pickups", shipment: null, edit: null, section: null });
+  return selectPage("pickups");
+}));
 window.addEventListener("hashchange", guarded(() => applyRoute()));
 
 window.addEventListener("message", guarded(async event => {

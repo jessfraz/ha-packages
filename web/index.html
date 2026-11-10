@@ -21,8 +21,8 @@
             </g>
           </svg>
       </span>
-      <button id="show-pickups" class="quiet" type="button" hidden>Pickups</button>
-      <button id="add">Add shipment</button>
+      <button id="schedule-pickup" class="quiet" type="button" hidden>Schedule pickup</button>
+      <button id="add">Add package</button>
     </header>
     <main>
       <h1 class="sr-only">Packages</h1>
@@ -35,7 +35,7 @@
       </section>
       <form id="login" hidden>
         <h2>Connect</h2>
-        <p class="muted">Enter your shipment API token. It stays in this tab’s memory.</p>
+        <p class="muted">Enter your Packages API token. It stays in this tab’s memory.</p>
         <label
           >API token<input
             name="token"
@@ -45,13 +45,14 @@
           ></label
         ><button>Connect</button>
       </form>
+      <nav id="directions" class="direction-tabs" aria-label="Packages" hidden>
+        <button type="button" data-direction="all">All</button>
+        <button type="button" data-direction="inbound" aria-current="page">Inbound</button>
+        <button type="button" data-direction="outbound">Outbound</button>
+        <button id="show-pickups" type="button" hidden>Pickups</button>
+      </nav>
       <section id="dashboard" hidden>
-        <nav id="directions" class="direction-tabs" aria-label="Shipment direction">
-          <button type="button" data-direction="all" aria-pressed="false">All</button>
-          <button type="button" data-direction="inbound" aria-pressed="true">Inbound</button>
-          <button type="button" data-direction="outbound" aria-pressed="false">Outbound</button>
-        </nav>
-        <div id="summary" class="summary" aria-label="Shipment summary"></div>
+        <div id="summary" class="summary" aria-label="Package summary"></div>
         <div class="toolbar">
           <form id="search">
             <label class="sr-only" for="query">Search packages</label>
@@ -74,7 +75,7 @@
               <option value="archived">Archived</option>
             </select>
           </label>
-          <button id="refresh" class="quiet" aria-label="Refresh shipment list">
+          <button id="refresh" class="quiet" aria-label="Refresh package list">
             Refresh
           </button>
         </div>
@@ -86,7 +87,7 @@
         <details id="installation" class="installation" hidden>
           <summary>Installation <span id="installation-summary"></span></summary>
           <div class="installation-heading">
-            <p class="muted">Connection diagnostics and backup coverage. Shipment tracking updates run independently.</p>
+            <p class="muted">Connection diagnostics and backup coverage. Package tracking updates run independently.</p>
             <button id="check-installation" class="quiet" type="button">Run checks</button>
           </div>
           <ul id="installation-checks"></ul>
@@ -115,8 +116,8 @@
           </form>
           <p id="amazon-message" role="status" aria-live="polite"></p>
           <p id="amazon-error" role="alert"></p>
-          <section id="amazon-preview-result" hidden aria-label="Amazon shipment preview">
-            <h3>Shipment preview</h3>
+          <section id="amazon-preview-result" hidden aria-label="Amazon package preview">
+            <h3>Package preview</h3>
             <p id="amazon-preview-note" class="muted"></p>
             <ol id="amazon-preview-list"></ol>
             <p id="amazon-deferred" class="muted"></p>
@@ -156,9 +157,6 @@
             <p class="eyebrow">Prepaid labels, one collection</p>
             <h2 id="pickups-title">Pickups</h2>
           </div>
-          <button id="packages-back" type="button" class="quiet">
-            Back to packages
-          </button>
         </div>
         <p class="muted">
           USPS, UPS and FedEx collect at your saved pickup address. Scheduling does
@@ -168,8 +166,7 @@
           <p id="pickup-site-summary" class="muted"></p>
           <div class="header-actions">
             <button id="pickup-edit-site" class="quiet" type="button">
-              Pickup address</button
-            ><button id="pickup-new" type="button">Schedule pickup</button>
+              Add pickup address</button>
           </div>
         </div>
         <p id="pickup-message" role="status" aria-live="polite"></p>
@@ -178,6 +175,9 @@
         <button id="pickup-reload" class="quiet" type="button">
           Refresh pickups
         </button>
+      </section>
+    </main>
+    <footer id="app-footer" class="app-footer"></footer>
         <dialog
           id="pickup-site-dialog"
           class="dialog-panel"
@@ -223,9 +223,8 @@
                 /></label>
               </div>
               <label
-                >Email<input
+                >Email <span class="optional-label">Optional</span><input
                   name="email"
-                  required
                   type="email"
                   maxlength="50"
                   autocomplete="email"
@@ -333,6 +332,7 @@
               </button>
             </div>
             <div class="dialog-body">
+              <p id="pickup-configuration" role="status" aria-live="polite"></p>
               <fieldset id="pickup-plan-fields">
                 <label
                   >Prepaid tracking numbers<textarea
@@ -456,13 +456,10 @@
             </div>
           </form>
         </dialog>
-      </section>
-    </main>
-    <footer id="app-footer" class="app-footer"></footer>
     <dialog id="editor" class="dialog-panel" aria-labelledby="edit-title">
       <form id="edit-form">
         <div class="dialog-heading">
-          <h2 id="edit-title">Add shipment</h2>
+          <h2 id="edit-title">Add package</h2>
           <button
             type="button"
             class="quiet"
@@ -521,7 +518,7 @@
         <p id="edit-error" role="alert"></p>
         <div class="actions">
         <button type="button" class="quiet" data-close="editor">Cancel</button>
-        <button id="save">Save shipment</button>
+        <button id="save">Save package</button>
         </div>
         </div>
       </form>
@@ -546,7 +543,7 @@
       </section>
       <div id="actions" class="actions"></div>
       <details id="correction" class="detail-disclosure">
-        <summary>Correct shipment status</summary>
+        <summary>Correct package status</summary>
       <form id="override-form">
         <label
           >Status<select name="status">
