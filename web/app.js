@@ -230,7 +230,7 @@ async function applyRoute(initial = false) {
 }
 
 function notice(text, error = false) {
-  setNotice(byId("notice"), text, error);
+  setNotice(byId("notice"), text, error ? "error" : "status");
 }
 
 async function api(path, options = {}) {

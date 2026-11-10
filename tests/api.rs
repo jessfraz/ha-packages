@@ -3307,6 +3307,69 @@ async fn pickup_review_two_admin_address_race_requires_a_new_review_before_any_a
 }
 
 #[tokio::test]
+#[ignore = "requires PACKAGES_PLAYWRIGHT_MODULE pointing to the installed Playwright ESM module"]
+async fn pickup_combined_app_kit_ui_uses_real_admission_and_durable_receipts() {
+    for variant in ["desktop-light", "mobile-dark"] {
+        let (app, creates) = pickup_app(false).await;
+        let manager = app.pickup_manager.clone();
+        let (stop, rx) = tokio::sync::watch::channel(false);
+        let worker = tokio::spawn(async move {
+            while !*rx.borrow() {
+                manager.tick(rx.clone()).await.unwrap();
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        });
+        let url = app.url.clone();
+        let script =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests_browser/pickup-ui.mjs");
+        let result = tokio::task::spawn_blocking(move || {
+            std::process::Command::new("node")
+                .arg(script)
+                .env("PACKAGES_TEST_URL", url)
+                .env("PACKAGES_TEST_OWNER", OWNER)
+                .env("PACKAGES_TEST_VARIANT", variant)
+                .env("PACKAGES_TEST_VERSION", env!("CARGO_PKG_VERSION"))
+                .output()
+                .unwrap()
+        })
+        .await
+        .unwrap();
+        stop.send(true).unwrap();
+        worker.await.unwrap();
+        assert!(
+            result.status.success(),
+            "{variant}: {}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert_eq!(creates.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(
+            app.provider_fixture
+                .as_ref()
+                .unwrap()
+                .methods()
+                .iter()
+                .filter(|method| **method == Method::POST)
+                .count(),
+            1
+        );
+        let watcher = app
+            .store
+            .resolve_reference("TESTPICKUP123", None)
+            .await
+            .unwrap();
+        assert_eq!(watcher.direction, Direction::Outbound);
+        assert_eq!(
+            watcher.sync.registration_state,
+            RegistrationState::Registered
+        );
+        let records = app.pickup_manager.list(None, 10).await.unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].state, packages::pickup::models::State::Scheduled);
+        app.close().await;
+    }
+}
+
+#[tokio::test]
 async fn pickup_review_bound_idempotent_replay_returns_the_original_receipt_after_site_changes() {
     use packages::pickup::models::*;
     let (app, creates) = pickup_app(false).await;

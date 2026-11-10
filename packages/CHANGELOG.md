@@ -1,3 +1,15 @@
+## 0.8.0
+
+- Schedule, inspect and cancel prepaid-label pickups directly with USPS, UPS
+  and FedEx using a saved pickup address and the carrier’s shipping account.
+- Reuse existing tracking watchers or verify missing ones before scheduling.
+  Keep durable receipts and uncertain outcomes across retries and restores.
+- Accept tracking numbers throughout the CLI, with automatic request keys and
+  revision checks for normal commands.
+- Use HA App Kit for the shared header, footer, notices and dialog controls.
+- Add read-only pickup counts, a calendar and account/attention Repairs in
+  Home Assistant. Carrier developer credentials are configured separately.
+
 ## 0.7.2
 
 - Repair private file permissions as well as ownership after native restores,
