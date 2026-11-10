@@ -13,6 +13,10 @@ fi
 scratch=$(mktemp -d "${TMPDIR:-/tmp}/ha-packages-smoke.XXXXXX")
 container="ha-packages-smoke-${RANDOM}-${RANDOM}"
 volume="$container-data"
+restore_volume="$container-restored"
+outside_volume="$container-outside"
+boundary_container="$container-boundary"
+root_link_container="$container-root-link"
 # Deliberately fake: this token exists only in the disposable local container.
 token='container-smoke-only-no-provider-credentials'
 
@@ -21,8 +25,12 @@ cleanup() {
     if [[ $status -ne 0 ]]; then
         docker logs "$container" >&2 || true
     fi
-    docker rm --force "$container" >/dev/null 2>&1 || true
-    docker volume rm "$volume" >/dev/null 2>&1 || true
+    for resource in "$container" "$boundary_container" "$root_link_container"; do
+        docker rm --force "$resource" >/dev/null 2>&1 || true
+    done
+    for resource in "$volume" "$restore_volume" "$outside_volume"; do
+        docker volume rm "$resource" >/dev/null 2>&1 || true
+    done
     rm -rf "$scratch"
     exit "$status"
 }
@@ -40,8 +48,6 @@ docker create --name "$container" \
     --env "PACKAGES_API_TOKEN=$token" \
     "$image" >/dev/null
 docker cp "$scratch/packages.sqlite3" "$container:/data/packages.sqlite3"
-docker run --rm --mount "type=volume,source=$volume,target=/data" \
-    --entrypoint chown "$image" 10001:10001 /data/packages.sqlite3
 docker start "$container" >/dev/null
 base_url="http://$(docker port "$container" 8080/tcp)"
 
@@ -250,11 +256,60 @@ request POST /v1/agents 403 \
     --header 'Content-Type: application/json' --data '{"name":"Forbidden agent"}'
 request DELETE "/v1/agents/$agent_id" 403 --header "Authorization: Bearer $agent_token"
 
+# Exercise a complete private-state restore into a fresh volume. Like a native
+# Supervisor restore, copied files retain their modes but arrive owned by root.
+database_mode=$(docker exec "$container" stat -c '%a' /data/packages.sqlite3)
 stop_container
+# Deliberately fake and paused: this saved account can never contact a provider.
+printf '%s\n' '{"refresh_token":"container-smoke-only","device_serial":"container-smoke-only","customer_id":"container-smoke-only","generation":1,"imports_enabled":false,"auth_required":true}' >"$scratch/amazon-account.json"
+docker cp "$scratch/amazon-account.json" "$container:/data/amazon-account.json"
+docker volume create "$outside_volume" >/dev/null
+docker run --rm --mount "type=volume,source=$volume,target=/data" \
+    --mount "type=volume,source=$outside_volume,target=/outside" \
+    --entrypoint sh "$image" -c '
+        umask 077
+        printf "outside-private-data\n" > /outside/sentinel
+        mkdir /outside/private /data/owned-nested
+        printf "preserved-private-state\n" > /data/owned-nested/marker
+        chown -R 10001:10001 /data/owned-nested
+        ln -s /outside /data/external-directory
+        ln -s /outside/sentinel /data/external-file
+    '
+mkdir "$scratch/app-data"
+docker cp "$container:/data/." "$scratch/app-data"
+docker rm "$container" >/dev/null
+docker volume create "$restore_volume" >/dev/null
+docker create --name "$container" \
+    --publish 127.0.0.1::8080 \
+    --mount "type=volume,source=$restore_volume,target=/data" \
+    --mount "type=volume,source=$outside_volume,target=/outside" \
+    "$image" >/dev/null
+docker cp "$scratch/app-data/." "$container:/data"
+docker run --rm --mount "type=volume,source=$restore_volume,target=/data" \
+    --entrypoint sh "$image" -c '
+        test "$(stat -c "%a:%u:%g" /data/credentials.json)" = 600:0:0
+        test "$(stat -c "%a:%u:%g" /data/amazon-account.json)" = 600:0:0
+        test -L /data/external-directory
+        test -L /data/external-file
+    '
 docker start "$container" >/dev/null
 base_url="http://$(docker port "$container" 8080/tcp)"
 wait_for_api
 check_credentials
+ownership=$(docker exec "$container" stat -c '%a:%u:%g' \
+    /data/packages.sqlite3 /data/amazon-account.json /data/owned-nested/marker)
+if [[ $ownership != "$database_mode:10001:10001"$'\n600:10001:10001\n600:10001:10001' ]]; then
+    echo 'Restored private data modes/owners were not preserved' >&2
+    exit 1
+fi
+outside=$(docker exec "$container" stat -c '%a:%u:%g' /outside/sentinel /outside/private)
+if [[ $outside != $'600:0:0\n700:0:0' ]]; then
+    echo 'Startup followed a private-data symlink outside the owned volume' >&2
+    exit 1
+fi
+docker exec "$container" sh -c 'test "$(cat /outside/sentinel)" = outside-private-data'
+docker cp "$container:/data/amazon-account.json" "$scratch/restored-amazon-account.json"
+cmp -s "$scratch/amazon-account.json" "$scratch/restored-amazon-account.json"
 docker cp "$container:/data/credentials.json" "$scratch/restarted-credentials.json"
 if ! cmp -s "$scratch/credentials.json" "$scratch/restarted-credentials.json"; then
     echo 'App credentials changed after restart' >&2
@@ -282,4 +337,36 @@ jq --exit-status '.items == []' "$scratch/response.json" >/dev/null
 check_shipment
 stop_container
 
-echo "Container smoke passed ($expected_arch): uid10001, standalone/app/agent access, private credentials, installation checks, and durable packages/credentials/revocations after clean restart."
+# Reject ambiguous ownership boundaries before starting the unprivileged server.
+expect_startup_refusal() {
+    local name=$1 running=true
+    docker start "$name" >/dev/null
+    for _ in {1..40}; do
+        running=$(docker inspect "$name" --format '{{.State.Running}}')
+        if [[ $running == false ]]; then
+            break
+        fi
+        sleep 0.25
+    done
+    if [[ $running != false || $(docker inspect "$name" --format '{{.State.ExitCode}}') == 0 ]]; then
+        echo 'App accepted a private-data ownership boundary violation' >&2
+        return 1
+    fi
+}
+docker create --name "$boundary_container" \
+    --mount "type=volume,source=$restore_volume,target=/data" \
+    --mount "type=volume,source=$outside_volume,target=/data/external-mount" \
+    "$image" >/dev/null
+expect_startup_refusal "$boundary_container"
+docker create --name "$root_link_container" \
+    --mount "type=volume,source=$outside_volume,target=/outside" \
+    --entrypoint sh "$image" -c 'rmdir /data; ln -s /outside /data; exec /usr/local/bin/docker-entrypoint.sh' >/dev/null
+expect_startup_refusal "$root_link_container"
+docker run --rm --mount "type=volume,source=$outside_volume,target=/outside" \
+    --entrypoint sh "$image" -c '
+        test "$(stat -c "%a:%u:%g" /outside/sentinel)" = 600:0:0
+        test "$(stat -c "%a:%u:%g" /outside/private)" = 700:0:0
+        test "$(stat -c "%u:%g" /outside)" = 0:0
+    '
+
+echo "Container smoke passed ($expected_arch): uid10001, standalone/app/agent access, private-state restore, unchanged credentials/modes, external-link and mount boundaries, installation checks, and durable packages/credentials/revocations."

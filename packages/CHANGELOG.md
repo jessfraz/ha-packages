@@ -1,3 +1,9 @@
+## 0.7.1
+
+- Repair private data ownership after native restores before starting the
+  unprivileged app. Preserve credentials and file modes without following
+  symlinks or crossing into nested mounts.
+
 ## 0.7.0
 
 - Update bundled SQLite to the patched release for RUSTSEC-2026-0459.

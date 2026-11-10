@@ -1,13 +1,19 @@
 #!/bin/sh
 set -eu
 
-# Supervisor creates /data and options.json as root. Only startup needs root;
-# the server and worker run as the fixed application user.
+# Native restores copy private data as root while retaining restrictive modes.
+# Repair only this volume before dropping privileges; never traverse its links
+# or a nested mount into somebody else's storage.
 if [ "$(id -u)" -eq 0 ]; then
-    chown packages:packages /data
-    if [ -f /data/options.json ]; then
-        chown packages:packages /data/options.json
+    if [ -L /data ] || [ ! -d /data ]; then
+        echo 'Private data must be a real directory' >&2
+        exit 1
     fi
+    if ! awk '$5 ~ /^\/data\// { exit 1 }' /proc/self/mountinfo; then
+        echo 'Private data mount boundary is unavailable or contains nested mounts' >&2
+        exit 1
+    fi
+    find -P /data -xdev -exec chown --no-dereference packages:packages -- {} +
     exec gosu packages "$0" "$@"
 fi
 
