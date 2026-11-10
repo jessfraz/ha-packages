@@ -24,6 +24,11 @@ function addressText(site) {
     .filter(Boolean)
     .join(", ");
 }
+function windowText(plan) {
+  return plan.carrier === "usps"
+    ? "During normal mail delivery"
+    : `${plan.ready_time}–${plan.close_time}`;
+}
 function feeText(fee, carrier) {
   if (fee?.kind === "free") return "Free normal-route pickup";
   if (fee?.kind === "estimate")
@@ -149,7 +154,7 @@ export function installPickups(root, opener, packages, request, onForbidden) {
       card.append(
         node(
           "p",
-          `${record.confirmation?.pickup_date || record.offer?.date || record.plan.date || "Next available date"} · ${record.plan.carrier === "usps" ? "During normal mail delivery" : `${record.plan.ready_time}–${record.plan.close_time}`} · ${record.plan.site.details.timezone}`,
+          `${record.confirmation?.pickup_date || record.offer?.date || record.plan.date || "Next available date"} · ${windowText(record.plan)} · ${record.plan.site.details.timezone}`,
           "muted",
         ),
       );
@@ -172,7 +177,15 @@ export function installPickups(root, opener, packages, request, onForbidden) {
         card.append(
           node(
             "p",
-            "Do not book again. Check with the carrier using this request’s details before resolving the uncertain outcome. Re-running the command reuses this request.",
+            "Do not request another pickup for these labels. Confirm the outcome with the carrier first, using this request’s details.",
+          ),
+        );
+      if (record.state === "scheduled" && record.plan.carrier === "fedex")
+        card.append(
+          node(
+            "p",
+            "FedEx does not provide pickup status lookups. Contact FedEx with the confirmation number to check your pickup.",
+            "muted",
           ),
         );
       if (record.error)
@@ -213,7 +226,7 @@ export function installPickups(root, opener, packages, request, onForbidden) {
           cancelRecord = record;
           cancelKey = crypto.randomUUID();
           find("pickup-cancel-details").textContent =
-            `${carrierNames[record.plan.carrier]} · ${record.confirmation.pickup_date} · ${record.confirmation.number} · ${record.plan.ready_time}–${record.plan.close_time} ${record.plan.site.details.timezone} · ${addressText(record.plan.site)}`;
+            `${carrierNames[record.plan.carrier]} · ${record.confirmation.pickup_date} · ${record.confirmation.number} · ${windowText(record.plan)} · ${record.plan.site.details.timezone} · ${addressText(record.plan.site)}`;
           find("pickup-cancel-error").textContent = "";
           find("pickup-cancel-dialog").showModal();
         });
@@ -512,8 +525,8 @@ export function installPickups(root, opener, packages, request, onForbidden) {
         find("pickup-schedule-commit").hidden = false;
         find("pickup-schedule-commit").textContent =
           previews.length > 1 ? "Schedule pickups" : "Schedule pickup";
-        find("pickup-review").focus();
-        find("pickup-review").scrollIntoView({ block: "start" });
+        find("pickup-review").focus({ preventScroll: true });
+        find("pickup-review").scrollIntoView({ block: "nearest" });
       }
     } catch (error) {
       showError(error, "pickup-schedule-error", version);

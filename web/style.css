@@ -345,7 +345,7 @@ dialog {
   max-height: 90dvh;
   box-shadow: 0 8px 32px #0000001f;
 }
-#editor { max-height: calc(100dvh - 32px); }
+.dialog-panel { max-height: calc(100dvh - 32px); }
 .dialog-heading {
   display: flex;
   align-items: center;
@@ -922,19 +922,6 @@ button.stat[aria-pressed="true"]:hover { opacity: 1; }
 #pickup-schedule-form details {
   margin-block: 1rem;
 }
-#pickup-schedule-dialog {
-  --pickup-dialog-pad: 28px;
-}
-#pickup-actions {
-  position: sticky;
-  bottom: 0;
-  margin: 0 calc(-1 * var(--pickup-dialog-pad))
-    calc(-1 * var(--pickup-dialog-pad));
-  padding: 12px var(--pickup-dialog-pad) 24px;
-  background: var(--paper);
-  border-top: 1px solid var(--line);
-  box-shadow: 0 -10px 16px -16px var(--accent);
-}
 #pickup-actions .header-actions {
   justify-content: flex-end;
 }
@@ -957,11 +944,6 @@ button.stat[aria-pressed="true"]:hover { opacity: 1; }
   overflow-wrap: anywhere;
 }
 
-@media (max-width: 650px) {
-  #pickup-schedule-dialog {
-    --pickup-dialog-pad: 22px;
-  }
-}
 header > .header-actions {
   display: flex;
   align-items: center;

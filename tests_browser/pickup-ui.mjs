@@ -46,7 +46,7 @@ try {
   await expect(page.locator("#editor")).toBeVisible();
   await expect(
     page.locator("#editor .dialog-footer button#save"),
-  ).toBeInViewport();
+  ).toBeInViewport({ ratio: 1 });
   await snapshot("package-editor");
   await page.locator('#editor button[data-close="editor"]').last().click();
   await page.getByRole("button", { name: "Pickups", exact: true }).click();
@@ -63,10 +63,27 @@ try {
   await expect(page.getByLabel("Street address", { exact: true })).toHaveValue(
     "123 Example Street",
   );
+  const saveAddress = page.getByRole("button", {
+    name: "Save default pickup address",
+    exact: true,
+  });
+  await expect(saveAddress).toBeInViewport({ ratio: 1 });
   await snapshot("address");
   await page
-    .getByRole("button", { name: "Close pickup address", exact: true })
-    .click();
+    .getByLabel("Residential address", { exact: true })
+    .scrollIntoViewIfNeeded();
+  await expect(page.locator("#pickup-site-title")).toBeInViewport({ ratio: 1 });
+  await expect(page.locator("#pickup-site-close")).toBeInViewport({ ratio: 1 });
+  await expect(saveAddress).toBeInViewport({ ratio: 1 });
+  await snapshot("address-bottom");
+  await page
+    .getByLabel("Location name", { exact: true })
+    .fill("Example site verified");
+  await saveAddress.click();
+  await expect(page.locator("#pickup-site-dialog")).toBeHidden();
+  await expect(page.locator("#pickup-site-summary")).toContainText(
+    "Example site verified",
+  );
   await page
     .getByRole("button", { name: "Schedule pickup", exact: true })
     .click();
@@ -85,6 +102,15 @@ try {
     "Fee not quoted.",
   );
   await expect(page.locator("#pickup-review-details")).toContainText("2.50 lb");
+  await expect(page.locator("#pickup-schedule-title")).toBeInViewport({
+    ratio: 1,
+  });
+  await expect(page.locator("#pickup-schedule-close")).toBeInViewport({
+    ratio: 1,
+  });
+  await expect(page.locator("#pickup-schedule-commit")).toBeInViewport({
+    ratio: 1,
+  });
   await snapshot("review");
   let schedules = 0;
   let releaseSchedule;
@@ -94,6 +120,7 @@ try {
   await page.route("**/v1/pickups", async (route) => {
     if (route.request().method() !== "POST") return route.continue();
     schedules++;
+    expect(route.request().postDataJSON().accept_fee).toBe(true);
     const response = await route.fetch();
     await held;
     await route.fulfill({ response });
@@ -128,6 +155,11 @@ try {
   ).toBeVisible();
   expect(schedules).toBe(1);
   await snapshot("confirmation");
+  let cancellations = 0;
+  await page.route("**/v1/pickups/records/*/cancel", (route) => {
+    cancellations++;
+    return route.continue();
+  });
   await page
     .getByRole("button", { name: "Cancel pickup", exact: true })
     .click();
@@ -139,6 +171,17 @@ try {
   await expect(
     page.getByText("Confirmation: PICKUP-FIXTURE", { exact: true }),
   ).toBeVisible();
+  expect(cancellations).toBe(0);
+  await page.reload();
+  await page.locator("#login").waitFor({ state: "visible" });
+  await page.locator("#login input").fill(process.env.PACKAGES_TEST_OWNER);
+  await page.locator("#login button").click();
+  await page.getByRole("button", { name: "Pickups", exact: true }).click();
+  await expect(
+    page.getByText("Confirmation: PICKUP-FIXTURE", { exact: true }),
+  ).toBeVisible();
+  expect(schedules).toBe(1);
+  expect(cancellations).toBe(0);
   await page
     .getByRole("button", { name: "Back to packages", exact: true })
     .click();
