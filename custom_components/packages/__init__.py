@@ -8,10 +8,11 @@ from homeassistant.components.http import StaticPathConfig
 from homeassistant.config_entries import ConfigEntry, ConfigEntryState
 from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant, callback
+from homeassistant.exceptions import ConfigEntryNotReady
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.typing import ConfigType
-from homeassistant.loader import async_get_integration
 
+from ._app_kit.version import LOADED_VERSION
 from .assist_sentences import async_register_sentences
 from .client import PackagesClient
 from .const import CONF_ADDON_SLUG, CONF_BACKEND_URL, CONF_TOKEN, DOMAIN
@@ -22,6 +23,7 @@ from .coordinator import (
 )
 from .http import PackagesView
 from .services import async_register_services
+from .statistics_migration import async_register_statistics_migration
 
 PLATFORMS = [Platform.SENSOR, Platform.BINARY_SENSOR, Platform.CALENDAR, Platform.EVENT]
 type PackagesConfigEntry = ConfigEntry[PackagesCoordinator]
@@ -40,6 +42,7 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
         ]
     )
     async_register_services(hass)
+    async_register_statistics_migration(hass)
     return True
 
 
@@ -50,15 +53,19 @@ async def async_setup_entry(hass: HomeAssistant, entry: PackagesConfigEntry) -> 
         entry.data[CONF_BACKEND_URL],
         entry.data[CONF_TOKEN],
     )
-    integration = await async_get_integration(hass, DOMAIN)
-    coordinator = PackagesCoordinator(hass, entry, client, str(integration.version))
-    await coordinator.async_config_entry_first_refresh()
+    coordinator = PackagesCoordinator(hass, entry, client)
+    try:
+        await coordinator.async_config_entry_first_refresh()
+    except ConfigEntryNotReady:
+        coordinator.async_report_startup_version_mismatch()
+        raise
     entry.runtime_data = coordinator
+    coordinator.async_start_version_repairs()
     coordinator.async_start_amazon_repairs()
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     await async_register_sentences(hass, entry)
     module_url = "/packages-static/calendar-links.js?" + urlencode(
-        {"v": str(integration.version)}
+        {"v": LOADED_VERSION}
     )
     frontend.add_extra_js_url(hass, module_url)
     entry.async_on_unload(lambda: frontend.remove_extra_js_url(hass, module_url))
@@ -103,6 +110,7 @@ async def async_remove_entry(hass: HomeAssistant, entry: PackagesConfigEntry) ->
     persistent_notification.async_dismiss(hass, amazon_notification_id(entry.entry_id))
     for issue in (
         "version_mismatch",
+        f"{entry.entry_id}_version_mismatch",
         "event_stream_unavailable",
         "event_history_reset",
     ):

@@ -6,3 +6,4 @@ __pycache__/
 .ruff_cache/
 *.sqlite3*
 .env
+/custom_components/packages/_app_kit/

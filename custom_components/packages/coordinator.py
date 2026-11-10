@@ -21,6 +21,8 @@ from homeassistant.helpers.storage import Store
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 from homeassistant.util import dt as dt_util
 
+from ._app_kit.repairs import VersionRepairs
+from ._app_kit.versions import ReleaseVersion
 from .client import PackagesClient, ResponseTooLarge
 from .const import (
     CONF_ADDON_SLUG,
@@ -42,6 +44,7 @@ from .models import (
     delivery_estimate,
 )
 from .pickups import PickupReport
+from .repairs import VERSION_REPAIR
 
 _LOGGER = logging.getLogger(__name__)
 _BACKUP_TIMEOUT_SECONDS = 10
@@ -98,7 +101,6 @@ class PackagesCoordinator(DataUpdateCoordinator[dict[str, int]]):
         hass: HomeAssistant,
         entry: ConfigEntry,
         client: PackagesClient,
-        version: str,
     ) -> None:
         super().__init__(
             hass,
@@ -110,7 +112,8 @@ class PackagesCoordinator(DataUpdateCoordinator[dict[str, int]]):
         )
         self.client = client
         self._entry = entry
-        self._version = version
+        self._version = str(VERSION_REPAIR.loaded_version)
+        self._version_repairs: VersionRepairs | None = None
         self.last_backend_version: str | None = None
         self.inbound_estimates: tuple[DeliveryEstimate, ...] = ()
         self.pickup_report: PickupReport | None = None
@@ -137,6 +140,32 @@ class PackagesCoordinator(DataUpdateCoordinator[dict[str, int]]):
             self._amazon_repair_active = False
 
         entry.async_on_unload(stop_amazon_repairs)
+
+    @callback
+    def async_start_version_repairs(self) -> None:
+        """Own the version repair after runtime data is assigned."""
+        self._version_repairs = VersionRepairs(self.hass, self._entry, VERSION_REPAIR)
+        self._version_repairs.async_start()
+
+    @callback
+    def async_report_startup_version_mismatch(self) -> None:
+        """Keep the diagnosis when an incompatible backend prevents setup."""
+        version = self.last_backend_version
+        if version is not None and version != self._version:
+            # The shared fix needs a loaded entry. Its first fresh observation
+            # replaces this startup diagnostic after the entry can load.
+            ir.async_create_issue(
+                self.hass,
+                DOMAIN,
+                "version_mismatch",
+                is_fixable=False,
+                severity=ir.IssueSeverity.WARNING,
+                translation_key="startup_version_mismatch",
+                translation_placeholders={
+                    "app_version": version,
+                    "integration_version": self._version,
+                },
+            )
 
     @callback
     def async_start_amazon_repairs(self) -> None:
@@ -224,7 +253,7 @@ class PackagesCoordinator(DataUpdateCoordinator[dict[str, int]]):
             self._async_amazon_backend_auth()
             return
         registry = ir.async_get(self.hass)
-        if registry.async_get_issue(DOMAIN, "version_mismatch") is not None:
+        if self.last_backend_version not in (None, self._version):
             return
         existing = registry.async_get_issue(
             DOMAIN, amazon_discovery_issue_id(self._entry.entry_id)
@@ -404,8 +433,8 @@ class PackagesCoordinator(DataUpdateCoordinator[dict[str, int]]):
 
         return unsubscribe
 
-    async def _async_check_version(self) -> bool:
-        self.amazon_discovery = None
+    async def async_read_system(self) -> tuple[ReleaseVersion, dict[str, object]]:
+        """Read the version without updating other discovery state."""
         response = await self.client.request("GET", "/v1/system")
         if response.status in {401, 403}:
             raise ConfigEntryAuthFailed("The backend rejected its credential")
@@ -414,25 +443,16 @@ class PackagesCoordinator(DataUpdateCoordinator[dict[str, int]]):
         data = response.json()
         if not isinstance(data, dict):
             raise ValueError("Invalid backend version")
-        version = data.get("version")
-        if not isinstance(version, str) or not version or len(version) > 64:
-            raise ValueError("Invalid backend version")
-        self.last_backend_version = version
-        if version != self._version:
-            ir.async_create_issue(
-                self.hass,
-                DOMAIN,
-                "version_mismatch",
-                is_fixable=False,
-                severity=ir.IssueSeverity.WARNING,
-                translation_key="version_mismatch",
-                translation_placeholders={
-                    "app_version": version,
-                    "integration_version": self._version,
-                },
-            )
+        return ReleaseVersion.parse(data.get("version")), data
+
+    async def _async_check_version(self) -> bool:
+        self.amazon_discovery = None
+        version, data = await self.async_read_system()
+        self.last_backend_version = str(version)
+        if self._version_repairs is not None:
+            self._version_repairs.async_report(version)
+        if version != VERSION_REPAIR.loaded_version:
             return False
-        ir.async_delete_issue(self.hass, DOMAIN, "version_mismatch")
         raw_report = data.get("amazon_discovery")
         self.amazon_discovery = parsed = DiscoveryHealth.parse(raw_report)
         self._amazon_account_report = data.get("amazon")

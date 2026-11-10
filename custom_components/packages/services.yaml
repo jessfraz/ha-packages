@@ -1,3 +1,22 @@
+migrate_shipments_statistics:
+  name: Move Shipments statistics
+  description: >-
+    Preview the old Shipments count history for this Packages connection. To
+    confirm, call again with the digest from the preview. Both hourly and
+    five-minute history move together; different overlapping values stop the move.
+    Requires an administrator and a completed Home Assistant backup.
+  fields:
+    config_entry_id:
+      name: Packages connection
+      required: true
+      selector:
+        config_entry:
+          integration: packages
+    expected_digest:
+      name: Preview digest
+      description: Leave blank to preview without changing history.
+      selector:
+        text:
 add:
   name: Add shipment
   description: Verify tracking with the provider before saving a shipment; an omitted carrier must be auto-detected.

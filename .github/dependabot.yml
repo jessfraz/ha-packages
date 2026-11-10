@@ -5,8 +5,11 @@ updates:
     schedule:
       interval: weekly
     groups:
+      app-kit:
+        patterns: ["ha-app-ui", "ha-app-kit-ha"]
       rust:
         patterns: ["*"]
+        exclude-patterns: ["ha-app-ui", "ha-app-kit-ha"]
         update-types: [minor, patch]
   - package-ecosystem: github-actions
     directory: /

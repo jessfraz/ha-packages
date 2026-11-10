@@ -5,8 +5,8 @@ from typing import Literal, TypedDict
 from homeassistant.config_entries import ConfigEntry, ConfigEntryState
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import issue_registry as ir
-from homeassistant.loader import async_get_integration
 
+from ._app_kit.version import LOADED_VERSION
 from .const import CONF_ADDON_SLUG, DOMAIN, SENSOR_KEYS
 from .coordinator import PackagesCoordinator, amazon_discovery_issue_id
 
@@ -48,8 +48,7 @@ async def async_get_config_entry_diagnostics(
     hass: HomeAssistant, entry: ConfigEntry[PackagesCoordinator]
 ) -> PackagesDiagnostics:
     """Download health without credentials, shipment records or network requests."""
-    integration = await async_get_integration(hass, DOMAIN)
-    version = str(integration.version)
+    version = LOADED_VERSION
     coordinator = getattr(entry, "runtime_data", None)
     loaded = entry.state is ConfigEntryState.LOADED
     available = bool(loaded and coordinator and coordinator.last_update_success)
@@ -67,7 +66,9 @@ async def async_get_config_entry_diagnostics(
             }
     registry = ir.async_get(hass)
     repair_ids = {
-        "version_mismatch": "version_mismatch",
+        "version_mismatch": f"{entry.entry_id}_version_mismatch"
+        if loaded
+        else "version_mismatch",
         "event_stream_unavailable": "event_stream_unavailable",
         "event_history_reset": "event_history_reset",
         "amazon_discovery": amazon_discovery_issue_id(entry.entry_id),

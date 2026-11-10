@@ -201,10 +201,13 @@ async def test_older_backend_does_not_publish_all_time_deliveries_as_today(
 ) -> None:
     """Keep existing counts while refusing an unsupported day projection."""
     current_version = backend.version
+    assert await hass.config_entries.async_unload(entry.entry_id)
+    backend.responses[("POST", "/v1/integration/presence")] = (204, b"", {})
     hass.config_entries.async_update_entry(
         entry, data={**entry.data, CONF_ADDON_SLUG: "test_packages"}
     )
-    backend.responses[("POST", "/v1/integration/presence")] = (204, b"", {})
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done(wait_background_tasks=True)
     backend.version = "0.5.1"
     backend.summaries["inbound"]["delivered"] = 99
     # Older servers ignore unknown bounds and return the all-time total.
@@ -221,7 +224,8 @@ async def test_older_backend_does_not_publish_all_time_deliveries_as_today(
     assert get_state(hass, "sensor.packages_inbound_active").state == "3"
     assert get_state(hass, "sensor.packages_outbound_active").state == "1"
     assert not any("delivered_after" in request.query for request in backend.requests)
-    issue = ir.async_get(hass).async_get_issue(DOMAIN, "version_mismatch")
+    issue_id = f"{entry.entry_id}_version_mismatch"
+    issue = ir.async_get(hass).async_get_issue(DOMAIN, issue_id)
     assert issue is not None
     assert issue.translation_placeholders == {
         "app_version": "0.5.1",
@@ -240,7 +244,7 @@ async def test_older_backend_does_not_publish_all_time_deliveries_as_today(
     await entry.runtime_data.async_refresh()
     assert entry.runtime_data.last_update_success
     assert get_state(hass, "sensor.packages_inbound_delivered_today").state == "2"
-    assert not ir.async_get(hass).async_get_issue(DOMAIN, "version_mismatch")
+    assert not ir.async_get(hass).async_get_issue(DOMAIN, issue_id)
     assert any("delivered_after" in request.query for request in backend.requests)
     presence = [
         request

@@ -141,7 +141,36 @@
   "issues": {
     "version_mismatch": {
       "title": "Packages app and integration versions differ",
-      "description": "The app is version {app_version}, and this integration is version {integration_version}. Update both Packages components to the same release, then reload the integration."
+      "fix_flow": {
+        "abort": {
+          "app_update_unavailable": "Update the app through Supervisor when a matching release becomes available.",
+          "matching_release_unavailable": "The Marketplace does not offer a matching integration release yet.",
+          "entry_unavailable": "The integration entry has changed or is unavailable. Reopen the repair after it loads.",
+          "managed_update_unavailable": "Home Assistant could not find the matching managed update entities. Check the app and Marketplace installations.",
+          "update_in_progress": "An update or another version repair is already running. Try again when it finishes.",
+          "backup_not_configured": "Configure an encryption password and backup locations in Settings > System > Backups.",
+          "backup_failed": "Home Assistant could not verify a complete encrypted backup at every selected location.",
+          "update_failed": "The update did not complete. Check the app and Marketplace updates before trying again.",
+          "verify_failed": "Home Assistant could not verify both installed versions. Check the current app and integration versions.",
+          "restart_failed": "Home Assistant could not restart. Reopen the repair to try again.",
+          "restart_pending": "Home Assistant is already preparing to restart.",
+          "restart_requested": "Home Assistant is restarting. The repair clears after the loaded integration verifies matching versions."
+        },
+        "progress": {
+          "updating": "Creating and verifying the encrypted backup, then applying the selected changes."
+        },
+        "step": {
+          "init": {
+            "title": "Match the app and integration versions",
+            "description": "{app} is on {app_version}. The loaded integration is on {integration_version}. This repair brings both to {target_version}. Home Assistant first verifies a full encrypted backup at every selected backup location.",
+            "menu_options": {
+              "update_and_restart": "Back up, update, and restart",
+              "update_app": "Back up and update the app",
+              "restart": "Back up and restart Home Assistant"
+            }
+          }
+        }
+      }
     },
     "event_stream_unavailable": {
       "title": "Shipment status events are unavailable",
@@ -170,6 +199,10 @@
     "pickup_uncertain": {
       "title": "Pickup outcome needs confirmation",
       "description": "A carrier pickup or cancellation has an uncertain outcome. Open Packages → Pickups and check with the carrier before scheduling again. An interrupted request is never automatically rebooked."
+    },
+    "startup_version_mismatch": {
+      "title": "Packages app and integration versions differ",
+      "description": "The app is version {app_version}, and this integration is version {integration_version}. The integration could not finish setup. Update both Packages components to the same release and restart Home Assistant."
     }
   }
 }
