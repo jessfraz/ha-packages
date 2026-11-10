@@ -8,6 +8,7 @@ description = "A local shipment registry for Home Assistant"
 repository = "https://github.com/jessfraz/ha-packages"
 
 [dependencies]
+ha-app-ui = { git = "https://github.com/jessfraz/ha-app-kit", rev = "a7b09c84ee35bf7c372dfcdc8614a0d48399af1c" }
 anyhow = "1"
 base64 = "0.23"
 clap = { version = "4", features = ["derive", "env"] }

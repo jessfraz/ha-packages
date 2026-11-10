@@ -4,6 +4,8 @@ import { calendarDate, deliveryDescription } from "./dates.js";
 import { carrierLabel, carrierOptionLabel, providerNames, trackingLinks } from "./parcel-links.js";
 import { installPickups } from "./pickups.js";
 import { installAmazonSettings } from "./amazon-settings.js";
+import { shell } from "./shell.js";
+import { setNotice } from "./app-kit.js";
 
 const byId = (id) => document.getElementById(id);
 const labels = {
@@ -228,8 +230,7 @@ async function applyRoute(initial = false) {
 }
 
 function notice(text, error = false) {
-  byId("notice").textContent = text;
-  byId("notice").className = error ? "error" : "";
+  setNotice(byId("notice"), text, error);
 }
 
 async function api(path, options = {}) {
@@ -279,8 +280,8 @@ function renderServiceStatus(system, checked) {
   ];
   if (checked)
     status.push(`Last checked ${new Date().toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}`);
-  byId("app-version").textContent = system.version;
-  byId("service-status").textContent = status.join(" · ");
+  shell.setVersion(system.version);
+  shell.setStatus(status.join(" · "), system.provider_enabled ? system.sync_errors ? "stale" : "ok" : "neutral");
   byId("app-footer").hidden = false;
 }
 
@@ -614,7 +615,7 @@ function renderInstallation(report) {
     const check = report[key];
     const needsAttention = ["attention", "unavailable"].includes(check.status);
     if (needsAttention) attention += 1;
-    const row = element("li", undefined, needsAttention ? "check-attention" : "");
+    const row = element("li", undefined, needsAttention ? "check-attention" : check.status === "not_applicable" ? "check-optional" : "");
     const state = {
       pass: "Passed",
       attention: "Needs attention",
