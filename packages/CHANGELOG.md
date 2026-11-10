@@ -1,5 +1,6 @@
 ## 0.7.0
 
+- Update bundled SQLite to the patched release for RUSTSEC-2026-0459.
 - Rename the app, integration and dashboard to Packages. The integration
   domain and app slug are `packages`, the CLI is `ha-packages`, and API
   requests use `/v1/packages` and `PACKAGES_*` configuration.

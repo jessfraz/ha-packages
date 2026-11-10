@@ -38,7 +38,12 @@
             ./Cargo.toml ./Cargo.lock ./src ./migrations ./web ./tests ./openapi
           ];
         };
-        cargoLock.lockFile = ./Cargo.lock;
+        cargoLock = {
+          lockFile = ./Cargo.lock;
+          outputHashes = {
+            "sqlx-0.9.0" = "sha256-kLvUfUy6vmL9LYU7nzHv+iB6cIJm2CjDf9Yo6wpWrWg=";
+          };
+        };
         nativeBuildInputs = [pkgs.cmake pkgs.pkg-config];
         cargoBuildFlags = ["--bin" name];
         cargoTestFlags = ["--test" "cli"];
