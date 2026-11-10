@@ -61,6 +61,15 @@ let agentTokenGeneration = 0;
 let issuedAgentId = null;
 const pickups = installPickups(byId("pickups-dashboard"), byId("schedule-pickup"), byId("dashboard"), api, () => setOwnerAccess(false), {
   getTimeZone: () => deliveryTimeZone,
+  onCapabilitiesChanged: (available) => {
+    byId("show-pickups").hidden = !available;
+    for (const action of byId("actions").querySelectorAll("[data-pickup-carrier]"))
+      action.hidden = !pickups.canSchedule(action.dataset.pickupCarrier);
+    if (!available && activePage === "pickups") {
+      writeRoute({ page: null }, true);
+      selectPage("packages");
+    }
+  },
   onScheduled: () => {
     userNavigation();
     writeRoute({ page: "pickups", shipment: null, edit: null, section: null });
@@ -186,7 +195,7 @@ function updateNavigation() {
 }
 
 function selectPage(page) {
-  activePage = page === "pickups" && showInstallation ? "pickups" : "packages";
+  activePage = page === "pickups" && pickups.available() ? "pickups" : "packages";
   updateNavigation();
   if (activePage === "pickups") {
     clearTimeout(refreshTimer);
@@ -213,7 +222,8 @@ async function applyRoute(initial = false) {
   byId("query").value = search;
   applyingRoute = true;
   try {
-    const pickupPage = params.get("page") === "pickups" && showInstallation;
+    const pickupPage = params.get("page") === "pickups" && pickups.available();
+    if (params.get("page") === "pickups" && !pickupPage) writeRoute({ page: null }, true);
     const returning = activePage === "pickups";
     await selectPage(pickupPage ? "pickups" : "packages");
     if (generation !== routeGeneration) return;
@@ -336,6 +346,8 @@ async function connect(signal) {
   byId("add").hidden = false;
   deliveryTimeZone = system.delivery_day?.time_zone;
   setOwnerAccess(system.credential_role === "owner", true);
+  await pickups.refreshCapabilities();
+  signal?.throwIfAborted();
   renderServiceStatus(system, false);
   connected = true;
 }
@@ -386,7 +398,7 @@ function setOwnerAccess(owner, reset = false) {
   showInstallation = owner;
   amazonSettings.setAccess(owner, reset);
   pickups.setAccess(owner, reset);
-  byId("show-pickups").hidden = !owner;
+  byId("show-pickups").hidden = !pickups.available();
   if (!owner && activePage === "pickups") {
     writeRoute({ page: null }, true);
     selectPage("packages");
@@ -416,7 +428,7 @@ function setOwnerAccess(owner, reset = false) {
   }
   byId("correction").hidden = !owner;
   for (const button of byId("actions").querySelectorAll("[data-owner-only]"))
-    button.hidden = !owner;
+    button.hidden = !owner || (button.dataset.pickupCarrier && !pickups.canSchedule(button.dataset.pickupCarrier));
 }
 
 async function refreshInstallation(generation, signal) {
@@ -472,11 +484,12 @@ async function load(append = false) {
   }
 
   try {
-    const systemRequest = api("v1/system", { signal: controller.signal }).then(system => {
+    const systemRequest = api("v1/system", { signal: controller.signal }).then(async system => {
       if (!controller.signal.aborted && generation === listGeneration)
         deliveryTimeZone = system.delivery_day?.time_zone;
       if (!controller.signal.aborted && generation === listGeneration)
         setOwnerAccess(system.credential_role === "owner");
+      if (!controller.signal.aborted && generation === listGeneration) await pickups.refreshCapabilities();
       return system;
     });
     // Home Assistant supplies its own day window, including timezone and DST.
@@ -1206,6 +1219,7 @@ async function show(id, preserveView = false, section = route().get("section")) 
     node.hidden = ownerOnly && !showInstallation;
     node.addEventListener("click", guarded(() => { userNavigation(); return action(); }));
     actions.append(node);
+    return node;
   };
   button("Edit", () => openEditor(shipment));
   if (shipment.tracking && !shipment.archived)
@@ -1214,12 +1228,15 @@ async function show(id, preserveView = false, section = route().get("section")) 
       shipment.tracking?.carrier === "AmazonMcf" && shipment.sync.provider === "aftership")
     button("Use Amazon Account tracking", () => mutate("amazon", "POST"), true);
   if (!shipment.archived && shipment.sync.registration_state === "registered" &&
-      ["USPS", "UspsShip", "UPS", "UPSDAP", "FedEx", "FedExDefault", "FedexSmartPost"].includes(shipment.tracking?.carrier))
-    button("Schedule pickup", () => {
+      shipment.tracking) {
+    const action = button("Schedule pickup", () => {
       const tracking = shipment.tracking.number;
       closeDetail();
       return pickups.open([tracking]);
     }, true);
+    action.dataset.pickupCarrier = shipment.tracking.carrier;
+    action.hidden = !pickups.canSchedule(shipment.tracking.carrier);
+  }
   if (shipment.status_override)
     button("Clear correction", () => mutate("status-override", "DELETE"), true);
   button(shipment.archived ? "Restore" : "Archive", () =>
@@ -1365,6 +1382,7 @@ document.addEventListener("visibilitychange", () => {
   if (!document.hidden) {
     guarded(async () => {
       try {
+        await pickups.refreshCapabilities();
         await refreshDashboard();
       } finally {
         scheduleRefresh();
@@ -1525,7 +1543,7 @@ for (const button of byId("directions").querySelectorAll("[data-direction]")) {
   }));
 }
 byId("show-pickups").addEventListener("click", guarded(() => {
-  if (!showInstallation) return;
+  if (!pickups.available()) return;
   userNavigation();
   closeEditor(false);
   closeDetail(false);
@@ -1565,7 +1583,7 @@ window.addEventListener("pagehide", () => {
 window.addEventListener("pageshow", event => {
   if (!event.persisted) return;
   if (!connected) startConnection();
-  else scheduleRefresh();
+  else pickups.refreshCapabilities().then(scheduleRefresh);
 });
 byId("retry-connection").addEventListener("click", startConnection);
 

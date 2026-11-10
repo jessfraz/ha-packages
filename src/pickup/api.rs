@@ -242,7 +242,7 @@ async fn schedule(
             headers(None),
         ));
     }
-    request.context().pickups.check_reviewed_site(&body).await?;
+    request.context().pickups.check_reviewed_plan(&body).await?;
     pickup_prepare_watches(&request, &body).await?;
     let actor = pickup_authorize(&request).await?;
     let receipt = request

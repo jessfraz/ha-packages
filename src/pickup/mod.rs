@@ -91,6 +91,7 @@ pub enum ErrorCode {
     WatchNotReady,
     LocationRequired,
     LocationChanged,
+    ConfigurationChanged,
     Ambiguous,
 }
 
@@ -121,6 +122,7 @@ impl std::fmt::Display for ErrorCode {
             Self::ParcelDetailsRequired => "Pickup service and weight are required; save the label's details or provide --service and --weight-lb",
             Self::WatchNotReady => "Tracking must be verified and actively watched before a pickup can be scheduled",
             Self::LocationChanged => "The pickup address changed. Review it again before scheduling",
+            Self::ConfigurationChanged => "The carrier configuration changed. Review the pickup again before scheduling",
             Self::LocationRequired => "Configure and confirm this deployment's default pickup location first",
             Self::Ambiguous => "More than one match was found; provide an explicit carrier or confirmation",
         })
@@ -155,6 +157,7 @@ impl From<Error> for dropshot::HttpError {
             ErrorCode::WatchNotReady => "pickup_watch_not_ready",
             ErrorCode::LocationRequired => "pickup_location_required",
             ErrorCode::LocationChanged => "pickup_location_changed",
+            ErrorCode::ConfigurationChanged => "pickup_configuration_changed",
             ErrorCode::Ambiguous => "pickup_ambiguous",
         };
         let mut response = match error.code {
@@ -168,7 +171,7 @@ impl From<Error> for dropshot::HttpError {
                 match error.code {
                     ErrorCode::Unauthorized => dropshot::ClientErrorStatusCode::FORBIDDEN,
                     ErrorCode::NotFound => dropshot::ClientErrorStatusCode::NOT_FOUND,
-                    ErrorCode::LocationChanged => {
+                    ErrorCode::LocationChanged | ErrorCode::ConfigurationChanged => {
                         dropshot::ClientErrorStatusCode::PRECONDITION_FAILED
                     }
                     ErrorCode::Conflict

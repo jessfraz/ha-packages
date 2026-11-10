@@ -138,6 +138,7 @@ impl PickupPlanArgs {
             carrier: self.carrier,
             site_id: self.site,
             reviewed_site: None,
+            reviewed_configuration: None,
             date: self.date,
             ready_time: self.ready_time,
             close_time: self.close_time,
@@ -470,6 +471,7 @@ enum ApiErrorCode {
     PickupWatchNotReady,
     PickupLocationRequired,
     PickupLocationChanged,
+    PickupConfigurationChanged,
     PickupAmbiguous,
     PickupRevisionRequired,
 }

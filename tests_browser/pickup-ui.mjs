@@ -282,7 +282,7 @@ try {
   await expect(setupPage.locator("#dashboard")).toBeVisible();
   await setupPage.locator("#pickup-schedule-close").click();
 
-  // No carrier credentials must be explained before any preview can be sent.
+  // Losing optional carrier credentials removes every scheduling entry point.
   await setupPage.route("**/v1/pickups/carriers", async (route) => {
     const response = await route.fetch();
     const carriers = await response.json();
@@ -293,11 +293,13 @@ try {
     if (new URL(request.url()).pathname === "/v1/pickups/preview") unusablePreviews++;
   });
   await setupPage.getByRole("button", { name: "Schedule pickup", exact: true }).click();
-  await expect(setupPage.locator("#pickup-configuration")).toContainText("Connect a carrier account before scheduling");
-  await expect(setupPage.getByRole("button", { name: "Review pickup", exact: true })).toBeDisabled();
+  await expect(setupPage.locator("#pickup-schedule-dialog")).toBeHidden();
+  await expect(setupPage.locator("#schedule-pickup")).toBeHidden();
+  await expect(setupPage.locator("#show-pickups")).toBeHidden();
   expect(unusablePreviews).toBe(0);
-  await setupPage.locator("#pickup-schedule-close").click();
   await setupPage.unroute("**/v1/pickups/carriers");
+  await setupPage.getByRole("button", { name: "Refresh package list", exact: true }).click();
+  await expect(setupPage.locator("#schedule-pickup")).toBeVisible();
 
   // A permission change closes body-level dialogs and removes both entry points.
   await setupPage.route("**/v1/pickups/carriers", (route) => route.fulfill({ status: 403, json: { message: "Owner access required" } }));
