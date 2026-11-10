@@ -337,8 +337,7 @@ fn unique_error(error: sqlx::Error) -> Error {
         .is_some_and(|error| error.is_unique_violation())
     {
         Error::Conflict(
-            "tracking identity or source already belongs to a shipment; find it before retrying"
-                .into(),
+            "tracking identity already belongs to a shipment; find it before retrying".into(),
         )
     } else {
         error.into()
@@ -692,20 +691,6 @@ impl Store {
             return Ok(Some(replay));
         }
         let mut tx = self.transaction().await?;
-        if let Some(source) = &input.source {
-            let exists: bool = sqlx::query_scalar(
-                "SELECT EXISTS(SELECT 1 FROM sources WHERE namespace=? AND key=?)",
-            )
-            .bind(&source.namespace)
-            .bind(&source.key)
-            .fetch_one(&mut *tx)
-            .await?;
-            if exists {
-                return Err(Error::Conflict(
-                    "source already belongs to a shipment; find it before retrying".into(),
-                ));
-            }
-        }
         Self::check_tracking_number(&mut tx, Uuid::now_v7(), &input.tracking.number).await?;
         tx.commit().await?;
         Ok(None)
@@ -1053,23 +1038,7 @@ impl Store {
         {
             return Err(Error::Conflict("source is reserved by another shipment verification; retry that request after it completes".into()));
         }
-        let existing = sqlx::query_scalar::<_, String>(
-            "SELECT shipment_id FROM sources WHERE namespace=? AND key=?",
-        )
-        .bind(&source.namespace)
-        .bind(&source.key)
-        .fetch_optional(&mut **tx)
-        .await?;
-        if let Some(existing) = existing {
-            return if existing == id.to_string() {
-                Ok(())
-            } else {
-                Err(Error::Conflict(
-                    "source already belongs to another shipment".into(),
-                ))
-            };
-        }
-        sqlx::query("INSERT INTO sources (namespace,key,shipment_id) VALUES (?,?,?)")
+        sqlx::query("INSERT INTO sources (namespace,key,shipment_id) VALUES (?,?,?) ON CONFLICT(namespace,key,shipment_id) DO NOTHING")
             .bind(&source.namespace)
             .bind(&source.key)
             .bind(id.to_string())
@@ -1693,7 +1662,7 @@ fn shipment_list_query(
     }
     if let (Some(namespace), Some(key)) = (&filters.source_namespace, &filters.source_key) {
         query
-            .push(" AND id=(SELECT shipment_id FROM sources WHERE namespace=")
+            .push(" AND id IN (SELECT shipment_id FROM sources WHERE namespace=")
             .push_bind(namespace)
             .push(" AND key=")
             .push_bind(key)
@@ -1834,6 +1803,64 @@ mod tests {
             returned_rows,
             elapsed_micros,
         }
+    }
+
+    #[tokio::test]
+    async fn source_filter_uses_the_link_index_with_representative_data() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = Store::open(&directory.path().join("source-plans.sqlite3"))
+            .await
+            .unwrap();
+        let mut tx = store.pool().begin().await.unwrap();
+        for index in 0..2048 {
+            let id = Uuid::now_v7().to_string();
+            sqlx::query(
+                "INSERT INTO shipments(id,title,tracking_carrier,tracking_number) VALUES(?,?,?,?)",
+            )
+            .bind(&id)
+            .bind("Representative parcel")
+            .bind("UPS")
+            .bind(format!("SOURCEPLAN{index:06}"))
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+            sqlx::query("INSERT INTO sources(namespace,key,shipment_id) VALUES(?,?,?)")
+                .bind("fixture-mail")
+                .bind(format!("message-{index}"))
+                .bind(&id)
+                .execute(&mut *tx)
+                .await
+                .unwrap();
+        }
+        tx.commit().await.unwrap();
+        let filters = Filters {
+            source_namespace: Some("fixture-mail".into()),
+            source_key: Some("message-1024".into()),
+            ..Default::default()
+        };
+        let evidence = explain(
+            &store,
+            "source_filter",
+            shipment_list_query(&filters, None, 100).unwrap(),
+        )
+        .await;
+        assert_eq!(evidence.returned_rows, 1);
+        assert!(
+            evidence
+                .plan
+                .iter()
+                .any(|line| line.contains("sources") && line.contains("INDEX"))
+        );
+        assert!(
+            !evidence
+                .plan
+                .iter()
+                .any(|line| line.starts_with("SCAN shipments") || line.starts_with("SCAN sources"))
+        );
+        if let Ok(path) = std::env::var("PACKAGES_TEST_SOURCE_QUERY_EVIDENCE") {
+            std::fs::write(path, serde_json::to_vec_pretty(&evidence).unwrap()).unwrap();
+        }
+        store.close().await.unwrap();
     }
 
     #[tokio::test]

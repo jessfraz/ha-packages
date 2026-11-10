@@ -219,19 +219,6 @@ pub async fn claim_source(
         .begin_with("BEGIN IMMEDIATE")
         .await
         .map_err(crate::error::Error::from)?;
-    let exists: bool =
-        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM sources WHERE namespace=? AND key=?)")
-            .bind(&source.namespace)
-            .bind(&source.key)
-            .fetch_one(&mut *tx)
-            .await
-            .map_err(crate::error::Error::from)?;
-    if exists {
-        return Err(crate::error::Error::Conflict(
-            "source already belongs to another shipment".into(),
-        )
-        .into());
-    }
     let acquired = sqlx::query("INSERT INTO admission_sources (namespace,key,actor_id,operation_key,lease_token,lease_until) VALUES (?,?,?,?,?,unixepoch()+?) ON CONFLICT(namespace,key) DO UPDATE SET actor_id=excluded.actor_id,operation_key=excluded.operation_key,lease_token=excluded.lease_token,lease_until=excluded.lease_until WHERE admission_sources.lease_until<=unixepoch()")
         .bind(&source.namespace).bind(&source.key).bind(actor).bind(key).bind(&token).bind(LEASE_SECONDS).execute(&mut *tx).await.map_err(crate::error::Error::from)?.rows_affected();
     if acquired == 0 {

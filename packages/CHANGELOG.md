@@ -1,3 +1,8 @@
+## 0.8.1
+
+- Support split shipments described by the same email or order source.
+  Keep each parcel’s tracking, history and retry identity intact.
+
 ## 0.8.0
 
 - Schedule, inspect and cancel prepaid-label pickups directly with USPS, UPS
