@@ -29,6 +29,7 @@ use uuid::Uuid;
 #[derive(Clone)]
 pub struct Context {
     pub store: Store,
+    pub(crate) pickups: Arc<crate::pickup::service::Manager>,
     amazon: Option<Arc<crate::amazon::AmazonClient>>,
     amazon_management: Arc<tokio::sync::Mutex<()>>,
     owner_digest: [u8; 32],
@@ -45,8 +46,10 @@ impl Context {
         ingress_peer: Option<IpAddr>,
         provider: Option<Arc<dyn ShippingApi>>,
     ) -> Self {
+        let pickups = Arc::new(crate::pickup::service::Manager::unconfigured(&store));
         Self {
             store,
+            pickups,
             amazon: None,
             amazon_management: Arc::new(tokio::sync::Mutex::new(())),
             owner_digest: Sha256::digest(owner).into(),
@@ -55,6 +58,11 @@ impl Context {
             providers: provider.into_iter().collect(),
             installation: Arc::new(Installation::new(false)),
         }
+    }
+
+    pub fn with_pickups(mut self, pickups: Arc<crate::pickup::service::Manager>) -> Self {
+        self.pickups = pickups;
+        self
     }
 
     pub fn with_provider(mut self, provider: Arc<dyn ShippingApi>) -> Self {
@@ -316,6 +324,134 @@ async fn authenticate(
     Ok(principal)
 }
 
+pub(crate) async fn pickup_status_authorize(
+    request: &RequestContext<Arc<Context>>,
+) -> Result<(), HttpError> {
+    let principal = authenticate(request, false).await?;
+    if !principal.owner && !principal.integration {
+        return Err(HttpError::for_client_error(
+            None,
+            dropshot::ClientErrorStatusCode::FORBIDDEN,
+            "Pickup status requires a human or Home Assistant credential".into(),
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) async fn pickup_authorize(
+    request: &RequestContext<Arc<Context>>,
+) -> Result<String, HttpError> {
+    let principal = authenticate(request, true).await?;
+    let adapter_admin = if principal.integration {
+        if let Some(user) = principal.actor.strip_prefix("ha:") {
+            request.context().installation.is_admin(user).await
+        } else {
+            false
+        }
+    } else {
+        false
+    };
+    if !principal.owner && !adapter_admin {
+        return Err(client_error(
+            StatusCode::FORBIDDEN,
+            "Pickup details and physical actions require an owner or Home Assistant administrator",
+        ));
+    }
+    Ok(principal.actor)
+}
+
+pub(crate) async fn pickup_prepare_watches(
+    request: &RequestContext<Arc<Context>>,
+    input: &crate::pickup::models::ScheduleRequest,
+) -> Result<(), HttpError> {
+    use crate::pickup::{
+        Error, ErrorCode,
+        models::{PickupCarrier, normalize_tracking},
+    };
+    let principal = authenticate(request, true).await?;
+    let tracking = input
+        .tracking
+        .iter()
+        .map(|number| normalize_tracking(number))
+        .collect::<crate::pickup::Result<Vec<_>>>()?;
+    if tracking.len() > 100 {
+        return Err(Error::new(ErrorCode::InvalidInput).into());
+    }
+    let mut watched = request.context().pickups.watched(&tracking).await?;
+    let declared = input.carrier.or_else(|| input.service.map(|s| s.carrier()));
+    for number in &tracking {
+        if let Some((_, carrier, ready)) = watched.iter().find(|(value, _, _)| value == number) {
+            if !ready {
+                return Err(Error::new(ErrorCode::WatchNotReady).into());
+            }
+            let carrier = PickupCarrier::from_tracking(*carrier)
+                .ok_or_else(|| Error::new(ErrorCode::Unsupported))?;
+            if declared.is_some_and(|expected| expected != carrier) {
+                return Err(Error::new(ErrorCode::Conflict).into());
+            }
+        }
+    }
+    for number in tracking {
+        if watched.iter().any(|(value, _, _)| value == &number) {
+            continue;
+        }
+        let carrier = declared.map(|carrier| match carrier {
+            PickupCarrier::Usps => crate::carrier::Carrier::Usps,
+            PickupCarrier::Ups => crate::carrier::Carrier::Ups,
+            PickupCarrier::FedEx => crate::carrier::Carrier::FedExDefault,
+        });
+        let digest = Sha256::digest(number.as_bytes())
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        let key = format!("pickup-watch:{digest}");
+        let input = CreateShipment {
+            title: "Outbound package".into(),
+            direction: Direction::Outbound,
+            merchant: None,
+            order_reference: None,
+            signature_required: None,
+            tracking: InputTracking {
+                carrier,
+                number: number.clone(),
+                recipient_url: None,
+            },
+            source: None,
+        };
+        let saved = save_package(request, &principal, &key, input).await;
+        match saved {
+            Ok(saved) => {
+                if saved.sync.registration_state != RegistrationState::Registered
+                    || saved.archived
+                    || PickupCarrier::from_tracking(saved.tracking.carrier).is_none()
+                {
+                    return Err(Error::new(ErrorCode::WatchNotReady).into());
+                }
+                watched.push((number, saved.tracking.carrier, true));
+            }
+            Err(error) => {
+                // Another actor may have completed the same ordinary admission.
+                // Reuse only its durable, verified record; never assume success.
+                let matches = request
+                    .context()
+                    .pickups
+                    .watched(std::slice::from_ref(&number))
+                    .await?;
+                if matches.len() != 1
+                    || !matches[0].2
+                    || declared.is_some_and(|expected| {
+                        PickupCarrier::from_tracking(matches[0].1) != Some(expected)
+                    })
+                {
+                    return Err(error);
+                }
+                watched.extend(matches);
+            }
+        }
+    }
+    Ok(())
+}
+
 fn revision(request: &RequestContext<Arc<Context>>) -> Result<i64, HttpError> {
     let value = header(request, "if-match").ok_or_else(|| {
         client_error(
@@ -370,6 +506,29 @@ fn shipment_response(shipment: Shipment) -> ShipmentResponse {
 #[derive(Deserialize, JsonSchema)]
 struct ShipmentPath {
     id: Uuid,
+}
+
+#[derive(Deserialize, JsonSchema)]
+struct PackageReference {
+    reference: String,
+    carrier: Option<String>,
+}
+
+/// Resolve a tracking number or an advanced UUID, including archived packages.
+#[endpoint {method=GET,path="/v1/package-reference",tags=["packages"]}]
+async fn package_resolve(
+    request: RequestContext<Arc<Context>>,
+    query: Query<PackageReference>,
+) -> Result<ShipmentResponse, HttpError> {
+    authenticate(&request, false).await?;
+    let query = query.into_inner();
+    Ok(shipment_response(
+        request
+            .context()
+            .store
+            .resolve_reference(&query.reference, query.carrier.as_deref())
+            .await?,
+    ))
 }
 
 #[derive(Deserialize, Serialize, JsonSchema)]
@@ -429,21 +588,16 @@ async fn carriers_list(
     Ok(HttpResponseOk(crate::carrier::Carrier::ALL.to_vec()))
 }
 
-/// Resolve and verify tracking before saving a shipment. Uncertain provider
-/// attempts remain durable so retries can recover without duplicate trackers.
-#[endpoint {method=POST,path="/v1/packages",tags=["packages"]}]
-async fn packages_create(
-    request: RequestContext<Arc<Context>>,
-    body: TypedBody<CreateShipment>,
-) -> Result<HttpResponseHeaders<HttpResponseCreated<Shipment>, VersionHeaders>, HttpError> {
-    let principal = authenticate(&request, false).await?;
-    let key = header(&request, "idempotency-key")
-        .ok_or_else(|| client_error(StatusCode::BAD_REQUEST, "Idempotency-Key is required"))?;
-    let mut input = body.into_inner();
+async fn save_package(
+    request: &RequestContext<Arc<Context>>,
+    principal: &Principal,
+    key: &str,
+    mut input: CreateShipment,
+) -> Result<Shipment, HttpError> {
     validate_create(&mut input, key)
-        .map_err(|error| log_validation_error(&request, error, "create"))?;
+        .map_err(|error| log_validation_error(request, error, "create"))?;
     validate_admission(&input.tracking)
-        .map_err(|error| log_validation_error(&request, error, "create"))?;
+        .map_err(|error| log_validation_error(request, error, "create"))?;
     let store = &request.context().store;
     let shipment = if let Some(saved) = store.replay_create(&input, &principal.actor, key).await? {
         saved
@@ -498,6 +652,20 @@ async fn packages_create(
             result?
         }
     };
+    Ok(shipment)
+}
+
+/// Resolve and verify tracking before saving a shipment. Uncertain provider
+/// attempts remain durable so retries can recover without duplicate trackers.
+#[endpoint {method=POST,path="/v1/packages",tags=["packages"]}]
+async fn packages_create(
+    request: RequestContext<Arc<Context>>,
+    body: TypedBody<CreateShipment>,
+) -> Result<HttpResponseHeaders<HttpResponseCreated<Shipment>, VersionHeaders>, HttpError> {
+    let principal = authenticate(&request, false).await?;
+    let key = header(&request, "idempotency-key")
+        .ok_or_else(|| client_error(StatusCode::BAD_REQUEST, "Idempotency-Key is required"))?;
+    let shipment = save_package(&request, &principal, key, body.into_inner()).await?;
     slog::info!(request.log, "tracking_registration";
         "request_id" => request.request_id.clone(), "shipment_id" => shipment.id.to_string(),
         "operation" => "create", "outcome" => "saved");
@@ -1442,6 +1610,24 @@ async fn script(request: RequestContext<Arc<Context>>) -> Result<Response<Body>,
         "text/javascript; charset=utf-8",
     )
 }
+#[endpoint {method=GET,path="/app-kit.js",tags=["web"]}]
+async fn kit_script(request: RequestContext<Arc<Context>>) -> Result<Response<Body>, HttpError> {
+    ingress_access(&request)?;
+    static_response(ha_app_ui::SCRIPT, "text/javascript; charset=utf-8")
+}
+#[endpoint {method=GET,path="/app-kit.css",tags=["web"]}]
+async fn kit_style(request: RequestContext<Arc<Context>>) -> Result<Response<Body>, HttpError> {
+    ingress_access(&request)?;
+    static_response(ha_app_ui::STYLESHEET, "text/css; charset=utf-8")
+}
+#[endpoint {method=GET,path="/shell.js",tags=["web"]}]
+async fn shell_script(request: RequestContext<Arc<Context>>) -> Result<Response<Body>, HttpError> {
+    ingress_access(&request)?;
+    static_response(
+        include_str!("../web/shell.js"),
+        "text/javascript; charset=utf-8",
+    )
+}
 #[endpoint {method=GET,path="/dates.js",tags=["web"]}]
 async fn date_script(request: RequestContext<Arc<Context>>) -> Result<Response<Body>, HttpError> {
     ingress_access(&request)?;
@@ -1460,6 +1646,17 @@ async fn parcel_links_script(
         "text/javascript; charset=utf-8",
     )
 }
+#[endpoint {method=GET,path="/pickups.js",tags=["web"]}]
+async fn pickups_javascript(
+    request: RequestContext<Arc<Context>>,
+) -> Result<Response<Body>, HttpError> {
+    ingress_access(&request)?;
+    static_response(
+        include_str!("../web/pickups.js"),
+        "text/javascript; charset=utf-8",
+    )
+}
+
 #[endpoint {method=GET,path="/amazon-settings.js",tags=["web"]}]
 async fn amazon_settings_script(
     request: RequestContext<Arc<Context>>,
@@ -1488,8 +1685,9 @@ async fn style(request: RequestContext<Arc<Context>>) -> Result<Response<Body>, 
 
 pub fn description() -> Result<ApiDescription<Arc<Context>>> {
     let mut api = ApiDescription::new();
-    let endpoints: [dropshot::ApiEndpoint<Arc<Context>>; 39] = [
+    let endpoints: [dropshot::ApiEndpoint<Arc<Context>>; 44] = [
         packages_list.into(),
+        package_resolve.into(),
         carriers_list.into(),
         packages_create.into(),
         shipment_get.into(),
@@ -1514,6 +1712,7 @@ pub fn description() -> Result<ApiDescription<Arc<Context>>> {
         amazon_refresh.into(),
         amazon_disconnect.into(),
         amazon_settings_script.into(),
+        pickups_javascript.into(),
         api_error_script.into(),
         installation.into(),
         installation_check.into(),
@@ -1524,6 +1723,9 @@ pub fn description() -> Result<ApiDescription<Arc<Context>>> {
         schema.into(),
         index.into(),
         script.into(),
+        kit_script.into(),
+        kit_style.into(),
+        shell_script.into(),
         connection_script.into(),
         date_script.into(),
         parcel_links_script.into(),
@@ -1532,6 +1734,7 @@ pub fn description() -> Result<ApiDescription<Arc<Context>>> {
     for endpoint in endpoints {
         api.register(endpoint).context("register API endpoint")?;
     }
+    crate::pickup::api::register(&mut api)?;
     Ok(api)
 }
 

@@ -2,7 +2,10 @@ import { waitForConnection } from "./connection.js";
 import { ApiError } from "./api-error.js";
 import { calendarDate, deliveryDescription } from "./dates.js";
 import { carrierLabel, carrierOptionLabel, providerNames, trackingLinks } from "./parcel-links.js";
+import { installPickups } from "./pickups.js";
 import { installAmazonSettings } from "./amazon-settings.js";
+import { shell } from "./shell.js";
+import { setNotice } from "./app-kit.js";
 
 const byId = (id) => document.getElementById(id);
 const labels = {
@@ -55,6 +58,7 @@ let agentBusy = false;
 let agentSession = 0;
 let agentTokenGeneration = 0;
 let issuedAgentId = null;
+const pickups = installPickups(byId("pickups-dashboard"), byId("show-pickups"), byId("dashboard"), api, () => setOwnerAccess(false));
 const amazonSettings = installAmazonSettings(byId("amazon"), api, () => setOwnerAccess(false));
 
 function editError(error) {
@@ -226,8 +230,7 @@ async function applyRoute(initial = false) {
 }
 
 function notice(text, error = false) {
-  byId("notice").textContent = text;
-  byId("notice").className = error ? "error" : "";
+  setNotice(byId("notice"), text, error ? "error" : "status");
 }
 
 async function api(path, options = {}) {
@@ -277,8 +280,8 @@ function renderServiceStatus(system, checked) {
   ];
   if (checked)
     status.push(`Last checked ${new Date().toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}`);
-  byId("app-version").textContent = system.version;
-  byId("service-status").textContent = status.join(" · ");
+  shell.setVersion(system.version);
+  shell.setStatus(status.join(" · "), system.provider_enabled ? system.sync_errors ? "stale" : "ok" : "neutral");
   byId("app-footer").hidden = false;
 }
 
@@ -348,6 +351,7 @@ function setOwnerAccess(owner, reset = false) {
   if (showInstallation === owner && !reset) return;
   showInstallation = owner;
   amazonSettings.setAccess(owner, reset);
+  pickups.setAccess(owner, reset);
   // Role and connection changes invalidate pending credential responses and
   // clear any one-time token before privileged controls can disappear.
   agentSession += 1;
@@ -611,7 +615,7 @@ function renderInstallation(report) {
     const check = report[key];
     const needsAttention = ["attention", "unavailable"].includes(check.status);
     if (needsAttention) attention += 1;
-    const row = element("li", undefined, needsAttention ? "check-attention" : "");
+    const row = element("li", undefined, needsAttention ? "check-attention" : check.status === "not_applicable" ? "check-optional" : "");
     const state = {
       pass: "Passed",
       attention: "Needs attention",
@@ -1171,6 +1175,13 @@ async function show(id, preserveView = false, section = route().get("section")) 
   if (!shipment.archived && shipment.direction === "inbound" &&
       shipment.tracking?.carrier === "AmazonMcf" && shipment.sync.provider === "aftership")
     button("Use Amazon Account tracking", () => mutate("amazon", "POST"), true);
+  if (!shipment.archived && shipment.sync.registration_state === "registered" &&
+      ["USPS", "UspsShip", "UPS", "UPSDAP", "FedEx", "FedExDefault", "FedexSmartPost"].includes(shipment.tracking?.carrier))
+    button("Schedule pickup", () => {
+      const tracking = shipment.tracking.number;
+      closeDetail();
+      return pickups.open([tracking]);
+    }, true);
   if (shipment.status_override)
     button("Clear correction", () => mutate("status-override", "DELETE"), true);
   button(shipment.archived ? "Restore" : "Archive", () =>

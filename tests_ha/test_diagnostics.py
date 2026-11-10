@@ -77,7 +77,11 @@ async def test_native_download_contains_only_cached_health(
         },
         "summary": {
             "current": True,
-            "counts": {key: entry.runtime_data.data[key] for key in SENSOR_KEYS},
+            "counts": {
+                key: entry.runtime_data.data[key]
+                for key in SENSOR_KEYS
+                if key in entry.runtime_data.data
+            },
         },
         "repairs": {
             "version_mismatch": False,
@@ -202,7 +206,8 @@ async def test_mixed_versions_keep_unavailable_day_count_absent(
         "counts": {
             key: entry.runtime_data.data[key]
             for key in SENSOR_KEYS
-            if key not in {"inbound_delivered_today", "inbound_due_today"}
+            if key in entry.runtime_data.data
+            and key not in {"inbound_delivered_today", "inbound_due_today"}
         },
     }
     assert data["repairs"] == {
@@ -219,6 +224,11 @@ async def test_real_zero_counts_remain_zero(
 ) -> None:
     for summary in [*backend.summaries.values(), backend.delivery_summary]:
         summary.update(dict.fromkeys(summary, 0))
+    backend.responses[("GET", "/v1/pickups/status")] = (
+        200,
+        b'{"scheduled":0,"uncertain":0,"windows":[],"windows_truncated":false}',
+        {},
+    )
     entry = MockConfigEntry(
         domain=DOMAIN,
         data={CONF_BACKEND_URL: backend.url, CONF_TOKEN: "PRIVATE-TOKEN"},

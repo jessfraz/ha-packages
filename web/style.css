@@ -1,26 +1,3 @@
-:root {
-  color-scheme: light dark;
-  font-family:
-    ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
-  color: #1d1e20;
-  background: #f7f7f6;
-  font-synthesis: none;
-  --mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, monospace;
-  --paper: #fff;
-  --line: #e1e1de;
-  --muted: #6a6d71;
-  --accent: #1d1e20;
-  --on-accent: #fff;
-  --soft: #f0f0ee;
-  --warning: #a2401f;
-  --focus: #3d6ec9;
-}
-* {
-  box-sizing: border-box;
-}
-body {
-  margin: 0;
-}
 .connection {
   max-width: 600px;
   padding: 24px;
@@ -33,42 +10,6 @@ body {
 }
 .connection p {
   line-height: 1.6;
-}
-header,
-main,
-.app-footer {
-  max-width: 1100px;
-  margin: auto;
-  padding: 32px;
-}
-.app-footer {
-  display: flex;
-  flex-wrap: wrap;
-  justify-content: space-between;
-  gap: 8px 24px;
-  padding-top: 20px;
-  padding-bottom: 32px;
-  border-top: 1px solid var(--line);
-  color: var(--muted);
-  font-size: 12px;
-  line-height: 1.6;
-}
-.app-footer p {
-  margin: 0;
-  overflow-wrap: anywhere;
-}
-.app-version {
-  font-family: var(--mono);
-  font-size: 11px;
-  margin-left: 6px;
-}
-.source-link {
-  margin-left: auto;
-  color: inherit;
-  text-decoration: none;
-}
-.source-link:hover {
-  text-decoration: underline;
 }
 .installation {
   border: 1px solid var(--line);
@@ -182,38 +123,18 @@ main,
 .check-attention .check-state {
   color: var(--amber-ink);
 }
+.check-optional .check-state {
+  color: var(--muted);
+}
 .installation a {
   font-size: 13px;
   color: inherit;
-}
-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  gap: 20px;
-  border-bottom: 1px solid var(--line);
-  padding-top: 24px;
-  padding-bottom: 20px;
-}
-h1 {
-  font-size: 17px;
-  letter-spacing: -0.2px;
-  margin: 0;
-  font-weight: 600;
-}
-header > h1 {
-  display: flex;
 }
 .wordmark {
   --brand-ink: #1d1e20;
   --brand-soft: #f0f0ee;
   --brand-paper: #ffffff;
   --brand-side: #e1e1de;
-  display: inline-flex;
-  align-items: center;
-  gap: 10px;
-  color: inherit;
-  text-decoration: none;
 }
 .wordmark svg {
   flex-shrink: 0;
@@ -233,79 +154,8 @@ h3 {
   font-size: 13px;
   line-height: 1.7;
 }
-button,
-input,
-select {
-  font: inherit;
-}
-button {
-  min-width: 44px;
-  min-height: 44px;
-  border: 1px solid transparent;
-  background: var(--accent);
-  color: var(--on-accent);
-  border-radius: 6px;
-  padding: 10px 16px;
-  cursor: pointer;
-  font-size: 14px;
-  font-weight: 550;
-}
-button:hover {
-  opacity: 0.86;
-}
-button:disabled {
-  opacity: 0.5;
-  cursor: wait;
-}
-.quiet {
-  background: transparent;
-  color: inherit;
-  border-color: var(--line);
-}
-.quiet:hover {
-  opacity: 1;
-  background: var(--soft);
-}
-input,
-select {
-  width: 100%;
-  padding: 11px 12px;
-  border: 1px solid var(--line);
-  border-radius: 5px;
-  background: var(--paper);
-  color: inherit;
-}
-input:not([type="checkbox"]):not([type="radio"]),
-select {
-  min-height: 44px;
-}
-input:focus,
-select:focus,
-button:focus-visible,
-a:focus-visible,
-summary:focus-visible {
-  outline: 2px solid var(--focus);
-  outline-offset: 2px;
-}
 label {
-  display: grid;
-  gap: 7px;
-  font-size: 13px;
   margin: 16px 0;
-}
-#notice:empty {
-  display: none;
-}
-#notice {
-  background: var(--soft);
-  border-radius: 6px;
-  padding: 14px 18px;
-  font-size: 14px;
-  line-height: 1.6;
-}
-#notice.error,
-[role="alert"] {
-  color: var(--warning);
 }
 #login {
   max-width: 420px;
@@ -321,6 +171,10 @@ label {
   margin: 8px 0 30px;
 }
 .stat {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: flex-start;
   background: var(--paper);
   border: 1px solid var(--line);
   border-radius: 8px;
@@ -363,7 +217,7 @@ label {
 #search button {
   background: transparent;
   color: inherit;
-  border-color: var(--line);
+  border-color: var(--control-border);
 }
 .view-filter {
   display: flex;
@@ -394,7 +248,7 @@ label {
   width: 100%;
   font-weight: 400;
 }
-.shipment:hover {
+button.shipment:hover {
   background: var(--soft);
   opacity: 1;
 }
@@ -491,9 +345,7 @@ dialog {
   max-height: 90dvh;
   box-shadow: 0 8px 32px #0000001f;
 }
-dialog::backdrop {
-  background: #0000004d;
-}
+.dialog-panel { max-height: calc(100dvh - 32px); }
 .dialog-heading {
   display: flex;
   align-items: center;
@@ -589,30 +441,11 @@ dialog::backdrop {
   overflow: hidden;
   clip: rect(0, 0, 0, 0);
 }
-[hidden] {
-  display: none !important;
-}
 @media (max-width: 900px) {
   .summary { grid-template-columns: 1fr 1fr; }
   .stat-tracking_issues { grid-column: 1 / -1; }
 }
 @media (max-width: 650px) {
-  header,
-  main,
-  .app-footer {
-    padding: 24px 18px;
-  }
-  .app-footer {
-    flex-direction: column;
-    padding-top: 16px;
-  }
-  .source-link {
-    margin-left: 0;
-  }
-  header {
-    padding-top: 18px;
-    padding-bottom: 16px;
-  }
   .summary {
     grid-template-columns: 1fr 1fr;
     gap: 10px;
@@ -653,18 +486,6 @@ dialog::backdrop {
     --brand-soft: #35383d;
     --brand-paper: #25282c;
     --brand-side: #44484e;
-  }
-  :root {
-    color: #e6e6e4;
-    background: #131415;
-    --paper: #1b1c1e;
-    --line: #2f3134;
-    --muted: #9c9fa3;
-    --accent: #e6e6e4;
-    --on-accent: #131415;
-    --soft: #242528;
-    --warning: #f2ad8f;
-    --focus: #7fa6ee;
   }
 }
 
@@ -744,12 +565,16 @@ dialog::backdrop {
   border-top: 3px solid var(--status-line);
   text-align: left;
 }
-.stat:hover,
 .stat[aria-pressed="true"] {
   background: var(--status-fill);
   border-color: var(--status-line);
   filter: none;
 }
+button.stat:not([aria-pressed="true"]):hover {
+  background: var(--soft);
+  opacity: 1;
+}
+button.stat[aria-pressed="true"]:hover { opacity: 1; }
 .stat[aria-pressed="true"] {
   box-shadow: 0 0 0 1px var(--status-line);
 }
@@ -1004,3 +829,125 @@ dialog::backdrop {
   font-size: 13px;
   line-height: 1.6;
 }
+
+#pickups-dashboard .header-actions,
+.pickup-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+}
+.pickup-heading {
+  margin-block: 1.5rem;
+}
+.pickup-heading h2 {
+  margin: 0.15rem 0;
+  font-size: clamp(1.6rem, 4vw, 2rem);
+}
+.eyebrow {
+  margin: 0;
+  text-transform: uppercase;
+  letter-spacing: 0.09em;
+  font-size: 0.72rem;
+  color: var(--muted);
+  font-weight: 650;
+}
+.pickup-card {
+  padding: 1.25rem;
+  border: 1px solid var(--line);
+  border-radius: 0.75rem;
+  background: var(--paper);
+}
+.pickup-card h3 {
+  margin: 0;
+}
+.pickup-card p {
+  overflow-wrap: anywhere;
+}
+.pickup-card .header-actions {
+  justify-content: flex-start;
+}
+.pickup-state {
+  font-size: 0.8rem;
+  border: 1px solid var(--line);
+  border-radius: 2rem;
+  padding: 0.25rem 0.6rem;
+}
+.pickup-state.scheduled {
+  color: var(--success, #237a57);
+}
+.pickup-state.unknown {
+  color: var(--danger, #be3535);
+}
+#pickup-review {
+  border-top: 1px solid var(--line);
+  margin-top: 1rem;
+  padding-top: 0.5rem;
+}
+#pickup-plan-fields {
+  border: 0;
+  padding: 0;
+  margin: 0;
+  min-width: 0;
+}
+#pickup-site-form .columns,
+#pickup-schedule-form .columns {
+  align-items: start;
+}
+#pickup-site-form .checkbox-label,
+#pickup-schedule-form .checkbox-label {
+  display: flex;
+  flex-direction: row;
+  align-items: flex-start;
+  gap: 0.6rem;
+  margin-block: 1rem;
+}
+.checkbox-label input[type="checkbox"] {
+  width: auto;
+  flex: none;
+  margin-top: 0.2rem;
+}
+#pickups-dashboard textarea {
+  width: 100%;
+  resize: vertical;
+  box-sizing: border-box;
+  font: inherit;
+  color: inherit;
+  background: var(--paper);
+  border: 1px solid var(--line);
+  border-radius: 0.4rem;
+  padding: 0.65rem;
+}
+#pickup-schedule-form details {
+  margin-block: 1rem;
+}
+#pickup-actions .header-actions {
+  justify-content: flex-end;
+}
+#pickup-review {
+  scroll-margin-top: 1rem;
+  outline: none;
+  border-top: 0;
+  margin-top: 0;
+}
+#pickup-review h3 {
+  margin-top: 0;
+}
+.pickup-state.scheduled {
+  color: var(--accent);
+}
+.pickup-state.unknown {
+  color: var(--warning);
+}
+#pickup-review-details p {
+  overflow-wrap: anywhere;
+}
+
+header > .header-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 0.5rem;
+}
+input:not([type="checkbox"]):not([type="radio"]), select { width: 100%; }

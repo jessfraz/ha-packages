@@ -25,7 +25,12 @@ DIRECTION_SUMMARY_KEYS: dict[Direction, tuple[str, ...]] = {
 }
 SENSOR_KEYS = (
     SUMMARY_KEYS
-    + ("inbound_delivered_today", "inbound_due_today")
+    + (
+        "inbound_delivered_today",
+        "inbound_due_today",
+        "pickups_scheduled",
+        "pickups_uncertain",
+    )
     + tuple(
         f"{direction}_{key}"
         for direction, keys in DIRECTION_SUMMARY_KEYS.items()

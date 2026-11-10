@@ -1,5 +1,5 @@
 name: Packages
-version: "0.7.2"
+version: "0.8.0"
 slug: packages
 description: A local shipment registry with a Home Assistant dashboard
 url: https://github.com/jessfraz/ha-packages
@@ -10,6 +10,7 @@ image: ghcr.io/jessfraz/ha-packages
 startup: application
 boot: auto
 backup: cold
+timeout: 120
 init: false
 ingress: true
 ingress_port: 8099
@@ -25,5 +26,16 @@ options: {}
 schema:
   easypost_api_key: password?
   aftership_api_key: password?
+  pickup_usps_client_id: str?
+  pickup_usps_client_secret: password?
+  pickup_usps_environment: list(sandbox|production)?
+  pickup_ups_client_id: str?
+  pickup_ups_client_secret: password?
+  pickup_ups_account_number: str?
+  pickup_ups_environment: list(sandbox|production)?
+  pickup_fedex_client_id: str?
+  pickup_fedex_client_secret: password?
+  pickup_fedex_account_number: str?
+  pickup_fedex_environment: list(sandbox|production)?
 discovery:
   - packages

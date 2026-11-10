@@ -5,6 +5,7 @@ from datetime import datetime
 from homeassistant.components.calendar import CalendarEntity, CalendarEvent
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from homeassistant.util import dt as dt_util
@@ -20,7 +21,12 @@ async def async_setup_entry(
     entry: ConfigEntry[PackagesCoordinator],
     async_add_entities: AddConfigEntryEntitiesCallback,
 ) -> None:
-    async_add_entities([InboundDeliveryCalendar(entry.runtime_data, entry)])
+    async_add_entities(
+        [
+            InboundDeliveryCalendar(entry.runtime_data, entry),
+            PickupCalendar(entry.runtime_data, entry),
+        ]
+    )
 
 
 class InboundDeliveryCalendar(CoordinatorEntity[PackagesCoordinator], CalendarEntity):
@@ -74,3 +80,40 @@ class InboundDeliveryCalendar(CoordinatorEntity[PackagesCoordinator], CalendarEn
             if event.start_datetime_local < end_date
             and event.end_datetime_local > start_date
         ]
+
+
+class PickupCalendar(InboundDeliveryCalendar):
+    """Read-only windows expose no addresses or parcel identifiers."""
+
+    _attr_translation_key = "pickups"
+
+    def __init__(
+        self, coordinator: PackagesCoordinator, entry: ConfigEntry[PackagesCoordinator]
+    ) -> None:
+        super().__init__(coordinator, entry)
+        self._attr_unique_id = f"{entry.entry_id}_pickups"
+        self._attr_extra_state_attributes = {}
+
+    @property
+    def available(self) -> bool:
+        report = self.coordinator.pickup_report
+        return super().available and report is not None and not report.windows_truncated
+
+    async def async_get_events(
+        self, hass: HomeAssistant, start_date: datetime, end_date: datetime
+    ) -> list[CalendarEvent]:
+        report = self.coordinator.pickup_report
+        if report is None or report.windows_truncated:
+            raise HomeAssistantError("Pickup calendar coverage is unavailable")
+        return await super().async_get_events(hass, start_date, end_date)
+
+    def _events(self) -> list[CalendarEvent]:
+        report = self.coordinator.pickup_report
+        return (
+            sorted(
+                (window.calendar_event() for window in report.windows),
+                key=lambda event: event.start_datetime_local,
+            )
+            if report is not None and not report.windows_truncated
+            else []
+        )

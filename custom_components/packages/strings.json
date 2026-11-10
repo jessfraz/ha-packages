@@ -11,7 +11,7 @@
       },
       "app": {
         "title": "Start the Packages app",
-        "description": "Install and start Packages in Settings \u2192 Apps, then select Submit to find it. The custom integration must be installed and Home Assistant restarted first. Standalone installations can use the standalone service option instead."
+        "description": "Install and start Packages in Settings → Apps, then select Submit to find it. The custom integration must be installed and Home Assistant restarted first. Standalone installations can use the standalone service option instead."
       },
       "hassio_confirm": {
         "title": "Connect the Packages app",
@@ -110,6 +110,12 @@
           "failed": "Failed",
           "stale": "Stale"
         }
+      },
+      "pickups_scheduled": {
+        "name": "Scheduled pickups"
+      },
+      "pickups_uncertain": {
+        "name": "Uncertain pickups"
       }
     },
     "binary_sensor": {
@@ -126,6 +132,9 @@
     "calendar": {
       "inbound_deliveries": {
         "name": "Inbound deliveries"
+      },
+      "pickups": {
+        "name": "Pickups"
       }
     }
   },
@@ -157,6 +166,10 @@
     "amazon_discovery_unavailable": {
       "title": "Amazon discovery health is unavailable",
       "description": "The discovery health report is currently unknown (`{error_code}`). Check that the Packages app is running and review the [app logs]({logs_url}). [Download diagnostics from the Packages integration menu]({diagnostics_url}) if the report stays unavailable. A fresh supported health report is required to confirm recovery."
+    },
+    "pickup_uncertain": {
+      "title": "Pickup outcome needs confirmation",
+      "description": "A carrier pickup or cancellation has an uncertain outcome. Open Packages → Pickups and check with the carrier before scheduling again. An interrupted request is never automatically rebooked."
     }
   }
 }

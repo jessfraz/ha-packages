@@ -1059,6 +1059,11 @@ dependencies = [
 ]
 
 [[package]]
+name = "ha-app-ui"
+version = "0.1.1"
+source = "git+https://github.com/jessfraz/ha-app-kit?rev=a7b09c84ee35bf7c372dfcdc8614a0d48399af1c#a7b09c84ee35bf7c372dfcdc8614a0d48399af1c"
+
+[[package]]
 name = "hashbrown"
 version = "0.16.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1742,7 +1747,7 @@ dependencies = [
 
 [[package]]
 name = "packages"
-version = "0.7.2"
+version = "0.8.0"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
@@ -1750,6 +1755,7 @@ dependencies = [
  "dropshot",
  "expectorate",
  "getrandom 0.4.3",
+ "ha-app-ui",
  "http",
  "jiff",
  "reqwest",

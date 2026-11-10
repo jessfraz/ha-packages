@@ -24,6 +24,8 @@ async def test_summary_entities_and_unload(hass: HomeAssistant, entry) -> None:
         "sensor.packages_outbound_active": "1",
         "sensor.packages_outbound_exceptions": "0",
         "sensor.packages_amazon_discovery": "unavailable",
+        "sensor.packages_pickups_scheduled": "unavailable",
+        "sensor.packages_pickups_uncertain": "unavailable",
     }
     assert hass.services.has_service(DOMAIN, "archive")
     assert await hass.config_entries.async_unload(entry.entry_id)
@@ -76,6 +78,8 @@ async def test_direction_counts_keep_existing_sensors_combined(
         "sensor.packages_outbound_active": "3",
         "sensor.packages_outbound_exceptions": "2",
         "sensor.packages_amazon_discovery": "unavailable",
+        "sensor.packages_pickups_scheduled": "unavailable",
+        "sensor.packages_pickups_uncertain": "unavailable",
     }
     assert [
         (request.path, request.query)

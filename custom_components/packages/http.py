@@ -13,6 +13,7 @@ from .const import DOMAIN, MAX_REQUEST_BYTES
 from .coordinator import PackagesCoordinator
 
 _UUID = r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
+_TRACKING = r"[A-Za-z0-9-]{6,100}"
 _ROUTES = (
     (re.compile(r"packages"), frozenset({"GET", "POST"}), False),
     (
@@ -22,10 +23,35 @@ _ROUTES = (
     ),
     (re.compile(rf"packages/{_UUID}"), frozenset({"GET", "PATCH"}), False),
     (re.compile(rf"packages/{_UUID}/events"), frozenset({"GET"}), False),
+    (re.compile(r"package-reference"), frozenset({"GET"}), False),
     (re.compile(rf"packages/{_UUID}/(?:sources|refresh)"), frozenset({"POST"}), False),
     (
         re.compile(rf"packages/{_UUID}/(?:status-override|archive)"),
         frozenset({"PUT", "DELETE"}),
+        True,
+    ),
+    (re.compile(r"pickups"), frozenset({"GET", "POST"}), True),
+    (re.compile(r"pickups/carriers|pickups/resolve"), frozenset({"GET"}), True),
+    (re.compile(r"pickups/locations"), frozenset({"GET", "POST"}), True),
+    (re.compile(rf"pickups/locations/{_UUID}"), frozenset({"PUT"}), True),
+    (
+        re.compile(rf"pickups/parcels/{_TRACKING}"),
+        frozenset({"GET", "PUT"}),
+        True,
+    ),
+    (
+        re.compile(r"pickups/availability|pickups/preview"),
+        frozenset({"POST"}),
+        True,
+    ),
+    (
+        re.compile(rf"pickups/batches/{_UUID}|pickups/records/{_UUID}"),
+        frozenset({"GET"}),
+        True,
+    ),
+    (
+        re.compile(rf"pickups/records/{_UUID}/(?:refresh|cancel|reconcile)"),
+        frozenset({"POST"}),
         True,
     ),
 )
@@ -80,6 +106,12 @@ class PackagesView(HomeAssistantView):
         if request.method == "GET":
             if path == "packages":
                 allowed_query = _LIST_QUERY
+            elif path in {"package-reference", "pickups/resolve"}:
+                allowed_query = {"reference", "carrier"}
+            elif path == "pickups":
+                allowed_query = _EVENT_QUERY
+            elif path.startswith("pickups/parcels/"):
+                allowed_query = {"carrier"}
             elif path == "summary":
                 allowed_query = {
                     "direction",
@@ -111,6 +143,15 @@ class PackagesView(HomeAssistantView):
                 raise web.HTTPRequestEntityTooLarge(
                     max_size=MAX_REQUEST_BYTES, actual_size=len(payload)
                 )
+        # A streamed body can outlive a role change or integration unload.
+        # Recheck the actual user and the owning entry before forwarding it.
+        current_user = await self._hass.auth.async_get_user(user.id)
+        if current_user is None or not current_user.is_active:
+            raise web.HTTPForbidden
+        if route[2] and not current_user.is_admin:
+            raise web.HTTPForbidden
+        if loaded_coordinator(self._hass) is not coordinator:
+            raise web.HTTPServiceUnavailable
         headers = {
             key: request.headers[key]
             for key in ("If-Match", "If-None-Match", "Idempotency-Key")
@@ -133,6 +174,16 @@ class PackagesView(HomeAssistantView):
             raise web.HTTPGatewayTimeout from None
         except ClientError, ResponseTooLarge:
             raise web.HTTPBadGateway from None
+        if route[2]:
+            current_user = await self._hass.auth.async_get_user(user.id)
+            if (
+                current_user is None
+                or not current_user.is_active
+                or not current_user.is_admin
+            ):
+                raise web.HTTPForbidden
+        if loaded_coordinator(self._hass) is not coordinator:
+            raise web.HTTPServiceUnavailable
         if request.method != "GET" and response.status < 300:
             # Let polling reconcile native counts without delaying the REST response.
             entry = coordinator.config_entry

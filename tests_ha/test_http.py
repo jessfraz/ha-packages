@@ -247,3 +247,63 @@ async def test_proxy_unavailable_after_unload(
     client = await hass_client()
     assert await hass.config_entries.async_unload(entry.entry_id)
     assert (await client.get(f"{PREFIX}/summary")).status == 503
+
+
+@pytest.mark.parametrize(
+    ("method", "path"),
+    [
+        ("get", "pickups"),
+        ("get", "pickups/carriers"),
+        ("get", "pickups/locations"),
+        ("post", "pickups"),
+        ("post", "pickups/preview"),
+        ("post", f"pickups/records/{SHIPMENT_ID}/cancel"),
+        ("get", "pickups/parcels/TEST123456"),
+    ],
+)
+async def test_pickup_routes_require_admin_without_forwarding(
+    hass_client, hass_user_token, entry, backend: Backend, method: str, path: str
+) -> None:
+    client = await hass_client(hass_user_token)
+    before = len(backend.requests)
+    response = await getattr(client, method)(f"{PREFIX}/{path}")
+    assert response.status == 403
+    assert len(backend.requests) == before
+
+
+async def test_pickup_schedule_forwards_explicit_consent_and_human_identity(
+    hass_client, hass_admin_user, entry, backend: Backend
+) -> None:
+    backend.responses[("POST", "/v1/pickups")] = (
+        202,
+        b'{"id":"fixture-batch","items":[]}',
+        {"Content-Type": "application/json", "Cache-Control": "no-store"},
+    )
+    client = await hass_client()
+    response = await client.post(
+        f"{PREFIX}/pickups",
+        headers={"Idempotency-Key": "fixture-pickup-intent"},
+        json={"tracking": ["TEST123456"], "accept_fee": True},
+    )
+    assert response.status == 202
+    forwarded = next(r for r in reversed(backend.requests) if r.path == "/v1/pickups")
+    assert forwarded.headers["X-Packages-Actor"] == f"ha:{hass_admin_user.id}"
+    assert forwarded.headers["Idempotency-Key"] == "fixture-pickup-intent"
+    assert json.loads(forwarded.body) == {
+        "tracking": ["TEST123456"],
+        "accept_fee": True,
+    }
+
+
+async def test_tracking_reference_resolution_is_an_authenticated_read(
+    hass_client, hass_user_token, entry, backend: Backend
+) -> None:
+    client = await hass_client(hass_user_token)
+    response = await client.get(
+        f"{PREFIX}/package-reference",
+        params={"reference": "TEST123456", "carrier": "ups"},
+    )
+    assert response.status == 200
+    forwarded = backend.requests[-1]
+    assert forwarded.path == "/v1/package-reference"
+    assert forwarded.query == {"reference": "TEST123456", "carrier": "ups"}

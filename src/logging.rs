@@ -485,6 +485,15 @@ fn route_template(uri: &str) -> &'static str {
         "/style.css" => "/style.css",
         "/openapi.json" => "/openapi.json",
         "/v1/packages" => "/v1/packages",
+        "/v1/package-reference" => "/v1/package-reference",
+        "/pickups.js" => "/pickups.js",
+        "/v1/pickups" => "/v1/pickups",
+        "/v1/pickups/status" => "/v1/pickups/status",
+        "/v1/pickups/carriers" => "/v1/pickups/carriers",
+        "/v1/pickups/locations" => "/v1/pickups/locations",
+        "/v1/pickups/resolve" => "/v1/pickups/resolve",
+        "/v1/pickups/availability" => "/v1/pickups/availability",
+        "/v1/pickups/preview" => "/v1/pickups/preview",
         "/v1/carriers" => "/v1/carriers",
         "/v1/delivery-estimates" => "/v1/delivery-estimates",
         "/v1/events" => "/v1/events",
@@ -526,6 +535,18 @@ fn route_template(uri: &str) -> &'static str {
                         Some("refresh") => "/v1/packages/{id}/refresh",
                         Some("amazon") => "/v1/packages/{id}/amazon",
                         Some("events") => "/v1/packages/{id}/events",
+                        _ => "unmatched",
+                    }
+                }
+                (Some(""), Some("v1"), Some("pickups"), Some(group), Some(_), suffix) => {
+                    match (group, suffix) {
+                        ("locations", None) => "/v1/pickups/locations/{id}",
+                        ("parcels", None) => "/v1/pickups/parcels/{tracking}",
+                        ("batches", None) => "/v1/pickups/batches/{id}",
+                        ("records", None) => "/v1/pickups/records/{id}",
+                        ("records", Some("cancel")) => "/v1/pickups/records/{id}/cancel",
+                        ("records", Some("refresh")) => "/v1/pickups/records/{id}/refresh",
+                        ("records", Some("reconcile")) => "/v1/pickups/records/{id}/reconcile",
                         _ => "unmatched",
                     }
                 }

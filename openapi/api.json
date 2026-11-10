@@ -13,6 +13,38 @@
       }
     },
     "schemas": {
+      "Address": {
+        "additionalProperties": false,
+        "properties": {
+          "city": {
+            "type": "string"
+          },
+          "country": {
+            "type": "string"
+          },
+          "postal_code": {
+            "type": "string"
+          },
+          "secondary": {
+            "nullable": true,
+            "type": "string"
+          },
+          "state": {
+            "type": "string"
+          },
+          "street": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "city",
+          "country",
+          "postal_code",
+          "state",
+          "street"
+        ],
+        "type": "object"
+      },
       "AgentCredential": {
         "properties": {
           "created_at": {
@@ -177,6 +209,51 @@
         ],
         "type": "string"
       },
+      "Batch": {
+        "properties": {
+          "id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/Record"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "id",
+          "items"
+        ],
+        "type": "object"
+      },
+      "Capabilities": {
+        "properties": {
+          "custom_window": {
+            "type": "boolean"
+          },
+          "free_normal_route": {
+            "type": "boolean"
+          },
+          "lookup": {
+            "$ref": "#/components/schemas/Lookup"
+          },
+          "services": {
+            "items": {
+              "$ref": "#/components/schemas/PickupService"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "custom_window",
+          "free_normal_route",
+          "lookup",
+          "services"
+        ],
+        "type": "object"
+      },
       "Carrier": {
         "enum": [
           "Accurate",
@@ -326,6 +403,25 @@
         },
         "type": "object"
       },
+      "CarrierStatus": {
+        "properties": {
+          "capabilities": {
+            "$ref": "#/components/schemas/Capabilities"
+          },
+          "carrier": {
+            "$ref": "#/components/schemas/PickupCarrier"
+          },
+          "configured": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "capabilities",
+          "carrier",
+          "configured"
+        ],
+        "type": "object"
+      },
       "CarrierTracking": {
         "properties": {
           "delivered_at": {
@@ -412,6 +508,29 @@
           "not_applicable"
         ],
         "type": "string"
+      },
+      "Confirmation": {
+        "properties": {
+          "etag": {
+            "nullable": true,
+            "type": "string"
+          },
+          "location_code": {
+            "nullable": true,
+            "type": "string"
+          },
+          "number": {
+            "type": "string"
+          },
+          "pickup_date": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "number",
+          "pickup_date"
+        ],
+        "type": "object"
       },
       "CreateAgent": {
         "additionalProperties": false,
@@ -781,6 +900,46 @@
         ],
         "type": "object"
       },
+      "Error2": {
+        "description": "Fixed diagnostics only. Provider errors can contain addresses, account numbers, instructions and credentials and never cross this boundary.",
+        "properties": {
+          "code": {
+            "$ref": "#/components/schemas/ErrorCode"
+          },
+          "retry_after_seconds": {
+            "format": "uint64",
+            "minimum": 0,
+            "nullable": true,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "code"
+        ],
+        "type": "object"
+      },
+      "ErrorCode": {
+        "enum": [
+          "invalid_input",
+          "not_configured",
+          "unauthorized",
+          "unavailable",
+          "rate_limited",
+          "ineligible",
+          "not_found",
+          "conflict",
+          "unsupported",
+          "unknown_outcome",
+          "storage_unavailable",
+          "fee_consent_required",
+          "parcel_details_required",
+          "watch_not_ready",
+          "location_required",
+          "location_changed",
+          "ambiguous"
+        ],
+        "type": "string"
+      },
       "EstimatedDeliveryWindow": {
         "description": "An inclusive date range or an explicit aware-time interval, as supplied by the carrier. Preserve offsets rather than inventing a timezone or endpoint.",
         "properties": {
@@ -872,6 +1031,60 @@
           "items"
         ],
         "type": "object"
+      },
+      "Fee": {
+        "oneOf": [
+          {
+            "properties": {
+              "kind": {
+                "enum": [
+                  "free"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "amount": {
+                "type": "string"
+              },
+              "currency": {
+                "type": "string"
+              },
+              "kind": {
+                "enum": [
+                  "estimate"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "amount",
+              "currency",
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
+                "enum": [
+                  "unquoted"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          }
+        ]
       },
       "InputTracking": {
         "additionalProperties": false,
@@ -975,6 +1188,210 @@
         ],
         "type": "object"
       },
+      "Lookup": {
+        "enum": [
+          "confirmation",
+          "pending",
+          "unsupported"
+        ],
+        "type": "string"
+      },
+      "Offer": {
+        "properties": {
+          "close_time": {
+            "type": "string"
+          },
+          "date": {
+            "type": "string"
+          },
+          "fee": {
+            "$ref": "#/components/schemas/Fee"
+          },
+          "ready_time": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "close_time",
+          "date",
+          "fee",
+          "ready_time"
+        ],
+        "type": "object"
+      },
+      "Parcel": {
+        "properties": {
+          "details": {
+            "$ref": "#/components/schemas/ParcelInput"
+          },
+          "tracking": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "details",
+          "tracking"
+        ],
+        "type": "object"
+      },
+      "ParcelGroup": {
+        "properties": {
+          "count": {
+            "format": "uint16",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "destination_country": {
+            "type": "string"
+          },
+          "service": {
+            "$ref": "#/components/schemas/PickupService"
+          }
+        },
+        "required": [
+          "count",
+          "destination_country",
+          "service"
+        ],
+        "type": "object"
+      },
+      "ParcelInput": {
+        "additionalProperties": false,
+        "properties": {
+          "carrier": {
+            "$ref": "#/components/schemas/PickupCarrier"
+          },
+          "destination_country": {
+            "type": "string"
+          },
+          "service": {
+            "$ref": "#/components/schemas/PickupService"
+          },
+          "weight_lbs": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "carrier",
+          "destination_country",
+          "service",
+          "weight_lbs"
+        ],
+        "type": "object"
+      },
+      "PickupCarrier": {
+        "enum": [
+          "usps",
+          "ups",
+          "fedex"
+        ],
+        "type": "string"
+      },
+      "PickupService": {
+        "enum": [
+          "usps_priority_mail",
+          "usps_priority_mail_express",
+          "usps_ground_advantage",
+          "usps_priority_mail_international",
+          "usps_priority_mail_express_international",
+          "usps_first_class_package_international",
+          "usps_returns",
+          "ups_ground",
+          "ups_next_day_air",
+          "ups_second_day_air",
+          "ups_three_day_select",
+          "ups_worldwide_express",
+          "ups_worldwide_expedited",
+          "fedex_ground",
+          "fedex_home_delivery",
+          "fedex_standard_overnight",
+          "fedex_priority_overnight",
+          "fedex_first_overnight",
+          "fedex_two_day",
+          "fedex_express_saver",
+          "fedex_international_priority",
+          "fedex_international_economy"
+        ],
+        "type": "string"
+      },
+      "PickupStatus": {
+        "properties": {
+          "scheduled": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "uncertain": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "windows": {
+            "items": {
+              "$ref": "#/components/schemas/PickupWindow"
+            },
+            "type": "array"
+          },
+          "windows_truncated": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "scheduled",
+          "uncertain",
+          "windows",
+          "windows_truncated"
+        ],
+        "type": "object"
+      },
+      "PickupWindow": {
+        "description": "Recorder-safe projection: no addresses, contacts, barcodes or confirmations.",
+        "properties": {
+          "carrier": {
+            "$ref": "#/components/schemas/PickupCarrier"
+          },
+          "close_time": {
+            "type": "string"
+          },
+          "date": {
+            "type": "string"
+          },
+          "id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "ready_time": {
+            "type": "string"
+          },
+          "timezone": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "carrier",
+          "close_time",
+          "date",
+          "id",
+          "ready_time",
+          "timezone"
+        ],
+        "type": "object"
+      },
+      "Preview": {
+        "properties": {
+          "offer": {
+            "$ref": "#/components/schemas/Offer"
+          },
+          "plan": {
+            "$ref": "#/components/schemas/ResolvedPlan"
+          }
+        },
+        "required": [
+          "offer",
+          "plan"
+        ],
+        "type": "object"
+      },
       "ProviderDeliveryDate": {
         "description": "A provider civil date never implies a time of day or an actual scan instant.",
         "oneOf": [
@@ -1068,6 +1485,165 @@
         ],
         "type": "string"
       },
+      "ReconcileOutcome": {
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "confirmation": {
+                "$ref": "#/components/schemas/Confirmation"
+              },
+              "kind": {
+                "enum": [
+                  "scheduled"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "confirmation",
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "enum": [
+                  "not_scheduled"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "enum": [
+                  "cancelled"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "ReconcileRequest": {
+        "additionalProperties": false,
+        "description": "An explicit operator assertion after checking the carrier portal/support. This is not an automatic inference from an empty or unavailable API result.",
+        "properties": {
+          "carrier_portal_checked": {
+            "type": "boolean"
+          },
+          "outcome": {
+            "$ref": "#/components/schemas/ReconcileOutcome"
+          }
+        },
+        "required": [
+          "carrier_portal_checked",
+          "outcome"
+        ],
+        "type": "object"
+      },
+      "Record": {
+        "properties": {
+          "accept_fee": {
+            "type": "boolean"
+          },
+          "batch_id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "confirmation": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Confirmation"
+              }
+            ],
+            "nullable": true
+          },
+          "created_at": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "error": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Error2"
+              }
+            ],
+            "nullable": true
+          },
+          "id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "offer": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Offer"
+              }
+            ],
+            "nullable": true
+          },
+          "plan": {
+            "$ref": "#/components/schemas/ResolvedPlan"
+          },
+          "revision": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "state": {
+            "$ref": "#/components/schemas/State"
+          },
+          "updated_at": {
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "accept_fee",
+          "batch_id",
+          "created_at",
+          "id",
+          "plan",
+          "revision",
+          "state",
+          "updated_at"
+        ],
+        "type": "object"
+      },
+      "RecordResultsPage": {
+        "description": "A single page of results",
+        "properties": {
+          "items": {
+            "description": "list of items on this page of results",
+            "items": {
+              "$ref": "#/components/schemas/Record"
+            },
+            "type": "array"
+          },
+          "next_page": {
+            "description": "token used to fetch the next page of results (if any)",
+            "nullable": true,
+            "type": "string"
+          }
+        },
+        "required": [
+          "items"
+        ],
+        "type": "object"
+      },
       "RegistrationState": {
         "enum": [
           "pending",
@@ -1076,6 +1652,174 @@
           "configuration_required"
         ],
         "type": "string"
+      },
+      "ResolvedPlan": {
+        "description": "An immutable, reviewed dispatch snapshot, including the saved location revision. Billing identity remains in the carrier client, not user input.",
+        "properties": {
+          "carrier": {
+            "$ref": "#/components/schemas/PickupCarrier"
+          },
+          "close_time": {
+            "type": "string"
+          },
+          "date": {
+            "nullable": true,
+            "type": "string"
+          },
+          "next_available": {
+            "type": "boolean"
+          },
+          "overweight": {
+            "type": "boolean"
+          },
+          "parcels": {
+            "items": {
+              "$ref": "#/components/schemas/ParcelGroup"
+            },
+            "type": "array"
+          },
+          "ready_time": {
+            "type": "string"
+          },
+          "reference": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "site": {
+            "$ref": "#/components/schemas/Site"
+          },
+          "total_weight_hundredths": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "tracking": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "carrier",
+          "close_time",
+          "next_available",
+          "overweight",
+          "parcels",
+          "ready_time",
+          "reference",
+          "site",
+          "total_weight_hundredths",
+          "tracking"
+        ],
+        "type": "object"
+      },
+      "ReviewedSite": {
+        "additionalProperties": false,
+        "description": "Optional UI precondition. Normal CLI scheduling does not require a preview.",
+        "properties": {
+          "id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "revision": {
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "id",
+          "revision"
+        ],
+        "type": "object"
+      },
+      "SaveSite": {
+        "additionalProperties": false,
+        "properties": {
+          "location": {
+            "$ref": "#/components/schemas/SiteInput"
+          },
+          "make_default": {
+            "default": true,
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "location"
+        ],
+        "type": "object"
+      },
+      "ScheduleRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "accept_fee": {
+            "default": false,
+            "type": "boolean"
+          },
+          "carrier": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/PickupCarrier"
+              }
+            ],
+            "nullable": true
+          },
+          "close_time": {
+            "nullable": true,
+            "type": "string"
+          },
+          "date": {
+            "nullable": true,
+            "type": "string"
+          },
+          "destination_country": {
+            "nullable": true,
+            "type": "string"
+          },
+          "pieces": {
+            "format": "uint16",
+            "minimum": 0,
+            "nullable": true,
+            "type": "integer"
+          },
+          "ready_time": {
+            "nullable": true,
+            "type": "string"
+          },
+          "reviewed_site": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/ReviewedSite"
+              }
+            ],
+            "nullable": true
+          },
+          "service": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/PickupService"
+              }
+            ],
+            "nullable": true
+          },
+          "site_id": {
+            "format": "uuid",
+            "nullable": true,
+            "type": "string"
+          },
+          "tracking": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "weight_lbs": {
+            "nullable": true,
+            "type": "string"
+          }
+        },
+        "type": "object"
       },
       "SetOverride": {
         "additionalProperties": false,
@@ -1351,6 +2095,87 @@
         ],
         "type": "object"
       },
+      "Site": {
+        "properties": {
+          "details": {
+            "$ref": "#/components/schemas/SiteInput"
+          },
+          "id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "is_default": {
+            "type": "boolean"
+          },
+          "revision": {
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "details",
+          "id",
+          "is_default",
+          "revision"
+        ],
+        "type": "object"
+      },
+      "SiteInput": {
+        "additionalProperties": false,
+        "properties": {
+          "address": {
+            "$ref": "#/components/schemas/Address"
+          },
+          "close_time": {
+            "type": "string"
+          },
+          "company": {
+            "nullable": true,
+            "type": "string"
+          },
+          "contact_name": {
+            "type": "string"
+          },
+          "email": {
+            "nullable": true,
+            "type": "string"
+          },
+          "instructions": {
+            "nullable": true,
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "phone": {
+            "type": "string"
+          },
+          "pickup_point": {
+            "type": "string"
+          },
+          "ready_time": {
+            "type": "string"
+          },
+          "residential": {
+            "default": true,
+            "type": "boolean"
+          },
+          "timezone": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "address",
+          "close_time",
+          "contact_name",
+          "name",
+          "phone",
+          "pickup_point",
+          "ready_time",
+          "timezone"
+        ],
+        "type": "object"
+      },
       "Source": {
         "additionalProperties": false,
         "properties": {
@@ -1366,6 +2191,19 @@
           "namespace"
         ],
         "type": "object"
+      },
+      "State": {
+        "enum": [
+          "pending",
+          "dispatching",
+          "scheduled",
+          "cancel_pending",
+          "cancelling",
+          "cancelled",
+          "rejected",
+          "unknown"
+        ],
+        "type": "string"
       },
       "StateEvent": {
         "properties": {
@@ -1755,7 +2593,7 @@
   "info": {
     "description": "Persistent local shipment records, manual corrections, and carrier synchronization. Use a Bearer owner or ingestion token. Creates require Idempotency-Key; writes to an existing shipment require its quoted revision in If-Match.",
     "title": "Packages API",
-    "version": "0.7.2"
+    "version": "0.8.0"
   },
   "openapi": "3.0.3",
   "paths": {
@@ -1798,6 +2636,42 @@
     "/api-error.js": {
       "get": {
         "operationId": "api_error_script",
+        "responses": {
+          "default": {
+            "content": {
+              "*/*": {
+                "schema": {}
+              }
+            },
+            "description": ""
+          }
+        },
+        "tags": [
+          "web"
+        ]
+      }
+    },
+    "/app-kit.css": {
+      "get": {
+        "operationId": "kit_style",
+        "responses": {
+          "default": {
+            "content": {
+              "*/*": {
+                "schema": {}
+              }
+            },
+            "description": ""
+          }
+        },
+        "tags": [
+          "web"
+        ]
+      }
+    },
+    "/app-kit.js": {
+      "get": {
+        "operationId": "kit_script",
         "responses": {
           "default": {
             "content": {
@@ -1894,6 +2768,42 @@
     "/parcel-links.js": {
       "get": {
         "operationId": "parcel_links_script",
+        "responses": {
+          "default": {
+            "content": {
+              "*/*": {
+                "schema": {}
+              }
+            },
+            "description": ""
+          }
+        },
+        "tags": [
+          "web"
+        ]
+      }
+    },
+    "/pickups.js": {
+      "get": {
+        "operationId": "pickups_javascript",
+        "responses": {
+          "default": {
+            "content": {
+              "*/*": {
+                "schema": {}
+              }
+            },
+            "description": ""
+          }
+        },
+        "tags": [
+          "web"
+        ]
+      }
+    },
+    "/shell.js": {
+      "get": {
+        "operationId": "shell_script",
         "responses": {
           "default": {
             "content": {
@@ -2490,6 +3400,60 @@
         "summary": "Report a successful integration poll and its Supervisor backup inventory.",
         "tags": [
           "system"
+        ]
+      }
+    },
+    "/v1/package-reference": {
+      "get": {
+        "operationId": "package_resolve",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "carrier",
+            "schema": {
+              "nullable": true,
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "reference",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Shipment_for_Tracking_for_Carrier"
+                }
+              }
+            },
+            "description": "successful operation",
+            "headers": {
+              "etag": {
+                "required": true,
+                "schema": {
+                  "type": "string"
+                },
+                "style": "simple"
+              }
+            }
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Resolve a tracking number or an advanced UUID, including archived packages.",
+        "tags": [
+          "packages"
         ]
       }
     },
@@ -3220,6 +4184,953 @@
         ]
       }
     },
+    "/v1/pickups": {
+      "get": {
+        "operationId": "list",
+        "parameters": [
+          {
+            "description": "Maximum number of items returned by a single call",
+            "in": "query",
+            "name": "limit",
+            "schema": {
+              "format": "uint32",
+              "minimum": 1,
+              "nullable": true,
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Token returned by previous call to retrieve the subsequent page",
+            "in": "query",
+            "name": "page_token",
+            "schema": {
+              "nullable": true,
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RecordResultsPage"
+                }
+              }
+            },
+            "description": "successful operation",
+            "headers": {
+              "cache-control": {
+                "required": true,
+                "schema": {
+                  "type": "string"
+                },
+                "style": "simple"
+              },
+              "etag": {
+                "schema": {
+                  "nullable": true,
+                  "type": "string"
+                },
+                "style": "simple"
+              }
+            }
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "List one bounded page of pickup records, newest first.",
+        "tags": [
+          "pickups"
+        ],
+        "x-dropshot-pagination": {
+          "required": []
+        }
+      },
+      "post": {
+        "operationId": "schedule",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ScheduleRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Batch"
+                }
+              }
+            },
+            "description": "successfully enqueued operation",
+            "headers": {
+              "cache-control": {
+                "required": true,
+                "schema": {
+                  "type": "string"
+                },
+                "style": "simple"
+              },
+              "etag": {
+                "schema": {
+                  "nullable": true,
+                  "type": "string"
+                },
+                "style": "simple"
+              }
+            }
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Verify/reuse tracking watchers, then enqueue independently fenced pickups.",
+        "tags": [
+          "pickups"
+        ]
+      }
+    },
+    "/v1/pickups/availability": {
+      "post": {
+        "operationId": "availability",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ScheduleRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Offer"
+                }
+              }
+            },
+            "description": "successful operation",
+            "headers": {
+              "cache-control": {
+                "required": true,
+                "schema": {
+                  "type": "string"
+                },
+                "style": "simple"
+              },
+              "etag": {
+                "schema": {
+                  "nullable": true,
+                  "type": "string"
+                },
+                "style": "simple"
+              }
+            }
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Read-only pickup availability at the selected/default saved location.",
+        "tags": [
+          "pickups"
+        ]
+      }
+    },
+    "/v1/pickups/batches/{id}": {
+      "get": {
+        "operationId": "batch",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Batch"
+                }
+              }
+            },
+            "description": "successful operation",
+            "headers": {
+              "cache-control": {
+                "required": true,
+                "schema": {
+                  "type": "string"
+                },
+                "style": "simple"
+              },
+              "etag": {
+                "schema": {
+                  "nullable": true,
+                  "type": "string"
+                },
+                "style": "simple"
+              }
+            }
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Poll one durable multi-carrier scheduling request, including partial results.",
+        "tags": [
+          "pickups"
+        ]
+      }
+    },
+    "/v1/pickups/carriers": {
+      "get": {
+        "operationId": "carriers",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/CarrierStatus"
+                  },
+                  "title": "Array_of_CarrierStatus",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "successful operation",
+            "headers": {
+              "cache-control": {
+                "required": true,
+                "schema": {
+                  "type": "string"
+                },
+                "style": "simple"
+              },
+              "etag": {
+                "schema": {
+                  "nullable": true,
+                  "type": "string"
+                },
+                "style": "simple"
+              }
+            }
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Direct pickup carriers and their actual account/capability status.",
+        "tags": [
+          "pickups"
+        ]
+      }
+    },
+    "/v1/pickups/locations": {
+      "get": {
+        "operationId": "locations",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/Site"
+                  },
+                  "title": "Array_of_Site",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "successful operation",
+            "headers": {
+              "cache-control": {
+                "required": true,
+                "schema": {
+                  "type": "string"
+                },
+                "style": "simple"
+              },
+              "etag": {
+                "schema": {
+                  "nullable": true,
+                  "type": "string"
+                },
+                "style": "simple"
+              }
+            }
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Saved pickup sites for this deployment. Billing addresses are not inferred.",
+        "tags": [
+          "pickups"
+        ]
+      },
+      "post": {
+        "operationId": "location_create",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SaveSite"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Site"
+                }
+              }
+            },
+            "description": "successful creation",
+            "headers": {
+              "cache-control": {
+                "required": true,
+                "schema": {
+                  "type": "string"
+                },
+                "style": "simple"
+              },
+              "etag": {
+                "schema": {
+                  "nullable": true,
+                  "type": "string"
+                },
+                "style": "simple"
+              }
+            }
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Save a confirmed site and optionally make it the deployment default.",
+        "tags": [
+          "pickups"
+        ]
+      }
+    },
+    "/v1/pickups/locations/{id}": {
+      "put": {
+        "operationId": "location_update",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SaveSite"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Site"
+                }
+              }
+            },
+            "description": "successful operation",
+            "headers": {
+              "cache-control": {
+                "required": true,
+                "schema": {
+                  "type": "string"
+                },
+                "style": "simple"
+              },
+              "etag": {
+                "schema": {
+                  "nullable": true,
+                  "type": "string"
+                },
+                "style": "simple"
+              }
+            }
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Replace a saved site without silently changing already scheduled pickups.",
+        "tags": [
+          "pickups"
+        ]
+      }
+    },
+    "/v1/pickups/parcels/{tracking}": {
+      "get": {
+        "operationId": "parcel_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "tracking",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "carrier",
+            "schema": {
+              "$ref": "#/components/schemas/PickupCarrier"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/Parcel"
+                    }
+                  ],
+                  "nullable": true
+                }
+              }
+            },
+            "description": "successful operation",
+            "headers": {
+              "cache-control": {
+                "required": true,
+                "schema": {
+                  "type": "string"
+                },
+                "style": "simple"
+              },
+              "etag": {
+                "schema": {
+                  "nullable": true,
+                  "type": "string"
+                },
+                "style": "simple"
+              }
+            }
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Read a label's explicitly saved service, weight and destination.",
+        "tags": [
+          "pickups"
+        ]
+      },
+      "put": {
+        "operationId": "parcel_save",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "tracking",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ParcelInput"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Parcel"
+                }
+              }
+            },
+            "description": "successful operation",
+            "headers": {
+              "cache-control": {
+                "required": true,
+                "schema": {
+                  "type": "string"
+                },
+                "style": "simple"
+              },
+              "etag": {
+                "schema": {
+                  "nullable": true,
+                  "type": "string"
+                },
+                "style": "simple"
+              }
+            }
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Save known label details; service and weight are never guessed from a barcode.",
+        "tags": [
+          "pickups"
+        ]
+      }
+    },
+    "/v1/pickups/preview": {
+      "post": {
+        "operationId": "preview",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ScheduleRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/Preview"
+                  },
+                  "title": "Array_of_Preview",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "successful operation",
+            "headers": {
+              "cache-control": {
+                "required": true,
+                "schema": {
+                  "type": "string"
+                },
+                "style": "simple"
+              },
+              "etag": {
+                "schema": {
+                  "nullable": true,
+                  "type": "string"
+                },
+                "style": "simple"
+              }
+            }
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Optional read-only eligibility and fee inspection. No driver is dispatched.",
+        "tags": [
+          "pickups"
+        ]
+      }
+    },
+    "/v1/pickups/records/{id}": {
+      "get": {
+        "operationId": "get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Record"
+                }
+              }
+            },
+            "description": "successful operation",
+            "headers": {
+              "cache-control": {
+                "required": true,
+                "schema": {
+                  "type": "string"
+                },
+                "style": "simple"
+              },
+              "etag": {
+                "schema": {
+                  "nullable": true,
+                  "type": "string"
+                },
+                "style": "simple"
+              }
+            }
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Read a pickup, its recorded charge information and carrier confirmation.",
+        "tags": [
+          "pickups"
+        ]
+      }
+    },
+    "/v1/pickups/records/{id}/cancel": {
+      "post": {
+        "operationId": "cancel",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Record"
+                }
+              }
+            },
+            "description": "successfully enqueued operation",
+            "headers": {
+              "cache-control": {
+                "required": true,
+                "schema": {
+                  "type": "string"
+                },
+                "style": "simple"
+              },
+              "etag": {
+                "schema": {
+                  "nullable": true,
+                  "type": "string"
+                },
+                "style": "simple"
+              }
+            }
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Enqueue one explicit carrier cancellation. A cancellation is not a refund.",
+        "tags": [
+          "pickups"
+        ]
+      }
+    },
+    "/v1/pickups/records/{id}/reconcile": {
+      "post": {
+        "operationId": "reconcile",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReconcileRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Record"
+                }
+              }
+            },
+            "description": "successful operation",
+            "headers": {
+              "cache-control": {
+                "required": true,
+                "schema": {
+                  "type": "string"
+                },
+                "style": "simple"
+              },
+              "etag": {
+                "schema": {
+                  "nullable": true,
+                  "type": "string"
+                },
+                "style": "simple"
+              }
+            }
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Resolve an unknown outcome only after an explicit operator carrier check.",
+        "tags": [
+          "pickups"
+        ]
+      }
+    },
+    "/v1/pickups/records/{id}/refresh": {
+      "post": {
+        "operationId": "refresh",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Record"
+                }
+              }
+            },
+            "description": "successful operation",
+            "headers": {
+              "cache-control": {
+                "required": true,
+                "schema": {
+                  "type": "string"
+                },
+                "style": "simple"
+              },
+              "etag": {
+                "schema": {
+                  "nullable": true,
+                  "type": "string"
+                },
+                "style": "simple"
+              }
+            }
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Refresh only through a documented carrier lookup. FedEx has no such API.",
+        "tags": [
+          "pickups"
+        ]
+      }
+    },
+    "/v1/pickups/resolve": {
+      "get": {
+        "operationId": "resolve",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "carrier",
+            "schema": {
+              "$ref": "#/components/schemas/PickupCarrier"
+            }
+          },
+          {
+            "in": "query",
+            "name": "reference",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Record"
+                }
+              }
+            },
+            "description": "successful operation",
+            "headers": {
+              "cache-control": {
+                "required": true,
+                "schema": {
+                  "type": "string"
+                },
+                "style": "simple"
+              },
+              "etag": {
+                "schema": {
+                  "nullable": true,
+                  "type": "string"
+                },
+                "style": "simple"
+              }
+            }
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Resolve a tracking number or an advanced pickup ID without choosing an ambiguous match.",
+        "tags": [
+          "pickups"
+        ]
+      }
+    },
+    "/v1/pickups/status": {
+      "get": {
+        "operationId": "status",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PickupStatus"
+                }
+              }
+            },
+            "description": "successful operation",
+            "headers": {
+              "cache-control": {
+                "required": true,
+                "schema": {
+                  "type": "string"
+                },
+                "style": "simple"
+              },
+              "etag": {
+                "schema": {
+                  "nullable": true,
+                  "type": "string"
+                },
+                "style": "simple"
+              }
+            }
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Minimal read-only Home Assistant counts and calendar windows, without private label/site data.",
+        "tags": [
+          "pickups"
+        ]
+      }
+    },
     "/v1/summary": {
       "get": {
         "operationId": "summary",
@@ -3317,6 +5228,9 @@
     },
     {
       "name": "packages"
+    },
+    {
+      "name": "pickups"
     },
     {
       "name": "system"
