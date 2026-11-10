@@ -7,7 +7,7 @@ from homeassistant.components import frontend
 from homeassistant.core import HomeAssistant
 from pytest_homeassistant.common import MockConfigEntry
 
-from custom_components.shipments.const import (
+from custom_components.packages.const import (
     CONF_ADDON_SLUG,
     CONF_BACKEND_URL,
     CONF_TOKEN,
@@ -40,19 +40,19 @@ async def test_calendar_links_use_event_identity_and_loaded_app_destination(
     )
     data = {CONF_BACKEND_URL: backend.url, CONF_TOKEN: "integration-token"}
     if supervised:
-        data[CONF_ADDON_SLUG] = "example_shipments"
+        data[CONF_ADDON_SLUG] = "example_packages"
     entry = MockConfigEntry(domain=DOMAIN, data=data)
     entry.add_to_hass(hass)
     assert await hass.config_entries.async_setup(entry.entry_id)
     await hass.async_block_till_done(wait_background_tasks=True)
 
-    state = get_state(hass, "calendar.shipments_inbound_deliveries")
-    assert state.attributes.get("shipments_calendar") is True
-    assert state.attributes["shipments_app_url"] == (
-        "/shipments/shipments/" if supervised else f"{backend.url}/"
+    state = get_state(hass, "calendar.packages_inbound_deliveries")
+    assert state.attributes.get("packages_calendar") is True
+    assert state.attributes["packages_app_url"] == (
+        "/packages/packages/" if supervised else f"{backend.url}/"
     )
     modules = hass.data[frontend.DATA_EXTRA_MODULE_URL]
-    resources = [url for url in modules.urls if url.startswith("/shipments-static/")]
+    resources = [url for url in modules.urls if url.startswith("/packages-static/")]
     assert len(resources) == 1
     resource = resources[0]
     client = await hass_client()
@@ -60,7 +60,7 @@ async def test_calendar_links_use_event_identity_and_loaded_app_destination(
     assert response.status == 200
     assert response.content_type in {"text/javascript", "application/javascript"}
     events_response = await client.get(
-        "/api/calendars/calendar.shipments_inbound_deliveries",
+        "/api/calendars/calendar.packages_inbound_deliveries",
         params={"start": "2026-10-20T00:00:00Z", "end": "2026-10-22T00:00:00Z"},
     )
     assert events_response.status == 200
@@ -71,7 +71,7 @@ async def test_calendar_links_use_event_identity_and_loaded_app_destination(
 
     assert await hass.config_entries.async_unload(entry.entry_id)
     assert resource not in modules.urls
-    state = hass.states.get("calendar.shipments_inbound_deliveries")
+    state = hass.states.get("calendar.packages_inbound_deliveries")
     assert state is None or state.state == "unavailable"
     assert await hass.config_entries.async_setup(entry.entry_id)
     await hass.async_block_till_done(wait_background_tasks=True)

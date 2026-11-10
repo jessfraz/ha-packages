@@ -1,5 +1,5 @@
-use shipments::shipping_api::easypost::EasyPostClient;
-use shipments::shipping_api::types::Tracker;
+use packages::shipping_api::easypost::EasyPostClient;
+use packages::shipping_api::types::Tracker;
 use std::{
     io::{Read, Write},
     net::{TcpListener, TcpStream},
@@ -13,9 +13,7 @@ use std::{
 };
 
 use dropshot::ResultsPage;
-use reqwest::{Client, StatusCode};
-use serde::Serialize;
-use shipments::{
+use packages::{
     api,
     models::{
         CarrierTracking, CreateShipment, DeliveryEstimate, Direction, EstimatedDeliveryWindow,
@@ -25,6 +23,8 @@ use shipments::{
     store::Store,
     sync::SyncWorker,
 };
+use reqwest::{Client, StatusCode};
+use serde::Serialize;
 use sqlx::{QueryBuilder, Row, Sqlite};
 
 const OWNER: &str = "state-feed-owner-fixture-at-least-32-bytes";
@@ -291,7 +291,7 @@ async fn provider_window_migration_preserves_existing_history_and_rebuilds_calen
 
 #[tokio::test]
 async fn successful_point_only_refresh_withdraws_stored_window_without_losing_decisions() {
-    use shipments::shipping_api::{
+    use packages::shipping_api::{
         PreparedRegistration, ShippingApi,
         types::{ApiFuture, ProviderId, Registration},
     };
@@ -300,8 +300,8 @@ async fn successful_point_only_refresh_withdraws_stored_window_without_losing_de
     impl ShippingApi for PointSnapshot {
         fn detect_carrier<'a>(
             &'a self,
-            _: &'a shipments::models::InputTracking,
-        ) -> ApiFuture<'a, Option<shipments::carrier::Carrier>> {
+            _: &'a packages::models::InputTracking,
+        ) -> ApiFuture<'a, Option<packages::carrier::Carrier>> {
             Box::pin(async { panic!("refresh must not discover carriers") })
         }
 
@@ -426,7 +426,7 @@ struct Fixture {
 impl Fixture {
     async fn new() -> Self {
         let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("shipments.sqlite3");
+        let path = directory.path().join("packages.sqlite3");
         let store = Store::open(&path).await.unwrap();
         Self {
             _directory: directory,
@@ -620,7 +620,7 @@ async fn tail_bootstrap_bounded_pages_and_restart_keep_a_durable_checkpoint() {
     let old_backup = Store::open(&backup_path).await.unwrap();
     assert!(matches!(
         old_backup.state_events(Some(second.next_after), 10).await,
-        Err(shipments::error::Error::Conflict(_))
+        Err(packages::error::Error::Conflict(_))
     ));
     let reset = old_backup.state_events(None, 10).await.unwrap();
     assert_eq!(reset.next_after, bootstrap.next_after);
@@ -1057,7 +1057,7 @@ async fn create_estimate(
 ) -> Shipment {
     let carrier = "usps".parse().unwrap();
     let tracker = Tracker {
-        provider: shipments::shipping_api::types::ProviderId::EasyPost,
+        provider: packages::shipping_api::types::ProviderId::EasyPost,
         id: format!("trk_fixture_{number}"),
         tracking_code: number.into(),
         carrier,
@@ -1247,7 +1247,7 @@ async fn calendar_projection_filters_and_pages_normalized_instants_without_track
     assert_eq!(ids, expected);
     server.close().await.unwrap();
     fixture.store.close().await.unwrap();
-    if let Ok(path) = std::env::var("SHIPMENTS_TEST_CALENDAR_DATABASE") {
+    if let Ok(path) = std::env::var("PACKAGES_TEST_CALENDAR_DATABASE") {
         std::fs::copy(&fixture.path, path).unwrap();
     }
 }
@@ -1263,7 +1263,7 @@ struct QueryEvidence {
     previous_snapshot_after: Vec<String>,
     event_insert_instructions_before: usize,
     event_insert_instructions_after: usize,
-    representative_shipments: usize,
+    representative_packages: usize,
     representative_source_events: i64,
     representative_state_events: i64,
 }
@@ -1478,13 +1478,13 @@ async fn event_feed_and_atomic_trigger_use_real_indexed_queries() {
         previous_snapshot_after,
         event_insert_instructions_before: before.len(),
         event_insert_instructions_after: after.len(),
-        representative_shipments: 240,
+        representative_packages: 240,
         representative_source_events: source_count,
         representative_state_events: state_count,
     };
     let evidence = serde_json::to_string_pretty(&evidence).unwrap();
     println!("{evidence}");
-    if let Ok(path) = std::env::var("SHIPMENTS_QUERY_PLAN_OUTPUT") {
+    if let Ok(path) = std::env::var("PACKAGES_QUERY_PLAN_OUTPUT") {
         std::fs::write(path, evidence).unwrap();
     }
     drop(connection);
@@ -1493,7 +1493,7 @@ async fn event_feed_and_atomic_trigger_use_real_indexed_queries() {
 
 #[tokio::test]
 async fn native_adapter_fixture_uses_the_real_store() {
-    let Ok(path) = std::env::var("SHIPMENTS_TEST_NATIVE_DATABASE") else {
+    let Ok(path) = std::env::var("PACKAGES_TEST_NATIVE_DATABASE") else {
         return;
     };
     let store = Store::open(std::path::Path::new(&path)).await.unwrap();
@@ -1511,7 +1511,7 @@ async fn native_adapter_fixture_uses_the_real_store() {
                     signature_required: None,
                     tracking: InputTracking {
                         recipient_url: None,
-                        carrier: Some(shipments::carrier::Carrier::Usps),
+                        carrier: Some(packages::carrier::Carrier::Usps),
                         number: number.into(),
                     },
                     source: None,

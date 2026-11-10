@@ -630,7 +630,7 @@ mod tests {
         let server =
             crate::api::start("127.0.0.1:0".parse().unwrap(), std::sync::Arc::new(context))
                 .unwrap();
-        let endpoint = format!("http://{}/v1/shipments", server.local_addr());
+        let endpoint = format!("http://{}/v1/packages", server.local_addr());
         let client = reqwest::Client::new();
         let body = serde_json::json!({"direction":"inbound","title":"Synthetic bounded queue parcel","tracking":{"carrier":"UPS","number":"SYNTHETIC-QUEUE-HTTP1"}});
         let response = client

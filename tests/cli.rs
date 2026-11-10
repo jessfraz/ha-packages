@@ -1,6 +1,6 @@
 //! Real process and wire tests. No provider credentials or live network needed.
+use packages::{carrier::Carrier, models::*};
 use serde::{Deserialize, Serialize};
-use shipments::{carrier::Carrier, models::*};
 use std::{
     collections::HashMap,
     io::{Read, Write},
@@ -16,13 +16,13 @@ const ID: &str = "00000000-0000-4000-8000-000000000001";
 const SECRET: &str = "fixture-only-secret";
 
 fn command(url: &str, ha: bool) -> Command {
-    let binary = std::env::var_os("HA_SHIPMENTS_TEST_BINARY")
-        .unwrap_or_else(|| env!("CARGO_BIN_EXE_ha-shipments").into());
+    let binary = std::env::var_os("HA_PACKAGES_TEST_BINARY")
+        .unwrap_or_else(|| env!("CARGO_BIN_EXE_ha-packages").into());
     let mut command = Command::new(binary);
     for name in [
-        "SHIPMENTS_URL",
-        "SHIPMENTS_API_TOKEN",
-        "SHIPMENTS_AGENT_TOKEN",
+        "PACKAGES_URL",
+        "PACKAGES_API_TOKEN",
+        "PACKAGES_AGENT_TOKEN",
         "HOME_ASSISTANT_URL",
         "HOME_ASSISTANT_TOKEN",
         "HTTP_PROXY",
@@ -39,7 +39,7 @@ fn command(url: &str, ha: bool) -> Command {
             if ha {
                 "HOME_ASSISTANT_URL"
             } else {
-                "SHIPMENTS_URL"
+                "PACKAGES_URL"
             },
             url,
         )
@@ -47,7 +47,7 @@ fn command(url: &str, ha: bool) -> Command {
             if ha {
                 "HOME_ASSISTANT_TOKEN"
             } else {
-                "SHIPMENTS_AGENT_TOKEN"
+                "PACKAGES_AGENT_TOKEN"
             },
             SECRET,
         )
@@ -245,9 +245,9 @@ fn list_is_one_page_and_preserves_cursor_and_transport_auth() {
         assert_eq!(
             parsed.path(),
             if ha {
-                "/api/shipments/v1/shipments"
+                "/api/packages/v1/packages"
             } else {
-                "/v1/shipments"
+                "/v1/packages"
             }
         );
         let query: HashMap<_, _> = parsed.query_pairs().into_owned().collect();
@@ -291,7 +291,7 @@ fn filters_and_summary_use_typed_json_and_encoded_query() {
     ));
     assert_eq!(
         handle.join().unwrap().path,
-        "/api/shipments/v1/summary?direction=inbound&delivered_after=10&delivered_before=20"
+        "/api/packages/v1/summary?direction=inbound&delivered_after=10&delivered_before=20"
     );
 }
 
@@ -313,7 +313,7 @@ fn create_preserves_explicit_key_and_carrier_input_alias() {
     assert_eq!(envelope.etag.as_deref(), Some("\"7\""));
     let request = handle.join().unwrap();
     assert_eq!(request.method, "POST");
-    assert_eq!(request.path, "/v1/shipments");
+    assert_eq!(request.path, "/v1/packages");
     assert_eq!(request.headers["idempotency-key"], "fixture-stable-key");
     assert_eq!(request.headers["content-type"], "application/json");
     let input: CreateShipment = serde_json::from_slice(&request.body).unwrap();
@@ -376,7 +376,7 @@ fn existing_operations_use_documented_methods_paths_and_conditions() {
         ));
         let request = handle.join().unwrap();
         assert_eq!(request.method, method);
-        assert_eq!(request.path, format!("/v1/shipments/{ID}/{suffix}"));
+        assert_eq!(request.path, format!("/v1/packages/{ID}/{suffix}"));
         assert_eq!(request.headers["if-match"], "\"6\"");
         if input.is_none() {
             assert!(request.body.is_empty());
@@ -498,11 +498,11 @@ fn invalid_inputs_and_auth_selection_fail_before_any_request() {
     failure(&invoke(mixed, &["system"], None), "select_transport");
     let mut missing = command(&url, false);
     missing
-        .env_remove("SHIPMENTS_AGENT_TOKEN")
+        .env_remove("PACKAGES_AGENT_TOKEN")
         .env("HOME_ASSISTANT_TOKEN", SECRET);
     failure(&invoke(missing, &["system"], None), "missing_token");
     let mut double = command(&url, false);
-    double.env("SHIPMENTS_API_TOKEN", SECRET);
+    double.env("PACKAGES_API_TOKEN", SECRET);
     failure(
         &invoke(double, &["system"], None),
         "select_one_native_token",
@@ -528,13 +528,13 @@ fn native_only_routes_get_and_page_reads_and_revoke() {
     for (args, path, method, body) in [
         (
             vec!["get", ID],
-            format!("shipments/{ID}"),
+            format!("packages/{ID}"),
             "GET",
             serde_json::to_string(&shipment()).unwrap(),
         ),
         (
             vec!["history", ID, "--limit", "1"],
-            format!("shipments/{ID}/events?limit=1"),
+            format!("packages/{ID}/events?limit=1"),
             "GET",
             serde_json::to_string(&Page::<Event> {
                 items: vec![],
@@ -679,14 +679,14 @@ fn selected_transport_never_uses_other_token_and_oversized_input_is_local() {
         "input_too_large",
     );
     let mut invalid_token = command(&url, false);
-    invalid_token.env("SHIPMENTS_AGENT_TOKEN", "sensitive-body\nsecret");
+    invalid_token.env("PACKAGES_AGENT_TOKEN", "sensitive-body\nsecret");
     failure(&invoke(invalid_token, &["carriers"], None), "invalid_token");
     assert!(matches!(listener.accept(), Err(e) if e.kind() == std::io::ErrorKind::WouldBlock));
 }
 
 #[tokio::test]
 async fn current_api_types_roundtrip_through_the_cli_with_amazon_enabled() {
-    use shipments::{amazon::AmazonClient, api, shipping_api::types::ProviderId, store::Store};
+    use packages::{amazon::AmazonClient, api, shipping_api::types::ProviderId, store::Store};
     use std::{os::unix::fs::OpenOptionsExt, sync::Arc};
 
     #[derive(Serialize)]
@@ -699,7 +699,7 @@ async fn current_api_types_roundtrip_through_the_cli_with_amazon_enabled() {
     }
 
     let directory = tempfile::tempdir().unwrap();
-    let store = Store::open(&directory.path().join("shipments.sqlite3"))
+    let store = Store::open(&directory.path().join("packages.sqlite3"))
         .await
         .unwrap();
     let path = directory.path().join("amazon.json");
@@ -754,7 +754,7 @@ async fn current_api_types_roundtrip_through_the_cli_with_amazon_enabled() {
     assert_eq!(system.data.enabled_providers, [ProviderId::AmazonAccount]);
     assert_eq!(
         system.data.amazon.state,
-        shipments::amazon::AmazonState::Connected
+        packages::amazon::AmazonState::Connected
     );
     assert!(system.data.amazon.imports_enabled);
     assert!(!system.data.amazon.challenge_required);

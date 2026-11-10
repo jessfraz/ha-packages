@@ -1,7 +1,7 @@
 # Architecture
 
 The Rust service owns shipment state, provider access, and tracking updates.
-SQLite stores shipments, history, credentials, and registration intent. The
+SQLite stores packages, history, credentials, and registration intent. The
 Python integration exposes that state in Home Assistant.
 
 ## Tracking providers
@@ -46,7 +46,7 @@ preserves previous values as well as who changed them.
 Upgrades remove legacy records missing a carrier or tracking number, together
 with their sources, history and create replays. Complete records are retained.
 The DoorDash recipient-tracking migration also removes legacy DoorDash records
-without their required original recipient link. Re-add those shipments with
+without their required original recipient link. Re-add those packages with
 the original link if needed. Back up before upgrading.
 
 Tracking numbers are globally unique from 0.5.9. This migration preserves all
@@ -71,7 +71,7 @@ Terminal carrier states and terminal manual corrections stop polling.
 
 All EasyPost operations share one outbound slot, with at least one second
 between request starts. Rate limits pause registration, polling and connection
-checks together. New shipments wait for verified tracking before they can be
+checks together. New packages wait for verified tracking before they can be
 saved. Provider cooldowns honor bounded `Retry-After` values with exponential
 backoff. The shared pause lasts for the process; shipment retries and refresh
 cooldowns survive restarts.

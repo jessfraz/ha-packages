@@ -1,7 +1,7 @@
 //! Produce a portable database through the same storage path as verified API
 //! admission. Container smoke tests never need a provider key or an API bypass.
 
-use shipments::{
+use packages::{
     models::{CreateShipment, Direction, InputTracking, RegistrationState, Status},
     shipping_api::types::Tracker,
     store::Store,
@@ -11,8 +11,8 @@ use shipments::{
 #[ignore = "exports the database requested by the container smoke script"]
 async fn export_container_fixture() {
     let path = std::path::PathBuf::from(
-        std::env::var_os("SHIPMENTS_CONTAINER_FIXTURE")
-            .expect("set SHIPMENTS_CONTAINER_FIXTURE to a new database path"),
+        std::env::var_os("PACKAGES_CONTAINER_FIXTURE")
+            .expect("set PACKAGES_CONTAINER_FIXTURE to a new database path"),
     );
     assert!(
         !path.exists(),
@@ -40,7 +40,7 @@ async fn export_container_fixture() {
     ] {
         let carrier = carrier.parse().unwrap();
         let tracker = Tracker {
-            provider: shipments::shipping_api::types::ProviderId::EasyPost,
+            provider: packages::shipping_api::types::ProviderId::EasyPost,
             id: tracker_id.into(),
             tracking_code: number.into(),
             carrier,

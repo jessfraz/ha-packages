@@ -1,16 +1,16 @@
 # API
 
 The Rust API is under `/v1`. The Home Assistant integration forwards it under
-`/api/shipments/v1` using Home Assistant authentication. The generated contract
+`/api/packages/v1` using Home Assistant authentication. The generated contract
 is available at `/openapi.json` and in the [OpenAPI schema](../openapi/api.json).
 
 This example targets a local standalone server. For a Home Assistant app,
 enable the optional network port and use the host address, as described under
-[Agent access](../shipments/DOCS.md#agent-access).
+[Agent access](../packages/DOCS.md#agent-access).
 
 ```sh
-curl --fail-with-body http://127.0.0.1:8080/v1/shipments \
-  -H "Authorization: Bearer $SHIPMENTS_API_TOKEN" \
+curl --fail-with-body http://127.0.0.1:8080/v1/packages \
+  -H "Authorization: Bearer $PACKAGES_API_TOKEN" \
   -H 'Content-Type: application/json' \
   -H 'Idempotency-Key: example-delivery-1' \
   -d '{"title":"New desk","direction":"inbound","tracking":{"number":"YOUR_TRACKING_NUMBER"}}'
@@ -34,7 +34,7 @@ Unknown and pre-transit statuses are accepted without scans.
 Tracking-number edits use the same verification, preserving the original
 shipment and history if verification fails.
 
-Verification intent is stored separately from shipments before network I/O.
+Verification intent is stored separately from packages before network I/O.
 If a provider response is lost, retry the normal endpoint with the same input
 and idempotency key. The app checks for an existing tracker before registering,
 including after restart. It returns `503` with `Retry-After` while verification
@@ -42,16 +42,16 @@ is unavailable or backing off; a retry never bypasses provider verification.
 
 | Method | Path | Operation |
 | --- | --- | --- |
-| GET / POST | `/v1/shipments` | List or create |
+| GET / POST | `/v1/packages` | List or create |
 | GET | `/v1/carriers` | List supported carrier enum values |
-| GET / PATCH | `/v1/shipments/{id}` | Read or edit |
-| GET | `/v1/shipments/{id}/events` | Read history |
+| GET / PATCH | `/v1/packages/{id}` | Read or edit |
+| GET | `/v1/packages/{id}/events` | Read history |
 | GET | `/v1/events` | Read durable shipment status transitions |
 | GET | `/v1/delivery-estimates` | Page inbound estimates and verified delivered history |
-| POST | `/v1/shipments/{id}/sources` | Attach evidence |
-| PUT / DELETE | `/v1/shipments/{id}/status-override` | Set or clear a correction |
-| PUT / DELETE | `/v1/shipments/{id}/archive` | Archive or restore |
-| POST | `/v1/shipments/{id}/refresh` | Queue a tracking check |
+| POST | `/v1/packages/{id}/sources` | Attach evidence |
+| PUT / DELETE | `/v1/packages/{id}/status-override` | Set or clear a correction |
+| PUT / DELETE | `/v1/packages/{id}/archive` | Archive or restore |
+| POST | `/v1/packages/{id}/refresh` | Queue a tracking check |
 | GET | `/v1/summary` | Read counts |
 | GET | `/v1/system` | Read synchronization health |
 | GET | `/v1/installation` | Read installation status with an owner credential |
@@ -62,7 +62,7 @@ is unavailable or backing off; a retry never bypasses provider verification.
 Shipment creates require `Idempotency-Key`. The committed response survives
 restarts; retrying the same request returns it. A different input with the same
 key returns `409`. A normalized tracking number belongs to exactly one record,
-including archived shipments, other carriers and either direction. A duplicate
+including archived packages, other carriers and either direction. A duplicate
 create or tracking edit returns `409 tracking_duplicate` with the existing
 shipment's ID before contacting a provider. Open that shipment or restore it
 if archived; archiving never releases its number. Imported sources are also
@@ -78,7 +78,7 @@ List filters include `tracking_number`, `carrier`, `order_reference`,
 `source_namespace` with `source_key`, `status`, `active`, `exceptions`,
 `search`, `archived`, `direction`, and `sort`. Summary accepts an optional
 `direction` filter; omitting it counts both directions.
-`active=true` excludes delivered, returned, and cancelled shipments, using the
+`active=true` excludes delivered, returned, and cancelled packages, using the
 manual correction when one exists. Archiving is independent of status. The
 dashboard opens in the active view and refreshes while the tab is visible.
 Lists and history use `items` and `next_page`. Pass the token as `page_token`
@@ -131,7 +131,7 @@ DHL Express Default, FedEx SmartPost and cross-border products remain distinct.
 No product is guessed, and unknown carriers fail validation. Missing provider
 configuration, unavailable verification and uncertain registration never trigger
 a second carrier registration. Existing tracker lookup, idempotency and global
-tracking-number ownership apply after input resolution. Existing shipments and
+tracking-number ownership apply after input resolution. Existing packages and
 user decisions are not migrated or re-registered by this change.
 
 `GET /v1/delivery-estimates` includes nonarchived inbound delivery estimates
@@ -143,16 +143,16 @@ preserved. AfterShip supplies carrier bounds through
 `courier_estimated_delivery_date.estimated_delivery_date_min/max`; predictive
 AI bounds and a lone EasyPost ETA are not carrier time windows. `delivered_at`
 contains the verified actual delivery timestamp when available. Delivered
-shipments can instead carry `delivery_date`: a tagged `delivered` or `estimated`
+packages can instead carry `delivery_date`: a tagged `delivered` or `estimated`
 calendar `date`, or an `estimated_range` with inclusive `start` and `end` dates.
 The backend uses typed dates and an `observed_at` timestamp with the provider's
 IANA `timezone`; JSON dates use ISO `YYYY-MM-DD`. Amazon's yearless wording is
 resolved at observation, including overdue estimates and year boundaries.
 An unchanged date retains its first observation; sync freshness is separate.
 Date-only delivery reports never become fabricated scan timestamps.
-Shipments without a reported actual date are omitted rather than dated from
+Packages without a reported actual date are omitted rather than dated from
 an ETA or an override's creation time. Effective user status remains authoritative;
-archived, cancelled and returned shipments stay excluded. Keyset pagination
+archived, cancelled and returned packages stay excluded. Keyset pagination
 orders delivered rows by actual date and other rows by window start or estimate.
 
 EasyPost untimed midnight-UTC ETA defaults are civil dates, even when optional
@@ -202,7 +202,7 @@ set it in the editor. Replacing tracking clears it unless the same edit
 supplies the requirement for the new shipment.
 
 The dashboard's status cards filter the entire list, including search and
-pagination. Active shipments show expected dates; delivered shipments show
+pagination. Active packages show expected dates; delivered packages show
 actual delivery dates. Installation checks and agent access sit below the
 list, with installation promoted above it only when a check needs attention.
 A passed EasyPost diagnostic retains its result and timestamp until another
@@ -210,7 +210,7 @@ check replaces it; elapsed time does not turn it into a failure. From 0.5.11,
 the result survives restarts and upgrades in SQLite, scoped to the configured
 key and endpoint.
 
-The dashboard home opens on active inbound shipments. Select **All** or
+The dashboard home opens on active inbound packages. Select **All** or
 **Outbound** to change directions. Existing filtered links retain their scope.
 Dashboard fragments preserve direction, status view, search, open shipment,
 and expanded settings. Copy the address to return to the same view; browser
@@ -254,7 +254,7 @@ the shipment with the same safe error codes:
 | HTTP 400 / tracking issue | `tracking_invalid`, `tracking_carrier_mismatch`, `tracking_carrier_ambiguous` | Correct the number or specify the right carrier. |
 | HTTP 400 | `tracking_recipient_url_required`, `tracking_recipient_url_invalid`, `tracking_recipient_url_mismatch` | Supply the original DoorDash recipient link matching this tracking number. The number alone is insufficient. |
 | HTTP 400 / setup required | `tracking_test_key`, `tracking_carrier_account_required`, `tracking_carrier_credentials_required` | Fix the EasyPost key, select the appropriate carrier choice, or configure its account. |
-| HTTP 503 / tracking issue | `provider_http`, `provider_timeout`, `provider_connection`, `provider_invalid_response` | Retry the same admission request after `Retry-After`; saved shipments retry with backoff. These errors do not establish that a number is invalid. |
+| HTTP 503 / tracking issue | `provider_http`, `provider_timeout`, `provider_connection`, `provider_invalid_response` | Retry the same admission request after `Retry-After`; saved packages retry with backoff. These errors do not establish that a number is invalid. |
 | HTTP 503 / tracking issue | `recipient_page_unavailable` | The DoorDash page could not verify a recognized current status. Retry after backoff; an access refusal is not a request for carrier credentials. |
 | Shipment sync | `registration_ambiguous`, `registration_expired` | Registration needs review; the app will not risk another paid registration automatically. |
 
@@ -312,7 +312,7 @@ transport when carrying bearer credentials beyond loopback.
 
 ## Amazon account management
 
-`POST /v1/shipments/{id}/amazon` switches one existing inbound AmazonMcf
+`POST /v1/packages/{id}/amazon` switches one existing inbound AmazonMcf
 AfterShip record to verified Amazon-account tracking. It requires owner access
 and the record's current `If-Match` revision. Amazon must report the same order
 and tracking number with the Amazon Account carrier. The verified result
@@ -334,7 +334,7 @@ Safe connection state is also included in the integration-readable `/v1/system`.
   or authorization code in a URL or log.
 - `POST /v1/amazon/preview`: read verified candidate parcels, a deferred count,
   and `complete` / `has_more` coverage flags. A bounded preview is not necessarily
-  a complete recent-account audit. This does not create or modify shipments or
+  a complete recent-account audit. This does not create or modify packages or
   mark candidates imported.
 - `POST /v1/amazon/enable`: explicitly enable automatic imports after preview.
 - `POST /v1/amazon/refresh`: queue bounded discovery, respecting cooldown/backoff.

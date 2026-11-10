@@ -11,8 +11,8 @@ from homeassistant.util import dt as dt_util
 from .conftest import Backend, get_state
 from .test_assist_tools import GATEWAY, assist_api
 
-SENSOR = "sensor.shipments_amazon_discovery"
-PROBLEM = "binary_sensor.shipments_amazon_discovery_problem"
+SENSOR = "sensor.packages_amazon_discovery"
+PROBLEM = "binary_sensor.packages_amazon_discovery_problem"
 
 
 def discovery_report(**changes: object) -> dict[str, object]:
@@ -57,7 +57,7 @@ async def test_discovery_entities_show_failure_and_recovery_without_parcel_chang
     await entry.runtime_data.async_refresh()
     assert get_state(hass, SENSOR).state == "stale"
     assert get_state(hass, PROBLEM).state == "on"
-    assert get_state(hass, "sensor.shipments_active").state == "4"
+    assert get_state(hass, "sensor.packages_active").state == "4"
     assert "PRIVATE-" not in json.dumps(dict(get_state(hass, SENSOR).attributes))
     report(
         backend,
@@ -87,7 +87,7 @@ async def test_missing_invalid_or_old_health_is_unavailable(
     await entry.runtime_data.async_refresh()
     assert get_state(hass, SENSOR).state == "unavailable"
     assert get_state(hass, PROBLEM).state == "unavailable"
-    assert get_state(hass, "sensor.shipments_active").state == "4"
+    assert get_state(hass, "sensor.packages_active").state == "4"
 
 
 async def test_health_tool_is_read_only_exposed_and_uses_actual_current_report(
@@ -104,16 +104,16 @@ async def test_health_tool_is_read_only_exposed_and_uses_actual_current_report(
     )
     await entry.runtime_data.async_refresh()
     exposed_entities.async_expose_entity(hass, "conversation", GATEWAY, False)
-    assert "shipments__health" not in {
+    assert "packages__health" not in {
         tool.name for tool in (await assist_api(hass, hass_user.id)).tools
     }
     exposed_entities.async_expose_entity(hass, "conversation", GATEWAY, True)
     api = await assist_api(hass, hass_user.id)
-    tool = next(tool for tool in api.tools if tool.name == "shipments__health")
+    tool = next(tool for tool in api.tools if tool.name == "packages__health")
     assert tool.annotations.read_only
     assert not tool.annotations.destructive
     backend.requests.clear()
-    result = await api.async_call_tool(llm.ToolInput("shipments__health", {}))
+    result = await api.async_call_tool(llm.ToolInput("packages__health", {}))
     payload = json.dumps(result.data)
     assert result.data["response_type"] == "query_answer"
     assert "partial" in payload
@@ -121,6 +121,6 @@ async def test_health_tool_is_read_only_exposed_and_uses_actual_current_report(
     assert "PRIVATE-" not in payload
     assert backend.requests == []
     exposed_entities.async_expose_entity(hass, "conversation", GATEWAY, False)
-    hidden = await api.async_call_tool(llm.ToolInput("shipments__health", {}))
+    hidden = await api.async_call_tool(llm.ToolInput("packages__health", {}))
     assert hidden.data["response_type"] == "error"
     assert "last_complete_at" not in json.dumps(hidden.data)

@@ -3,8 +3,7 @@
 use std::{collections::BTreeMap, sync::Arc};
 
 use dropshot::ResultsPage;
-use serde::{Deserialize, Serialize};
-use shipments::{
+use packages::{
     api,
     carrier::Carrier,
     models::{
@@ -14,6 +13,7 @@ use shipments::{
     shipping_api::types::{ProviderId, Tracker},
     store::Store,
 };
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 const OWNER: &str = "typed-delivery-owner-credential-at-least-32-bytes";
@@ -369,7 +369,7 @@ async fn typed_provider_dates_flow_through_calendar_sorts_and_civil_day_queries(
     assert_eq!(fixture.snapshot().await, before);
     server.close().await.unwrap();
     fixture.store.close().await.unwrap();
-    if let Ok(path) = std::env::var("SHIPMENTS_TEST_TYPED_DATE_DATABASE") {
+    if let Ok(path) = std::env::var("PACKAGES_TEST_TYPED_DATE_DATABASE") {
         std::fs::copy(fixture.directory.path().join("typed-dates.sqlite3"), path).unwrap();
     }
 }
@@ -480,7 +480,7 @@ async fn civil_delivery_day_matches_explicit_day_without_weakening_timestamp_fil
         let mut actual = Vec::new();
         loop {
             let request = client
-                .get(format!("{origin}/v1/shipments"))
+                .get(format!("{origin}/v1/packages"))
                 .bearer_auth(OWNER)
                 .query(&[("limit", "1")]);
             let request = if let Some(token) = &token {
@@ -511,7 +511,7 @@ async fn civil_delivery_day_matches_explicit_day_without_weakening_timestamp_fil
         assert_eq!(summary.delivered, expected.len() as i64);
         assert_eq!(summary.exceptions, i64::from(date == Some("2026-10-31")));
     }
-    for route in ["shipments", "summary"] {
+    for route in ["packages", "summary"] {
         for query in [
             vec![("delivered_on", "2026-10-31".to_owned())],
             vec![

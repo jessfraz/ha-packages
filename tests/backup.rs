@@ -1,11 +1,11 @@
+use packages::{models::*, store::Store};
 use sha2::{Digest, Sha256};
-use shipments::{models::*, store::Store};
 
 #[tokio::test]
-async fn cold_backup_restores_records_history_and_replay_without_wal() {
+async fn cold_backup_under_new_name_restores_records_history_and_replay_without_wal() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("live.sqlite3");
-    let backup = dir.path().join("restored.sqlite3");
+    let path = dir.path().join("shipments.sqlite3");
+    let backup = dir.path().join("packages.sqlite3");
     let store = Store::open(&path).await.unwrap();
     let active_digest: [u8; 32] = Sha256::digest("active-disposable-test-credential").into();
     let revoked_digest: [u8; 32] = Sha256::digest("revoked-disposable-test-credential").into();
@@ -19,7 +19,7 @@ async fn cold_backup_restores_records_history_and_replay_without_wal() {
         .unwrap();
     assert!(store.revoke_agent(revoked.id).await.unwrap());
     let input = CreateShipment {
-        direction: shipments::models::Direction::Inbound,
+        direction: packages::models::Direction::Inbound,
         title: "Backup parcel".into(),
         merchant: None,
         order_reference: Some("TEST-123".into()),

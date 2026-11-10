@@ -22,7 +22,7 @@ class MissingSupervisor(importlib.abc.MetaPathFinder):
             )
 
 sys.meta_path.insert(0, MissingSupervisor())
-import custom_components.shipments.config_flow
+import custom_components.packages.config_flow
 """,
         cwd=Path(__file__).parents[1],
         stdout=asyncio.subprocess.PIPE,

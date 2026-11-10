@@ -24,7 +24,7 @@ from .conftest import Backend, FixtureShipment
 class RecordingHandler(intent.IntentHandler):
     """Observe the real native sentence-to-intent boundary."""
 
-    intent_type = "ShipmentsQuery"
+    intent_type = "PackagesQuery"
     requests: list[intent.Intent] = field(default_factory=list)
 
     async def async_handle(self, intent_obj: intent.Intent) -> intent.IntentResponse:
@@ -39,7 +39,7 @@ class RecordingHandler(intent.IntentHandler):
     [
         ("What packages are arriving today?", "arriving", "inbound", "today", None),
         (
-            "Which shipments are coming tomorrow?",
+            "Which packages are coming tomorrow?",
             "arriving",
             "inbound",
             "tomorrow",
@@ -61,7 +61,7 @@ class RecordingHandler(intent.IntentHandler):
         ),
         ("What's out for delivery?", "out_for_delivery", "inbound", "today", None),
         (
-            "Which outgoing shipments are out for delivery?",
+            "Which outgoing packages are out for delivery?",
             "out_for_delivery",
             "outbound",
             "today",
@@ -70,7 +70,7 @@ class RecordingHandler(intent.IntentHandler):
         ("What arrived today?", "delivered", "inbound", "today", None),
         ("What was delivered today?", "delivered", "inbound", "today", None),
         (
-            "Which outbound shipments were delivered today?",
+            "Which outbound packages were delivered today?",
             "delivered",
             "outbound",
             "today",
@@ -251,9 +251,9 @@ async def test_native_question_speaks_the_real_shipment_answer(
     """A spoken question uses the real handler and HTTP-backed shipment query."""
     assert await async_setup_component(hass, "conversation", {})
     exposed_entities.async_expose_entity(
-        hass, "conversation", "sensor.shipments_inbound_active", True
+        hass, "conversation", "sensor.packages_inbound_active", True
     )
-    backend.responses[("GET", "/v1/shipments")] = (
+    backend.responses[("GET", "/v1/packages")] = (
         200,
         json.dumps(
             {
@@ -277,7 +277,7 @@ async def test_native_question_speaks_the_real_shipment_answer(
     assert "PRIVATE" not in speech
     assert backend.requests
     assert all(
-        request.method == "GET" and request.path == "/v1/shipments"
+        request.method == "GET" and request.path == "/v1/packages"
         for request in backend.requests
     )
 

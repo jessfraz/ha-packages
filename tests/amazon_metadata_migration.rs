@@ -9,7 +9,7 @@ use std::{
     },
 };
 
-use shipments::{
+use packages::{
     carrier::Carrier,
     models::{
         CarrierEvent, CarrierTracking, Direction, EstimatedDeliveryWindow, EventKind,
@@ -107,7 +107,7 @@ struct DiscoveryState {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct DatabaseState {
-    shipments: Vec<ShipmentRow>,
+    packages: Vec<ShipmentRow>,
     events: Vec<HistoryRow>,
     state_events: Vec<StateEventRow>,
     sources: Vec<(String, String, String)>,
@@ -118,7 +118,7 @@ struct DatabaseState {
 impl DatabaseState {
     async fn load(pool: &SqlitePool) -> Self {
         Self {
-            shipments: sqlx::query_as("SELECT * FROM shipments ORDER BY id").fetch_all(pool).await.unwrap(),
+            packages: sqlx::query_as("SELECT * FROM shipments ORDER BY id").fetch_all(pool).await.unwrap(),
             events: sqlx::query_as("SELECT * FROM events ORDER BY id").fetch_all(pool).await.unwrap(),
             state_events: sqlx::query_as("SELECT * FROM state_events ORDER BY id").fetch_all(pool).await.unwrap(),
             sources: sqlx::query_as("SELECT namespace,key,shipment_id FROM sources ORDER BY namespace,key").fetch_all(pool).await.unwrap(),
@@ -128,7 +128,7 @@ impl DatabaseState {
     }
 
     fn unchanged_history(&self, previous: &Self, title_changes: usize) {
-        assert_eq!(self.shipments.len(), previous.shipments.len());
+        assert_eq!(self.packages.len(), previous.packages.len());
         assert_eq!(self.sources, previous.sources);
         assert_eq!(self.parcels, previous.parcels);
         assert_eq!(self.state_events, previous.state_events);
@@ -431,7 +431,7 @@ async fn generated_titles_backfill_only_when_the_initial_app_title_is_untouched(
     for _ in 0..2 {
         let store = Store::open(&database).await.unwrap();
         let after = DatabaseState::load(store.pool()).await;
-        for (original, current) in before.shipments.iter().zip(&after.shipments) {
+        for (original, current) in before.packages.iter().zip(&after.packages) {
             let mut expected = original.clone();
             if let Some(title) = expected_titles.get(&current.id) {
                 assert_eq!(&current.title, title);
@@ -656,7 +656,7 @@ async fn saved_page_enrichment_preserves_ownership_and_existing_retry_decisions(
             .await
             .unwrap();
         let after = DatabaseState::load(store.pool()).await;
-        for (original, current) in before.shipments.iter().zip(&after.shipments) {
+        for (original, current) in before.packages.iter().zip(&after.packages) {
             let mut expected = original.clone();
             if due.contains(&current.id) {
                 assert!(
@@ -692,8 +692,8 @@ struct SavedPageFixture {
 impl ShippingApi for SavedPageFixture {
     fn detect_carrier<'a>(
         &'a self,
-        _: &'a shipments::models::InputTracking,
-    ) -> ApiFuture<'a, Option<shipments::carrier::Carrier>> {
+        _: &'a packages::models::InputTracking,
+    ) -> ApiFuture<'a, Option<packages::carrier::Carrier>> {
         Box::pin(async { panic!("saved enrichment must not discover carriers") })
     }
 

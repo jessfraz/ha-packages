@@ -3,9 +3,7 @@
 use std::sync::{Arc, Mutex};
 
 use dropshot::{HttpServer, ResultsPage};
-use reqwest::{Client, Method, Response, StatusCode};
-use serde::Deserialize;
-use shipments::{
+use packages::{
     api,
     carrier::Carrier,
     models::{
@@ -20,6 +18,8 @@ use shipments::{
     store::Store,
     sync::SyncWorker,
 };
+use reqwest::{Client, Method, Response, StatusCode};
+use serde::Deserialize;
 use tempfile::TempDir;
 use uuid::Uuid;
 
@@ -111,8 +111,8 @@ impl ContractApi {
 impl ShippingApi for ContractApi {
     fn detect_carrier<'a>(
         &'a self,
-        _: &'a shipments::models::InputTracking,
-    ) -> ApiFuture<'a, Option<shipments::carrier::Carrier>> {
+        _: &'a packages::models::InputTracking,
+    ) -> ApiFuture<'a, Option<packages::carrier::Carrier>> {
         Box::pin(async { Ok(None) })
     }
 
@@ -203,7 +203,7 @@ impl App {
 
     async fn with_providers(ids: &[ProviderId]) -> Self {
         let directory = tempfile::tempdir().unwrap();
-        let store = Store::open(&directory.path().join("shipments.sqlite3"))
+        let store = Store::open(&directory.path().join("packages.sqlite3"))
             .await
             .unwrap();
         let calls = Arc::new(Mutex::new(Vec::new()));
@@ -236,7 +236,7 @@ impl App {
     }
 
     async fn create(&self, input: &CreateShipment, key: &str) -> Response {
-        self.request(Method::POST, "/v1/shipments")
+        self.request(Method::POST, "/v1/packages")
             .header("Idempotency-Key", key)
             .json(input)
             .send()
@@ -249,7 +249,7 @@ impl App {
     }
 
     async fn patch(&self, shipment: &Shipment, tracking: InputTracking) -> Response {
-        self.request(Method::PATCH, &format!("/v1/shipments/{}", shipment.id))
+        self.request(Method::PATCH, &format!("/v1/packages/{}", shipment.id))
             .header("If-Match", format!("\"{}\"", shipment.revision))
             .json(&UpdateShipment {
                 tracking: Patch {
@@ -342,7 +342,7 @@ async fn doordash_requires_a_valid_original_recipient_link_before_any_provider_i
         r#"{"title":"Parcel","direction":"inbound","tracking":{"carrier":"DoorDash","number":"DOORDASH123456","recipient_url":null}}"#,
     ] {
         let response = app
-            .request(Method::POST, "/v1/shipments")
+            .request(Method::POST, "/v1/packages")
             .header("Idempotency-Key", Uuid::now_v7().to_string())
             .header("Content-Type", "application/json")
             .body(body)
@@ -402,7 +402,7 @@ async fn doordash_admission_saves_and_reloads_the_verified_recipient_link() {
         }]
     );
     let reloaded: Shipment = app
-        .request(Method::GET, &format!("/v1/shipments/{}", created.id))
+        .request(Method::GET, &format!("/v1/packages/{}", created.id))
         .send()
         .await
         .unwrap()
@@ -410,7 +410,7 @@ async fn doordash_admission_saves_and_reloads_the_verified_recipient_link() {
         .await
         .unwrap();
     assert_eq!(reloaded.tracking, created.tracking);
-    let reopened = Store::open(&app.directory.path().join("shipments.sqlite3"))
+    let reopened = Store::open(&app.directory.path().join("packages.sqlite3"))
         .await
         .unwrap();
     assert_eq!(
@@ -471,7 +471,7 @@ async fn rejected_or_uncertain_doordash_observations_never_create_a_shipment() {
         assert!(!failure.message.contains(LINK));
         assert_eq!(app.store.summary(None).await.unwrap().active, 0);
         let page: ResultsPage<Shipment> = app
-            .request(Method::GET, "/v1/shipments")
+            .request(Method::GET, "/v1/packages")
             .send()
             .await
             .unwrap()

@@ -42,7 +42,7 @@ const connectionSteps = {
     label: "Amazon device registration",
     failures: {
       ...requestFailures,
-      account_identity_missing: "Amazon did not provide a stable account ID. Shipments could not confirm the connection. Check the app logs before starting another sign-in.",
+      account_identity_missing: "Amazon did not provide a stable account ID. Packages could not confirm the connection. Check the app logs before starting another sign-in.",
     },
   },
   access_token: { label: "Checking the Amazon access token", failures: requestFailures },
@@ -58,22 +58,22 @@ const connectionSteps = {
   credentials: {
     label: "Saving the Amazon connection",
     failures: {
-      persistence: "Shipments could not confirm that the connection was saved. Check the app’s data storage and free space, then reopen Amazon settings to check its state before starting another sign-in.",
-      configuration: "Shipments could not access its private credential storage. Check the app’s data-directory permissions and logs, then reopen Amazon settings to check the connection.",
+      persistence: "Packages could not confirm that the connection was saved. Check the app’s data storage and free space, then reopen Amazon settings to check its state before starting another sign-in.",
+      configuration: "Packages could not access its private credential storage. Check the app’s data-directory permissions and logs, then reopen Amazon settings to check the connection.",
     },
   },
 };
 
-const websiteChallenge = "Amazon is showing a website challenge. The saved sign-in is retained. Open Amazon orders in your browser and complete the requested check, then retry Preview shipments.";
+const websiteChallenge = "Amazon is showing a website challenge. The saved sign-in is retained. Open Amazon orders in your browser and complete the requested check, then retry Preview packages.";
 const isChallengeError = code => code === "amazon_preview_orders_challenge_page" || code === "provider_challenge_required";
 const previewRequestFailures = {
-  upstream_rejected: "Amazon no longer accepts the saved sign-in. Reconnect Amazon, then retry Preview shipments.",
-  unexpected_response: "Amazon returned a response Shipments could not read. The saved sign-in is retained. Check the app logs before retrying Preview shipments.",
-  timeout: "Amazon did not respond in time. The saved sign-in is retained. Check the app’s internet connection, then retry Preview shipments.",
-  connection: "The app could not reach Amazon. The saved sign-in is retained. Check its internet connection, then retry Preview shipments.",
-  rate_limited: "Amazon is limiting requests. The saved sign-in is retained. Wait before retrying Preview shipments.",
-  upstream_http: "Amazon returned an unsuccessful response. The saved sign-in is retained. Retry Preview shipments later; check the app logs if it keeps failing.",
-  configuration: "The app could not prepare this preview request. The saved sign-in is retained. Check the app configuration and logs before retrying Preview shipments.",
+  upstream_rejected: "Amazon no longer accepts the saved sign-in. Reconnect Amazon, then retry Preview packages.",
+  unexpected_response: "Amazon returned a response Packages could not read. The saved sign-in is retained. Check the app logs before retrying Preview packages.",
+  timeout: "Amazon did not respond in time. The saved sign-in is retained. Check the app’s internet connection, then retry Preview packages.",
+  connection: "The app could not reach Amazon. The saved sign-in is retained. Check its internet connection, then retry Preview packages.",
+  rate_limited: "Amazon is limiting requests. The saved sign-in is retained. Wait before retrying Preview packages.",
+  upstream_http: "Amazon returned an unsuccessful response. The saved sign-in is retained. Retry Preview packages later; check the app logs if it keeps failing.",
+  configuration: "The app could not prepare this preview request. The saved sign-in is retained. Check the app configuration and logs before retrying Preview packages.",
   in_progress: "An Amazon check is already running. Wait for it to finish before requesting another preview.",
 };
 const previewSteps = {
@@ -83,16 +83,16 @@ const previewSteps = {
     label: connectionSteps.orders.label,
     failures: {
       ...previewRequestFailures,
-      unsupported_orders_layout: "Your Amazon sign-in is saved. Shipments does not yet support this orders-page layout, so no unverified shipments were imported. Keep the saved sign-in; the parser needs a compatibility update. Check the app logs.",
+      unsupported_orders_layout: "Your Amazon sign-in is saved. Packages does not yet support this orders-page layout, so no unverified packages were imported. Keep the saved sign-in; the parser needs a compatibility update. Check the app logs.",
       challenge_page: websiteChallenge,
     },
   },
   credentials: {
     label: "Saving the preview check",
     failures: {
-      persistence: "Shipments could not save the preview check. Check the app’s data storage and free space, then retry Preview shipments. The saved sign-in has not been removed.",
-      configuration: "Shipments could not access its private credential storage. Check the app’s data-directory permissions and logs before retrying Preview shipments.",
-      session_changed: "The Amazon connection changed during the preview. Reopen Amazon settings to check its current state before retrying Preview shipments.",
+      persistence: "Packages could not save the preview check. Check the app’s data storage and free space, then retry Preview packages. The saved sign-in has not been removed.",
+      configuration: "Packages could not access its private credential storage. Check the app’s data-directory permissions and logs before retrying Preview packages.",
+      session_changed: "The Amazon connection changed during the preview. Reopen Amazon settings to check its current state before retrying Preview packages.",
     },
   },
 };
@@ -176,19 +176,19 @@ export function installAmazonSettings(root, request, onUnauthorized) {
       : "Not connected";
     byId("amazon-description").textContent = status?.state === "auth_required"
       ? "Amazon no longer accepts the saved sign-in. Reconnect to resume shipment updates."
-      : challenged ? "Your saved sign-in is retained. Open Amazon orders in your browser, complete any requested check, then choose Preview shipments."
+      : challenged ? "Your saved sign-in is retained. Open Amazon orders in your browser, complete any requested check, then choose Preview packages."
       : connected
         ? status.imports_enabled
-          ? "New shipments are imported automatically using the same tracking schedule as your other shipments."
-          : "Your Amazon sign-in is saved. Preview shipments to check page support before enabling automatic imports. The preview leaves saved shipments unchanged."
-      : "Connect one Amazon.com account to find shipments automatically. Your password and verification stay on Amazon.";
+          ? "New packages are imported automatically using the same tracking schedule as your other packages."
+          : "Your Amazon sign-in is saved. Preview packages to check page support before enabling automatic imports. The preview leaves saved packages unchanged."
+      : "Connect one Amazon.com account to find packages automatically. Your password and verification stay on Amazon.";
     byId("amazon-check-note").replaceChildren();
     byId("amazon-check-note").textContent = challenged
-      ? "Automatic checks are paused. Saved shipments remain available."
+      ? "Automatic checks are paused. Saved packages remain available."
       : connected && status.last_error_code
         ? status.imports_enabled
-          ? "The last Amazon check failed. Saved shipments remain available, and tracking will retry automatically."
-          : "The last preview check failed. Your sign-in is saved. Retry Preview shipments after resolving the reported issue."
+          ? "The last Amazon check failed. Saved packages remain available, and tracking will retry automatically."
+          : "The last preview check failed. Your sign-in is saved. Retry Preview packages after resolving the reported issue."
       : "";
     if (challenged && !byId("amazon-error").textContent) appendOrdersLink(byId("amazon-check-note"));
     byId("amazon-last-success").textContent = status?.last_success_at && Number.isFinite(Date.parse(status.last_success_at))
@@ -302,7 +302,7 @@ export function installAmazonSettings(root, request, onUnauthorized) {
       updateStatus(result);
       message(result.imports_enabled
         ? "Amazon reconnected. Shipment updates will resume."
-        : "Amazon sign-in saved. Preview shipments to check page support before enabling imports.");
+        : "Amazon sign-in saved. Preview packages to check page support before enabling imports.");
     });
   });
 
@@ -314,22 +314,22 @@ export function installAmazonSettings(root, request, onUnauthorized) {
   });
 
   byId("amazon-preview").addEventListener("click", () => run(
-    "Reading a shipment preview…", "Could not read a preview. Your saved shipments have not been changed.",
+    "Reading a shipment preview…", "Could not read a preview. Your saved packages have not been changed.",
     async (signal, current) => {
       clearPreview();
       const result = await request("v1/amazon/preview", { method: "POST", body: "{}", signal });
       if (!current()) return;
-      if (!Array.isArray(result?.shipments) || result.shipments.length > 100 ||
+      if (!Array.isArray(result?.packages) || result.packages.length > 100 ||
           !Number.isSafeInteger(result.deferred) || result.deferred < 0 ||
           typeof result.complete !== "boolean" || typeof result.has_more !== "boolean" || (result.complete && result.has_more) ||
-          result.shipments.some(item => typeof item.title !== "string" || !item.title || item.title.length > 500 ||
+          result.packages.some(item => typeof item.title !== "string" || !item.title || item.title.length > 500 ||
             typeof item.tracking?.number !== "string" || !item.tracking.number || item.tracking.number.length > 256 ||
             typeof item.tracking?.carrier !== "string" || !item.tracking.carrier || item.tracking.carrier.length > 100 ||
             (item.order_reference != null && (typeof item.order_reference !== "string" || item.order_reference.length > 500)))) throw new Error("Invalid preview response");
-      const verified = result.shipments.length > 0 || (result.complete && result.deferred === 0);
+      const verified = result.packages.length > 0 || (result.complete && result.deferred === 0);
       if (status?.state === "connected" && verified) updateStatus({ ...status, challenge_required: false });
       const list = byId("amazon-preview-list");
-      for (const shipment of result.shipments) {
+      for (const shipment of result.packages) {
         const row = root.ownerDocument.createElement("li");
         const title = root.ownerDocument.createElement("strong");
         title.textContent = shipment.title;
@@ -339,10 +339,10 @@ export function installAmazonSettings(root, request, onUnauthorized) {
         row.append(title, tracking);
         list.append(row);
       }
-      byId("amazon-preview-note").textContent = result.shipments.length
-        ? `${result.shipments.length} verified shipment${result.shipments.length === 1 ? "" : "s"}. Nothing has been added or changed.`
+      byId("amazon-preview-note").textContent = result.packages.length
+        ? `${result.packages.length} verified shipment${result.packages.length === 1 ? "" : "s"}. Nothing has been added or changed.`
         : result.has_more ? "More recent orders remain to be checked. Nothing has been added or changed."
-          : "No verified shipments are ready to import. Nothing has been added or changed.";
+          : "No verified packages are ready to import. Nothing has been added or changed.";
       byId("amazon-deferred").textContent = result.deferred
         ? `${result.deferred} candidate${result.deferred === 1 ? " needs" : "s need"} a tracking number or exact parcel details before import.` : "";
       byId("amazon-preview-result").hidden = false;
@@ -357,7 +357,7 @@ export function installAmazonSettings(root, request, onUnauthorized) {
       message(previewed
         ? result.has_more ? "Preview ready. Automatic discovery will continue checking the remaining recent orders." : "Preview ready."
         : result.has_more ? `The preview is incomplete. ${importNote}`
-          : `No verified shipments are ready yet. ${importNote}`);
+          : `No verified packages are ready yet. ${importNote}`);
     },
   ));
 
@@ -370,7 +370,7 @@ export function installAmazonSettings(root, request, onUnauthorized) {
         if (!current()) return;
         if (!validStatus(result) || result.state !== "connected" || !result.imports_enabled) throw new Error("Invalid connection response");
         updateStatus(result);
-        message("Automatic imports enabled. Amazon shipments will appear in your existing list.");
+        message("Automatic imports enabled. Amazon packages will appear in your existing list.");
       },
     );
   });
@@ -394,7 +394,7 @@ export function installAmazonSettings(root, request, onUnauthorized) {
       clearFlow();
       clearPreview();
       updateStatus({ state: "disconnected", imports_enabled: false });
-      message("Amazon disconnected. Saved shipments and history are still available.");
+      message("Amazon disconnected. Saved packages and history are still available.");
     },
   ));
 

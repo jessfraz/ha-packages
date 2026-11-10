@@ -18,9 +18,9 @@ from homeassistant.loader import async_get_integration
 from homeassistant.setup import async_setup_component
 from pytest_homeassistant.common import MockConfigEntry, MockUser
 
-from custom_components.shipments.const import CONF_BACKEND_URL, CONF_TOKEN, DOMAIN
-from custom_components.shipments.models import Direction
-from custom_components.shipments.voice import (
+from custom_components.packages.const import CONF_BACKEND_URL, CONF_TOKEN, DOMAIN
+from custom_components.packages.models import Direction
+from custom_components.packages.voice import (
     ShipmentDay,
     ShipmentQuery,
     VoiceAnswer,
@@ -54,8 +54,8 @@ class VoiceBackend(Backend):
     hold_query: bool = False
     fail_query: bool = False
 
-    def selected_shipments(self, query: dict[str, str]) -> list[FixtureShipment]:
-        rows = super().selected_shipments(query)
+    def selected_packages(self, query: dict[str, str]) -> list[FixtureShipment]:
+        rows = super().selected_packages(query)
         if query.get("active") == "true":
             rows = [
                 row
@@ -81,7 +81,7 @@ class VoiceBackend(Backend):
         return rows
 
     async def handle(self, request: web.Request) -> web.Response:
-        if request.path == "/v1/shipments" and request.query.get("limit") == "200":
+        if request.path == "/v1/packages" and request.query.get("limit") == "200":
             self.query_started.set()
             if self.hold_query:
                 await self.release_query.wait()
@@ -190,7 +190,7 @@ async def test_empty_is_a_real_zero_not_a_missing_projection(
     assert answer.as_dict()["truncated"] is False
     assert answer.count_exact is True
     assert all(request.method == "GET" for request in voice_backend.requests)
-    assert all(request.path == "/v1/shipments" for request in voice_backend.requests)
+    assert all(request.path == "/v1/packages" for request in voice_backend.requests)
     assert all(request.query["limit"] == "200" for request in voice_backend.requests)
 
 
@@ -281,7 +281,7 @@ async def test_out_for_delivery_is_sorted_by_eta_and_preserves_safe_links(
     answer = await ask(hass, ShipmentQuery.OUT_FOR_DELIVERY)
     items = answer.as_dict()["items"]
     assert [item["title"] for item in items] == ["Z early", "A later", "Unknown ETA"]
-    assert items[0]["url"] == f"/shipments/shipments/shipment%3D{SHIPMENT_ID}"
+    assert items[0]["url"] == f"/packages/packages/shipment%3D{SHIPMENT_ID}"
     assert items[0]["estimated_delivery"] == "2026-10-15T17:00:00+00:00"
     serialized = json.dumps(answer.as_dict()) + answer.speech + answer.card_text
     for private in (
@@ -343,7 +343,7 @@ async def test_delivered_today_uses_actual_carrier_scan_and_dst_boundaries(
     request = next(
         request
         for request in voice_backend.requests
-        if request.path == "/v1/shipments" and "delivered_after" in request.query
+        if request.path == "/v1/packages" and "delivered_after" in request.query
     )
     assert request.query["delivered_after"] == str(int(start.timestamp()))
     assert request.query["delivered_before"] == str(int(end.timestamp()))
@@ -449,7 +449,7 @@ async def test_spoken_cap_and_backend_cursor_are_honest(
     assert partial.count == 200
     assert partial.count_exact is False
     assert "At least 200" in partial.speech
-    assert "More shipments may be available" in partial.speech
+    assert "More packages may be available" in partial.speech
     assert len(voice_backend.requests) == 2
     # An ETA filter may find no matches in its bounded first page. That is not zero.
     for_missing_eta = await ask(hass, ShipmentQuery.ARRIVING, day=ShipmentDay.TOMORROW)
@@ -479,7 +479,7 @@ async def test_backend_error_never_becomes_zero_or_leaks_response(
 async def test_malformed_page_never_becomes_false_zero(
     hass: HomeAssistant, voice_entry, voice_backend: VoiceBackend, body: bytes
 ) -> None:
-    voice_backend.responses[("GET", "/v1/shipments")] = (200, body, {})
+    voice_backend.responses[("GET", "/v1/packages")] = (200, body, {})
     answer = await ask(hass, ShipmentQuery.OUT_FOR_DELIVERY)
     assert answer.error == "backend_unavailable"
     assert answer.count is None
@@ -581,7 +581,7 @@ async def test_delivered_civil_dates_are_spoken_without_a_fabricated_clock_time(
             {"kind": "estimated", "date": "2026-10-15"},
         ),
     ]
-    voice_backend.responses[("GET", "/v1/shipments")] = (
+    voice_backend.responses[("GET", "/v1/packages")] = (
         200,
         json.dumps({"items": rows, "next_page": None}).encode(),
         {},
@@ -632,7 +632,7 @@ async def test_arriving_civil_estimates_and_ranges_keep_their_real_day_precision
             },
         ),
     ]
-    voice_backend.responses[("GET", "/v1/shipments")] = (
+    voice_backend.responses[("GET", "/v1/packages")] = (
         200,
         json.dumps({"items": rows, "next_page": None}).encode(),
         {},

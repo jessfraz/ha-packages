@@ -210,7 +210,7 @@ impl Installation {
             ))
         } else if self.supervised {
             Check::attention(
-                "No recent integration check-in. Install Shipments through HACS, restart Home Assistant, then confirm it in Settings → Devices & services. If already paired, check the integration for an authentication or connection error.",
+                "No recent integration check-in. Install Packages through HACS, restart Home Assistant, then confirm it in Settings → Devices & services. If already paired, check the integration for an authentication or connection error.",
             )
         } else {
             Check {
@@ -223,7 +223,7 @@ impl Installation {
             Check::pass("Home Assistant authenticated successfully with this app.")
         } else if self.supervised {
             Check::attention(
-                "Waiting for an authenticated integration check-in. Confirm the discovered Shipments connection in Home Assistant.",
+                "Waiting for an authenticated integration check-in. Confirm the discovered Packages connection in Home Assistant.",
             )
         } else {
             Check::pass("Your API credential was accepted.")
@@ -269,10 +269,10 @@ impl Installation {
             None if !self.supervised => Check { status: CheckStatus::NotApplicable, message: "Standalone server. Stop it before backing up its database and credentials. Home Assistant backup inventory is not available here.".into(), checked_at: None },
             Some(BackupStatus::Complete) => Check::pass("A Home Assistant backup includes this app and the integration configuration. Restore has not been tested."),
             Some(BackupStatus::AppOnly) => Check::attention("A backup includes the app, but not Home Assistant configuration. Back up both to preserve pairing."),
-            Some(BackupStatus::Outdated) => Check::attention("The available app backup predates pairing. Create a new backup containing Shipments and Home Assistant configuration to preserve this connection."),
-            Some(BackupStatus::Missing) => Check::attention("No backup includes this app. Create a Home Assistant backup containing Shipments and Home Assistant configuration."),
+            Some(BackupStatus::Outdated) => Check::attention("The available app backup predates pairing. Create a new backup containing Packages and Home Assistant configuration to preserve this connection."),
+            Some(BackupStatus::Missing) => Check::attention("No backup includes this app. Create a Home Assistant backup containing Packages and Home Assistant configuration."),
             Some(BackupStatus::Standalone) => Check { status: CheckStatus::NotApplicable, message: "Standalone backend. Stop it before backing up its data and credentials; back up Home Assistant configuration separately.".into(), checked_at: None },
-            _ => Check { status: CheckStatus::Unavailable, message: "Backup status is unavailable. Check Settings → System → Backups and include Shipments and Home Assistant configuration.".into(), checked_at: None },
+            _ => Check { status: CheckStatus::Unavailable, message: "Backup status is unavailable. Check Settings → System → Backups and include Packages and Home Assistant configuration.".into(), checked_at: None },
         };
         InstallationReport {
             backend: Check::pass("The app is running and SQLite is responding."),

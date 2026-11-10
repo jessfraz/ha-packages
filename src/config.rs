@@ -10,19 +10,19 @@ use std::{
 #[derive(Parser)]
 #[command(version, about)]
 pub struct Config {
-    #[arg(long, env = "SHIPMENTS_BIND", default_value = "127.0.0.1:8080")]
+    #[arg(long, env = "PACKAGES_BIND", default_value = "127.0.0.1:8080")]
     pub bind: SocketAddr,
-    #[arg(long, env = "SHIPMENTS_DATABASE", default_value = "shipments.sqlite3")]
+    #[arg(long, env = "PACKAGES_DATABASE", default_value = "packages.sqlite3")]
     pub database: PathBuf,
-    #[arg(long, env = "SHIPMENTS_API_TOKEN", hide_env_values = true)]
+    #[arg(long, env = "PACKAGES_API_TOKEN", hide_env_values = true)]
     pub api_token: Option<String>,
-    #[arg(long, env = "SHIPMENTS_INTEGRATION_TOKEN", hide_env_values = true)]
+    #[arg(long, env = "PACKAGES_INTEGRATION_TOKEN", hide_env_values = true)]
     pub integration_token: Option<String>,
     #[arg(long, env = "EASYPOST_API_KEY", hide_env_values = true)]
     pub easypost_api_key: Option<String>,
     #[arg(long, env = "AFTERSHIP_API_KEY", hide_env_values = true)]
     pub aftership_api_key: Option<String>,
-    #[arg(long, env = "SHIPMENTS_INGRESS_BIND")]
+    #[arg(long, env = "PACKAGES_INGRESS_BIND")]
     pub ingress_bind: Option<SocketAddr>,
     #[arg(long, default_value = "172.30.32.2")]
     pub ingress_peer: IpAddr,
@@ -62,7 +62,7 @@ impl Config {
             let token = config
                 .api_token
                 .as_deref()
-                .context("set SHIPMENTS_API_TOKEN (at least 32 characters)")?;
+                .context("set PACKAGES_API_TOKEN (at least 32 characters)")?;
             ensure!(
                 token.len() >= 32,
                 "API token must be at least 32 characters"

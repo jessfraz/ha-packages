@@ -18,8 +18,8 @@ from homeassistant.setup import async_setup_component
 
 from .conftest import SHIPMENT_ID, Backend, FixtureShipment, ReceivedRequest, get_state
 
-TODAY_ENTITY = "sensor.shipments_inbound_delivered_today"
-ARRIVING_ENTITY = "sensor.shipments_inbound_out_for_delivery"
+TODAY_ENTITY = "sensor.packages_inbound_delivered_today"
+ARRIVING_ENTITY = "sensor.packages_inbound_out_for_delivery"
 DAY_START = datetime(2026, 10, 15, 7, tzinfo=UTC)
 DAY_END = DAY_START + timedelta(days=1)
 ITEM_KEYS = {
@@ -75,7 +75,7 @@ async def refresh_day(hass: HomeAssistant, entry, freezer, backend: Backend) -> 
 
 
 def shipment_requests(backend: Backend) -> list[ReceivedRequest]:
-    return [request for request in backend.requests if request.path == "/v1/shipments"]
+    return [request for request in backend.requests if request.path == "/v1/packages"]
 
 
 async def test_empty_item_lists_are_present_and_use_two_bounded_requests(
@@ -156,7 +156,7 @@ async def test_one_item_preserves_title_and_exposes_only_safe_deep_link_fields(
             if row.delivered_at
             else None,
             "estimated_delivery": row.estimated_delivery,
-            "url": f"/shipments/shipments/shipment%3D{row.id}",
+            "url": f"/packages/packages/shipment%3D{row.id}",
         }
         attributes = json.dumps(dict(state.attributes))
         for private in (
@@ -167,7 +167,7 @@ async def test_one_item_preserves_title_and_exposes_only_safe_deep_link_fields(
             "Private recipient",
         ):
             assert private not in attributes
-    assert "items" not in get_state(hass, "sensor.shipments_active").attributes
+    assert "items" not in get_state(hass, "sensor.packages_active").attributes
 
 
 async def test_items_exclude_outbound_archived_and_other_days_and_keep_sort_order(
@@ -315,7 +315,7 @@ async def test_bad_arriving_page_never_publishes_a_partial_snapshot(
         cursor = "not-actually-truncated"
     else:
         cursor = 12
-    path = f"/v1/shipments?{urlencode(query)}"
+    path = f"/v1/packages?{urlencode(query)}"
     backend.responses[("GET", path)] = (
         status,
         json.dumps({"items": rows, "next_page": cursor}).encode(),
@@ -328,13 +328,13 @@ async def test_bad_arriving_page_never_publishes_a_partial_snapshot(
     assert get_state(hass, ARRIVING_ENTITY).state == "unavailable"
     assert entry.runtime_data.shipment_items == previous_items
     assert not get_state(hass, ARRIVING_ENTITY).attributes.get("items")
-    assert get_state(hass, "sensor.shipments_active").state == "unavailable"
+    assert get_state(hass, "sensor.packages_active").state == "unavailable"
     if failure == "auth":
         assert isinstance(entry.runtime_data.last_exception, ConfigEntryAuthFailed)
     del backend.responses[("GET", path)]
     await entry.runtime_data.async_refresh()
     assert entry.runtime_data.last_update_success
-    assert get_state(hass, "sensor.shipments_active").state == "100"
+    assert get_state(hass, "sensor.packages_active").state == "100"
 
 
 @pytest.mark.parametrize(
@@ -350,7 +350,7 @@ async def test_delivered_page_rejects_rows_outside_the_same_local_day(
         for request in shipment_requests(backend)
         if request.query.get("delivered_after") == str(int(DAY_START.timestamp()))
     )
-    backend.responses[("GET", f"/v1/shipments?{urlencode(request.query)}")] = (
+    backend.responses[("GET", f"/v1/packages?{urlencode(request.query)}")] = (
         200,
         json.dumps(
             {
@@ -378,7 +378,7 @@ async def test_missing_cursor_does_not_claim_the_truncated_snapshot_is_complete(
         for request in shipment_requests(backend)
         if request.query.get("status") == "out_for_delivery"
     )
-    backend.responses[("GET", f"/v1/shipments?{urlencode(request.query)}")] = (
+    backend.responses[("GET", f"/v1/packages?{urlencode(request.query)}")] = (
         200,
         json.dumps(
             {

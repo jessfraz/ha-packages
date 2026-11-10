@@ -92,7 +92,7 @@ impl Supervisor {
             .post(format!("{}/discovery", self.origin))
             .bearer_auth(&self.token)
             .json(&Announcement {
-                service: "shipments",
+                service: "packages",
                 config: Connection {
                     backend_url: format!("http://{}:8080", info.data.hostname),
                     token: integration_token,
@@ -207,7 +207,7 @@ mod tests {
             token: String,
         }
         let (origin, requests, worker) = server(vec![
-            (200, r#"{"result":"ok","data":{"hostname":"example-shipments","options":{"easypost_api_key":"private-provider-key"}}}"#.into()),
+            (200, r#"{"result":"ok","data":{"hostname":"example-packages","options":{"easypost_api_key":"private-provider-key"}}}"#.into()),
             (200, r#"{"result":"ok","data":{"uuid":"stable-discovery-id"}}"#.into()),
         ]);
         let supervisor = Supervisor::new("supervisor-only-secret".into(), origin).unwrap();
@@ -224,8 +224,8 @@ mod tests {
         assert!(!announcement.contains("private-provider-key"));
         let body: Announcement =
             serde_json::from_str(announcement.split_once("\r\n\r\n").unwrap().1).unwrap();
-        assert_eq!(body.service, "shipments");
-        assert_eq!(body.config.backend_url, "http://example-shipments:8080");
+        assert_eq!(body.service, "packages");
+        assert_eq!(body.config.backend_url, "http://example-packages:8080");
         assert_eq!(body.config.token, "integration-only-secret");
         worker.join().unwrap();
     }

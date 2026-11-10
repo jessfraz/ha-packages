@@ -120,7 +120,7 @@ impl DoorDashClient {
             Client::builder()
                 .timeout(REQUEST_TIMEOUT)
                 .redirect(reqwest::redirect::Policy::none())
-                .user_agent(concat!("shipments/", env!("CARGO_PKG_VERSION")))
+                .user_agent(concat!("packages/", env!("CARGO_PKG_VERSION")))
                 .build()
                 .map_err(|_| provider_error(ErrorKind::Configuration))?,
         ))

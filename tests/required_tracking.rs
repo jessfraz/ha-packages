@@ -1,10 +1,10 @@
-use shipments::{api, store::Store};
+use packages::{api, store::Store};
 use std::sync::Arc;
 
 #[tokio::test]
 async fn api_requires_tracking_before_any_provider_access() {
     let directory = tempfile::tempdir().unwrap();
-    let store = Store::open(&directory.path().join("shipments.sqlite3"))
+    let store = Store::open(&directory.path().join("packages.sqlite3"))
         .await
         .unwrap();
     let token = "disposable-owner-credential-for-required-tracking";
@@ -17,7 +17,7 @@ async fn api_requires_tracking_before_any_provider_access() {
         r#"{"direction":"inbound","title":"Parcel","tracking":{"number":"  "}}"#,
     ] {
         let response = client
-            .post(format!("http://{}/v1/shipments", server.local_addr()))
+            .post(format!("http://{}/v1/packages", server.local_addr()))
             .bearer_auth(token)
             .header("Idempotency-Key", "required-tracking")
             .header("Content-Type", "application/json")
@@ -42,7 +42,7 @@ struct Failure {
 
 #[tokio::test]
 async fn persistence_requires_a_resolved_carrier_and_applies_reverification() {
-    use shipments::{
+    use packages::{
         error::Error,
         models::{CreateShipment, InputTracking, Patch, Status, UpdateShipment},
         shipping_api::types::Tracker,
@@ -76,7 +76,7 @@ async fn persistence_requires_a_resolved_carrier_and_applies_reverification() {
     .unwrap();
     assert_eq!(counts, (0, 0));
     let tracker = Tracker {
-        provider: shipments::shipping_api::types::ProviderId::EasyPost,
+        provider: packages::shipping_api::types::ProviderId::EasyPost,
         id: "trk_detected".into(),
         tracking_code: input.tracking.number.clone(),
         carrier: "USPS".parse().unwrap(),
@@ -114,7 +114,7 @@ async fn persistence_requires_a_resolved_carrier_and_applies_reverification() {
     let blocked = store.get(saved.id).await.unwrap();
     assert_eq!(
         blocked.sync.registration_state,
-        shipments::models::RegistrationState::ConfigurationRequired
+        packages::models::RegistrationState::ConfigurationRequired
     );
     let restored = store
         .update(
@@ -138,7 +138,7 @@ async fn persistence_requires_a_resolved_carrier_and_applies_reverification() {
     assert_eq!(restored.tracking, saved.tracking);
     assert_eq!(
         restored.sync.registration_state,
-        shipments::models::RegistrationState::Registered
+        packages::models::RegistrationState::Registered
     );
     assert!(restored.sync.last_error.is_none());
     assert!(restored.sync.next_attempt_at.is_some());
@@ -147,7 +147,7 @@ async fn persistence_requires_a_resolved_carrier_and_applies_reverification() {
 
 #[test]
 fn input_allows_detection_but_stored_tracking_requires_a_carrier() {
-    use shipments::models::{InputTracking, Tracking};
+    use packages::models::{InputTracking, Tracking};
     for body in [
         r#"{"number":"9400100000000000000001"}"#,
         r#"{"number":"9400100000000000000001","carrier":null}"#,

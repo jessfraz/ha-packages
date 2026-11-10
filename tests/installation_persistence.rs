@@ -11,14 +11,14 @@ use std::{
 };
 
 use dropshot::HttpServer;
-use reqwest::{Client, Method, StatusCode};
-use serde::Serialize;
-use shipments::{
+use packages::{
     api,
     installation::{CheckStatus, InstallationReport},
     shipping_api::{ShippingApi, easypost::EasyPostClient},
     store::Store,
 };
+use reqwest::{Client, Method, StatusCode};
+use serde::Serialize;
 
 const OWNER: &str = "installation-owner-synthetic-credential-at-least-32-bytes";
 const INTEGRATION: &str = "installation-adapter-synthetic-credential-at-least-32-bytes";

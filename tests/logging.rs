@@ -7,9 +7,9 @@ use dropshot::{
     ApiDescription, ConfigDropshot, HttpError, HttpResponseOk, HttpServerStarter, Path,
     RequestContext, endpoint,
 };
+use packages::{api, logging, store::Store};
 use reqwest::{Client, StatusCode};
 use serde::Deserialize;
-use shipments::{api, logging, store::Store};
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 use uuid::Uuid;
 
@@ -93,7 +93,7 @@ async fn http_logs_correlate_failures_and_mutations_without_private_request_data
         ),
         (
             client
-                .post(format!("{base}/v1/shipments?key=QUERY_PRIVATE_SENTINEL"))
+                .post(format!("{base}/v1/packages?key=QUERY_PRIVATE_SENTINEL"))
                 .bearer_auth(OWNER)
                 .header("Content-Type", "application/json")
                 .body("{\"title\":\"BODY_PRIVATE_SENTINEL")
@@ -101,29 +101,29 @@ async fn http_logs_correlate_failures_and_mutations_without_private_request_data
                 .await
                 .unwrap(),
             StatusCode::BAD_REQUEST,
-            "/v1/shipments",
+            "/v1/packages",
         ),
         (
             client
-                .get(format!("{base}/v1/shipments/PATH_PRIVATE_SENTINEL/events"))
+                .get(format!("{base}/v1/packages/PATH_PRIVATE_SENTINEL/events"))
                 .bearer_auth(OWNER)
                 .send()
                 .await
                 .unwrap(),
             StatusCode::BAD_REQUEST,
-            "/v1/shipments/{id}/events",
+            "/v1/packages/{id}/events",
         ),
         (
             client
                 .post(format!(
-                    "{base}/v1/shipments/PATH_PRIVATE_SENTINEL/amazon?key=QUERY_PRIVATE_SENTINEL"
+                    "{base}/v1/packages/PATH_PRIVATE_SENTINEL/amazon?key=QUERY_PRIVATE_SENTINEL"
                 ))
                 .bearer_auth(OWNER)
                 .send()
                 .await
                 .unwrap(),
             StatusCode::BAD_REQUEST,
-            "/v1/shipments/{id}/amazon",
+            "/v1/packages/{id}/amazon",
         ),
         (
             client
@@ -216,7 +216,7 @@ struct RouteId {
     id: String,
 }
 
-#[endpoint {method=GET,path="/v1/shipments/{id}"}]
+#[endpoint {method=GET,path="/v1/packages/{id}"}]
 async fn private_error(
     _request: RequestContext<()>,
     path: Path<RouteId>,
@@ -250,7 +250,7 @@ async fn dropshot_error_text_is_replaced_with_a_safe_category() {
     .start();
     let response = Client::new()
         .get(format!(
-            "http://{}/v1/shipments/PRIVATE_PATH_SENTINEL",
+            "http://{}/v1/packages/PRIVATE_PATH_SENTINEL",
             server.local_addr()
         ))
         .send()
@@ -266,7 +266,7 @@ async fn dropshot_error_text_is_replaced_with_a_safe_category() {
         .into_iter()
         .find(|entry| entry.request_id == Some(request_id))
         .unwrap();
-    assert_eq!(entry.route.as_deref(), Some("/v1/shipments/{id}"));
+    assert_eq!(entry.route.as_deref(), Some("/v1/packages/{id}"));
     assert_eq!(entry.error_code.as_deref(), Some("internal_error"));
     assert!(!capture.text().contains("PRIVATE_"));
 }

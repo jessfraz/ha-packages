@@ -79,7 +79,7 @@
           "has_more": {
             "type": "boolean"
           },
-          "shipments": {
+          "packages": {
             "items": {
               "$ref": "#/components/schemas/AmazonPreviewParcel"
             },
@@ -91,7 +91,7 @@
           "deferred",
           "deferred_reasons",
           "has_more",
-          "shipments"
+          "packages"
         ],
         "type": "object"
       },
@@ -461,7 +461,7 @@
               "carrier": null,
               "number": ""
             },
-            "description": "Carrier detection is allowed at admission. Persisted shipments always use the concrete carrier returned by the tracking provider.",
+            "description": "Carrier detection is allowed at admission. Persisted packages always use the concrete carrier returned by the tracking provider.",
             "properties": {
               "carrier": {
                 "anyOf": [
@@ -875,7 +875,7 @@
       },
       "InputTracking": {
         "additionalProperties": false,
-        "description": "Carrier detection is allowed at admission. Persisted shipments always use the concrete carrier returned by the tracking provider.",
+        "description": "Carrier detection is allowed at admission. Persisted packages always use the concrete carrier returned by the tracking provider.",
         "properties": {
           "carrier": {
             "anyOf": [
@@ -1754,8 +1754,8 @@
   },
   "info": {
     "description": "Persistent local shipment records, manual corrections, and carrier synchronization. Use a Bearer owner or ingestion token. Creates require Idempotency-Key; writes to an existing shipment require its quoted revision in If-Match.",
-    "title": "Shipments API",
-    "version": "0.6.34"
+    "title": "Packages API",
+    "version": "0.7.0"
   },
   "openapi": "3.0.3",
   "paths": {
@@ -2286,7 +2286,7 @@
         },
         "summary": "List canonical carriers. Omit the input carrier to request provider detection.",
         "tags": [
-          "shipments"
+          "packages"
         ]
       }
     },
@@ -2493,9 +2493,9 @@
         ]
       }
     },
-    "/v1/shipments": {
+    "/v1/packages": {
       "get": {
-        "operationId": "shipments_list",
+        "operationId": "packages_list",
         "parameters": [
           {
             "description": "Filter by whether the effective status is nonterminal.",
@@ -2541,7 +2541,7 @@
             }
           },
           {
-            "description": "ISO civil day for providers without a scan instant. Requires both UTC bounds so timestamp-backed shipments retain the caller's local-day window.",
+            "description": "ISO civil day for providers without a scan instant. Requires both UTC bounds so timestamp-backed packages retain the caller's local-day window.",
             "in": "query",
             "name": "delivered_on",
             "schema": {
@@ -2669,7 +2669,7 @@
         },
         "summary": "List local shipment records using stable keyset pagination.",
         "tags": [
-          "shipments"
+          "packages"
         ],
         "x-dropshot-pagination": {
           "required": []
@@ -2677,7 +2677,7 @@
       },
       "post": {
         "description": "attempts remain durable so retries can recover without duplicate trackers.",
-        "operationId": "shipments_create",
+        "operationId": "packages_create",
         "requestBody": {
           "content": {
             "application/json": {
@@ -2717,11 +2717,11 @@
         },
         "summary": "Resolve and verify tracking before saving a shipment. Uncertain provider",
         "tags": [
-          "shipments"
+          "packages"
         ]
       }
     },
-    "/v1/shipments/{id}": {
+    "/v1/packages/{id}": {
       "get": {
         "operationId": "shipment_get",
         "parameters": [
@@ -2763,7 +2763,7 @@
           }
         },
         "tags": [
-          "shipments"
+          "packages"
         ]
       },
       "patch": {
@@ -2817,11 +2817,11 @@
           }
         },
         "tags": [
-          "shipments"
+          "packages"
         ]
       }
     },
-    "/v1/shipments/{id}/amazon": {
+    "/v1/packages/{id}/amazon": {
       "post": {
         "operationId": "shipment_use_amazon",
         "parameters": [
@@ -2868,7 +2868,7 @@
         ]
       }
     },
-    "/v1/shipments/{id}/archive": {
+    "/v1/packages/{id}/archive": {
       "delete": {
         "operationId": "shipment_restore",
         "parameters": [
@@ -2910,7 +2910,7 @@
           }
         },
         "tags": [
-          "shipments"
+          "packages"
         ]
       },
       "put": {
@@ -2954,11 +2954,11 @@
           }
         },
         "tags": [
-          "shipments"
+          "packages"
         ]
       }
     },
-    "/v1/shipments/{id}/events": {
+    "/v1/packages/{id}/events": {
       "get": {
         "operationId": "shipment_events",
         "parameters": [
@@ -3011,14 +3011,14 @@
           }
         },
         "tags": [
-          "shipments"
+          "packages"
         ],
         "x-dropshot-pagination": {
           "required": []
         }
       }
     },
-    "/v1/shipments/{id}/refresh": {
+    "/v1/packages/{id}/refresh": {
       "post": {
         "operationId": "shipment_refresh",
         "parameters": [
@@ -3060,11 +3060,11 @@
           }
         },
         "tags": [
-          "shipments"
+          "packages"
         ]
       }
     },
-    "/v1/shipments/{id}/sources": {
+    "/v1/packages/{id}/sources": {
       "post": {
         "operationId": "shipment_source",
         "parameters": [
@@ -3116,11 +3116,11 @@
           }
         },
         "tags": [
-          "shipments"
+          "packages"
         ]
       }
     },
-    "/v1/shipments/{id}/status-override": {
+    "/v1/packages/{id}/status-override": {
       "delete": {
         "operationId": "override_clear",
         "parameters": [
@@ -3162,7 +3162,7 @@
           }
         },
         "tags": [
-          "shipments"
+          "packages"
         ]
       },
       "put": {
@@ -3216,7 +3216,7 @@
           }
         },
         "tags": [
-          "shipments"
+          "packages"
         ]
       }
     },
@@ -3316,7 +3316,7 @@
       "name": "amazon"
     },
     {
-      "name": "shipments"
+      "name": "packages"
     },
     {
       "name": "system"

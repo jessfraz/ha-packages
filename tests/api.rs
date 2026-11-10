@@ -1,6 +1,6 @@
 use dropshot::{HttpServer, ResultsPage};
+use packages::{api, models::*, store::Store};
 use reqwest::{Client, Method, Response, StatusCode};
-use shipments::{api, models::*, store::Store};
 use std::sync::Arc;
 use tempfile::TempDir;
 
@@ -26,10 +26,10 @@ impl App {
     }
     async fn with_provider(
         ingress_peer: Option<std::net::IpAddr>,
-        provider: Option<shipments::shipping_api::easypost::EasyPostClient>,
+        provider: Option<packages::shipping_api::easypost::EasyPostClient>,
     ) -> Self {
         let dir = tempfile::tempdir().unwrap();
-        let store = Store::open(&dir.path().join("shipments.sqlite3"))
+        let store = Store::open(&dir.path().join("packages.sqlite3"))
             .await
             .unwrap();
         let context = Arc::new(
@@ -39,7 +39,7 @@ impl App {
                 None,
                 provider.map(|provider| {
                     std::sync::Arc::new(provider)
-                        as std::sync::Arc<dyn shipments::shipping_api::ShippingApi>
+                        as std::sync::Arc<dyn packages::shipping_api::ShippingApi>
                 }),
             )
             .with_integration(INTEGRATION),
@@ -50,7 +50,7 @@ impl App {
             .post(format!("{url}/v1/agents"))
             .bearer_auth(OWNER)
             .header("X-Remote-User-Id", "human")
-            .header("X-Shipments-Request", "1")
+            .header("X-Packages-Request", "1")
             .json(&CreateAgent {
                 name: "Test importer".into(),
             })
@@ -60,19 +60,19 @@ impl App {
         assert_eq!(created.status(), StatusCode::CREATED);
         let created: CreatedAgentCredential = created.json().await.unwrap();
         if ingress_peer.is_some() {
-            let report = shipments::installation::IntegrationPresence {
+            let report = packages::installation::IntegrationPresence {
                 version: env!("CARGO_PKG_VERSION").into(),
                 administrator_ids: vec!["human".into()],
                 delivery_day: None,
-                backup: shipments::installation::BackupReport {
-                    status: shipments::installation::BackupStatus::Standalone,
+                backup: packages::installation::BackupReport {
+                    status: packages::installation::BackupStatus::Standalone,
                     last_backup: None,
                 },
             };
             let response = Client::new()
                 .post(format!("{url}/v1/integration/presence"))
                 .bearer_auth(INTEGRATION)
-                .header("X-Shipments-Actor", "ha:integration")
+                .header("X-Packages-Actor", "ha:integration")
                 .json(&report)
                 .send()
                 .await
@@ -116,7 +116,7 @@ impl App {
                 .collect::<String>()
                 .to_uppercase()
         );
-        self.request(Method::POST, "/v1/shipments")
+        self.request(Method::POST, "/v1/packages")
             .header("Idempotency-Key", key)
             .json(&body)
             .send()
@@ -130,7 +130,7 @@ impl App {
 }
 fn input(title: &str) -> CreateShipment {
     CreateShipment {
-        direction: shipments::models::Direction::Inbound,
+        direction: packages::models::Direction::Inbound,
         title: title.into(),
         merchant: None,
         order_reference: None,
@@ -178,7 +178,7 @@ async fn manual_completion_clears_tracking_issues_but_active_corrections_keep_th
         let response = app
             .request(
                 Method::PUT,
-                &format!("/v1/shipments/{}/status-override", shipment.id),
+                &format!("/v1/packages/{}/status-override", shipment.id),
             )
             .header("If-Match", format!("\"{}\"", shipment.revision))
             .json(&SetOverride {
@@ -231,7 +231,7 @@ async fn manual_completion_clears_tracking_issues_but_active_corrections_keep_th
         .unwrap();
     assert_eq!(system.sync_errors, 1);
     let issues: ResultsPage<Shipment> = app
-        .request(Method::GET, "/v1/shipments?tracking_issues=true")
+        .request(Method::GET, "/v1/packages?tracking_issues=true")
         .send()
         .await
         .unwrap()
@@ -301,7 +301,7 @@ async fn tracking_issues_filter_pages_every_error_across_directions_and_delivery
             .collect();
         assert_eq!(summary.sync_errors as usize, wanted.len());
         for sort in ["id", "expected", "delivered"] {
-            let mut request = app.request(Method::GET, "/v1/shipments").query(&[
+            let mut request = app.request(Method::GET, "/v1/packages").query(&[
                 ("tracking_issues", "true"),
                 ("limit", "2"),
                 ("sort", sort),
@@ -323,7 +323,7 @@ async fn tracking_issues_filter_pages_every_error_across_directions_and_delivery
                 }
                 let Some(cursor) = page.next_page else { break };
                 page = app
-                    .request(Method::GET, "/v1/shipments")
+                    .request(Method::GET, "/v1/packages")
                     .query(&[("page_token", cursor.as_str()), ("limit", "2")])
                     .send()
                     .await
@@ -336,7 +336,7 @@ async fn tracking_issues_filter_pages_every_error_across_directions_and_delivery
         }
     }
     let clear: ResultsPage<Shipment> = app
-        .request(Method::GET, "/v1/shipments")
+        .request(Method::GET, "/v1/packages")
         .query(&[("tracking_issues", "false"), ("limit", "100")])
         .send()
         .await
@@ -365,11 +365,11 @@ async fn concurrent_source_claims_allow_only_one_paid_tracking_registration() {
     let mut second = input("Source reservation 2");
     second.source = first.source.clone();
     let (first, second) = tokio::join!(
-        app.request(Method::POST, "/v1/shipments")
+        app.request(Method::POST, "/v1/packages")
             .header("Idempotency-Key", "source-first")
             .json(&first)
             .send(),
-        app.request(Method::POST, "/v1/shipments")
+        app.request(Method::POST, "/v1/packages")
             .header("Idempotency-Key", "source-second")
             .json(&second)
             .send(),
@@ -403,7 +403,7 @@ async fn creates_are_durable_repeatable_and_conflict_checked() {
     assert_eq!(response.headers()["etag"], "\"1\"");
     let created: Shipment = response.json().await.unwrap();
     let edited: Shipment = app
-        .request(Method::PATCH, &format!("/v1/shipments/{}", created.id))
+        .request(Method::PATCH, &format!("/v1/packages/{}", created.id))
         .header("If-Match", "\"1\"")
         .json(&UpdateShipment {
             title: Some("Corrected title".into()),
@@ -430,7 +430,7 @@ async fn creates_are_durable_repeatable_and_conflict_checked() {
         StatusCode::CONFLICT
     );
     let history: ResultsPage<Event> = app
-        .request(Method::GET, &format!("/v1/shipments/{}/events", created.id))
+        .request(Method::GET, &format!("/v1/packages/{}/events", created.id))
         .send()
         .await
         .unwrap()
@@ -460,7 +460,7 @@ async fn optimistic_updates_and_null_patch_preserve_newer_state() {
         number: "1Z ABC123".into(),
     };
     let created: Shipment = app
-        .request(Method::POST, "/v1/shipments")
+        .request(Method::POST, "/v1/packages")
         .header("Idempotency-Key", "new")
         .json(&request)
         .send()
@@ -469,7 +469,7 @@ async fn optimistic_updates_and_null_patch_preserve_newer_state() {
         .json()
         .await
         .unwrap();
-    let path = format!("/v1/shipments/{}", created.id);
+    let path = format!("/v1/packages/{}", created.id);
     assert_eq!(
         app.request(Method::PATCH, &path)
             .json(&UpdateShipment::default())
@@ -546,9 +546,9 @@ async fn owner_actions_are_separate_from_ingestion_identity() {
     let body = input("Agent parcel");
     let shipment: Shipment = app
         .client
-        .post(format!("{}/v1/shipments", app.url))
+        .post(format!("{}/v1/packages", app.url))
         .bearer_auth(&app.agent)
-        .header("X-Shipments-Actor", "pretend-owner")
+        .header("X-Packages-Actor", "pretend-owner")
         .header("Idempotency-Key", "agent-add")
         .json(&body)
         .send()
@@ -561,7 +561,7 @@ async fn owner_actions_are_separate_from_ingestion_identity() {
         status: Status::Delivered,
         reason: "Physically received".into(),
     };
-    let path = format!("/v1/shipments/{}/status-override", shipment.id);
+    let path = format!("/v1/packages/{}/status-override", shipment.id);
     assert_eq!(
         app.client
             .put(format!("{}{path}", app.url))
@@ -577,7 +577,7 @@ async fn owner_actions_are_separate_from_ingestion_identity() {
     let changed: Shipment = app
         .request(Method::PUT, &path)
         .header("If-Match", "\"1\"")
-        .header("X-Shipments-Actor", "ha:human")
+        .header("X-Packages-Actor", "ha:human")
         .json(&correction)
         .send()
         .await
@@ -588,10 +588,7 @@ async fn owner_actions_are_separate_from_ingestion_identity() {
     assert_eq!(changed.status, Status::Delivered);
     assert_eq!(changed.status_override.unwrap().actor_id, "ha:human");
     let events: ResultsPage<Event> = app
-        .request(
-            Method::GET,
-            &format!("/v1/shipments/{}/events", shipment.id),
-        )
+        .request(Method::GET, &format!("/v1/packages/{}/events", shipment.id))
         .send()
         .await
         .unwrap()
@@ -627,11 +624,11 @@ async fn duplicate_sources_tracking_archive_and_pagination_use_real_http() {
         key: "message1".into(),
     });
     let (one, two) = tokio::join!(
-        app.request(Method::POST, "/v1/shipments")
+        app.request(Method::POST, "/v1/packages")
             .header("Idempotency-Key", "a")
             .json(&body)
             .send(),
-        app.request(Method::POST, "/v1/shipments")
+        app.request(Method::POST, "/v1/packages")
             .header("Idempotency-Key", "b")
             .json(&body)
             .send()
@@ -654,7 +651,7 @@ async fn duplicate_sources_tracking_archive_and_pagination_use_real_http() {
         number: "TEST001".into(),
     };
     assert_eq!(
-        app.request(Method::POST, "/v1/shipments")
+        app.request(Method::POST, "/v1/packages")
             .header("Idempotency-Key", "unknown-carrier")
             .json(&ambiguous)
             .send()
@@ -665,7 +662,7 @@ async fn duplicate_sources_tracking_archive_and_pagination_use_real_http() {
     );
     body.tracking = input("Other tracking").tracking;
     assert_eq!(
-        app.request(Method::POST, "/v1/shipments")
+        app.request(Method::POST, "/v1/packages")
             .header("Idempotency-Key", "c")
             .json(&body)
             .send()
@@ -677,7 +674,7 @@ async fn duplicate_sources_tracking_archive_and_pagination_use_real_http() {
     let filtered: ResultsPage<Shipment> = app
         .request(
             Method::GET,
-            "/v1/shipments?source_namespace=test&source_key=message1",
+            "/v1/packages?source_namespace=test&source_key=message1",
         )
         .send()
         .await
@@ -690,7 +687,7 @@ async fn duplicate_sources_tracking_archive_and_pagination_use_real_http() {
         app.create("Another", &format!("other-{index}")).await;
     }
     let first: ResultsPage<Shipment> = app
-        .request(Method::GET, "/v1/shipments?limit=2")
+        .request(Method::GET, "/v1/packages?limit=2")
         .send()
         .await
         .unwrap()
@@ -700,7 +697,7 @@ async fn duplicate_sources_tracking_archive_and_pagination_use_real_http() {
     assert_eq!(first.items.len(), 2);
     let token = first.next_page.unwrap();
     let last: ResultsPage<Shipment> = app
-        .request(Method::GET, "/v1/shipments")
+        .request(Method::GET, "/v1/packages")
         .query(&[("limit", "2"), ("page_token", &token)])
         .send()
         .await
@@ -711,7 +708,7 @@ async fn duplicate_sources_tracking_archive_and_pagination_use_real_http() {
     assert_eq!(last.items.len(), 2);
     assert!(last.next_page.is_none());
     assert_ne!(first.items[0].id, last.items[0].id);
-    let archive_path = format!("/v1/shipments/{}/archive", created.id);
+    let archive_path = format!("/v1/packages/{}/archive", created.id);
     let archived: Shipment = app
         .request(Method::PUT, &archive_path)
         .header("If-Match", "\"1\"")
@@ -756,7 +753,7 @@ async fn active_views_follow_effective_status_and_keep_archive_separate() {
         let updated: Shipment = app
             .request(
                 Method::PUT,
-                &format!("/v1/shipments/{}/status-override", shipment.id),
+                &format!("/v1/packages/{}/status-override", shipment.id),
             )
             .header("If-Match", "\"1\"")
             .json(&SetOverride {
@@ -773,7 +770,7 @@ async fn active_views_follow_effective_status_and_keep_archive_separate() {
         ids.push(shipment.id);
     }
     let page: ResultsPage<Shipment> = app
-        .request(Method::GET, "/v1/shipments?active=true")
+        .request(Method::GET, "/v1/packages?active=true")
         .send()
         .await
         .unwrap()
@@ -785,7 +782,7 @@ async fn active_views_follow_effective_status_and_keep_archive_separate() {
         [expected.id]
     );
     let page: ResultsPage<Shipment> = app
-        .request(Method::GET, "/v1/shipments?active=false")
+        .request(Method::GET, "/v1/packages?active=false")
         .send()
         .await
         .unwrap()
@@ -794,7 +791,7 @@ async fn active_views_follow_effective_status_and_keep_archive_separate() {
         .unwrap();
     assert_eq!(page.items.iter().map(|s| s.id).collect::<Vec<_>>(), ids);
     let page: ResultsPage<Shipment> = app
-        .request(Method::GET, "/v1/shipments?active=false&status=delivered")
+        .request(Method::GET, "/v1/packages?active=false&status=delivered")
         .send()
         .await
         .unwrap()
@@ -806,7 +803,7 @@ async fn active_views_follow_effective_status_and_keep_archive_separate() {
     let archived = app
         .request(
             Method::PUT,
-            &format!("/v1/shipments/{}/archive", expected.id),
+            &format!("/v1/packages/{}/archive", expected.id),
         )
         .header("If-Match", "\"1\"")
         .send()
@@ -814,7 +811,7 @@ async fn active_views_follow_effective_status_and_keep_archive_separate() {
         .unwrap();
     assert_eq!(archived.status(), StatusCode::OK);
     let page: ResultsPage<Shipment> = app
-        .request(Method::GET, "/v1/shipments?active=true&archived=true")
+        .request(Method::GET, "/v1/packages?active=true&archived=true")
         .send()
         .await
         .unwrap()
@@ -837,7 +834,7 @@ async fn active_views_follow_effective_status_and_keep_archive_separate() {
     let cleared = app
         .request(
             Method::DELETE,
-            &format!("/v1/shipments/{}/status-override", ids[0]),
+            &format!("/v1/packages/{}/status-override", ids[0]),
         )
         .header("If-Match", "\"2\"")
         .send()
@@ -845,7 +842,7 @@ async fn active_views_follow_effective_status_and_keep_archive_separate() {
         .unwrap();
     assert_eq!(cleared.status(), StatusCode::OK);
     let page: ResultsPage<Shipment> = app
-        .request(Method::GET, "/v1/shipments?active=true")
+        .request(Method::GET, "/v1/packages?active=true")
         .send()
         .await
         .unwrap()
@@ -891,7 +888,7 @@ async fn ingress_checks_real_peer_and_browser_request_header() {
         StatusCode::UNAUTHORIZED
     );
     assert_eq!(
-        app.request(Method::POST, "/v1/shipments")
+        app.request(Method::POST, "/v1/packages")
             .header("X-Remote-User-Id", "human")
             .header("Idempotency-Key", "browser")
             .json(&input("Browser parcel"))
@@ -902,9 +899,9 @@ async fn ingress_checks_real_peer_and_browser_request_header() {
         StatusCode::FORBIDDEN
     );
     let response = app
-        .request(Method::POST, "/v1/shipments")
+        .request(Method::POST, "/v1/packages")
         .header("X-Remote-User-Id", "human")
-        .header("X-Shipments-Request", "1")
+        .header("X-Packages-Request", "1")
         .header("Idempotency-Key", "browser")
         .json(&input("Browser parcel"))
         .send()
@@ -1026,7 +1023,7 @@ async fn browser_authentication_mode_comes_only_from_the_listener() {
 
 #[tokio::test]
 async fn integration_credential_is_scoped_and_installation_requires_a_real_check_in() {
-    use shipments::installation::{
+    use packages::installation::{
         BackupReport, BackupStatus, CheckStatus, InstallationReport, IntegrationPresence,
     };
 
@@ -1053,7 +1050,7 @@ async fn integration_credential_is_scoped_and_installation_requires_a_real_check
                 app.client
                     .request(method, format!("{}{path}", app.url))
                     .bearer_auth(credential)
-                    .header("X-Shipments-Actor", "ha:test")
+                    .header("X-Packages-Actor", "ha:test")
                     .send()
                     .await
                     .unwrap()
@@ -1075,7 +1072,7 @@ async fn integration_credential_is_scoped_and_installation_requires_a_real_check
     assert_eq!(system.credential_role, "integration");
     assert_eq!(
         app.client
-            .post(format!("{}/v1/shipments", app.url))
+            .post(format!("{}/v1/packages", app.url))
             .bearer_auth(INTEGRATION)
             .header("Idempotency-Key", "no-actor")
             .json(&input("Parcel"))
@@ -1087,9 +1084,9 @@ async fn integration_credential_is_scoped_and_installation_requires_a_real_check
     );
     let created = app
         .client
-        .post(format!("{}/v1/shipments", app.url))
+        .post(format!("{}/v1/packages", app.url))
         .bearer_auth(INTEGRATION)
-        .header("X-Shipments-Actor", "ha:human")
+        .header("X-Packages-Actor", "ha:human")
         .header("Idempotency-Key", "ha-created")
         .json(&input("Parcel"))
         .send()
@@ -1098,10 +1095,7 @@ async fn integration_credential_is_scoped_and_installation_requires_a_real_check
     assert_eq!(created.status(), StatusCode::CREATED);
     let shipment: Shipment = created.json().await.unwrap();
     let events: ResultsPage<Event> = app
-        .request(
-            Method::GET,
-            &format!("/v1/shipments/{}/events", shipment.id),
-        )
+        .request(Method::GET, &format!("/v1/packages/{}/events", shipment.id))
         .send()
         .await
         .unwrap()
@@ -1123,7 +1117,7 @@ async fn integration_credential_is_scoped_and_installation_requires_a_real_check
             app.client
                 .post(format!("{}/v1/integration/presence", app.url))
                 .bearer_auth(credential)
-                .header("X-Shipments-Actor", "ha:integration")
+                .header("X-Packages-Actor", "ha:integration")
                 .json(&report)
                 .send()
                 .await
@@ -1136,7 +1130,7 @@ async fn integration_credential_is_scoped_and_installation_requires_a_real_check
         .client
         .post(format!("{}/v1/integration/presence", app.url))
         .bearer_auth(INTEGRATION)
-        .header("X-Shipments-Actor", "ha:integration")
+        .header("X-Packages-Actor", "ha:integration")
         .json(&report)
         .send()
         .await
@@ -1160,7 +1154,7 @@ async fn integration_credential_is_scoped_and_installation_requires_a_real_check
 
 #[tokio::test]
 async fn explicit_installation_probe_is_read_only_and_concurrent_checks_are_cached() {
-    use shipments::{
+    use packages::{
         installation::{CheckStatus, InstallationReport},
         shipping_api::easypost::EasyPostClient,
     };
@@ -1273,7 +1267,7 @@ async fn named_agents_are_private_individually_revocable_and_cannot_escalate() {
                 .client
                 .request(method, format!("{}{endpoint}", app.url))
                 .bearer_auth(credential)
-                .header("X-Shipments-Actor", "ha:pretend-owner")
+                .header("X-Packages-Actor", "ha:pretend-owner")
                 .json(&CreateAgent {
                     name: "Not allowed".into(),
                 })
@@ -1285,10 +1279,10 @@ async fn named_agents_are_private_individually_revocable_and_cannot_escalate() {
     }
     let shipment: Shipment = app
         .client
-        .post(format!("{}/v1/shipments", app.url))
+        .post(format!("{}/v1/packages", app.url))
         .bearer_auth(&created.token)
         .header("Idempotency-Key", "named-agent")
-        .header("X-Shipments-Actor", "owner")
+        .header("X-Packages-Actor", "owner")
         .json(&input("Imported parcel"))
         .send()
         .await
@@ -1297,10 +1291,7 @@ async fn named_agents_are_private_individually_revocable_and_cannot_escalate() {
         .await
         .unwrap();
     let events: ResultsPage<Event> = app
-        .request(
-            Method::GET,
-            &format!("/v1/shipments/{}/events", shipment.id),
-        )
+        .request(Method::GET, &format!("/v1/packages/{}/events", shipment.id))
         .send()
         .await
         .unwrap()
@@ -1313,7 +1304,7 @@ async fn named_agents_are_private_individually_revocable_and_cannot_escalate() {
     );
     assert_eq!(
         app.client
-            .put(format!("{}/v1/shipments/{}/archive", app.url, shipment.id))
+            .put(format!("{}/v1/packages/{}/archive", app.url, shipment.id))
             .bearer_auth(&created.token)
             .header("If-Match", "\"1\"")
             .send()
@@ -1365,10 +1356,7 @@ async fn named_agents_are_private_individually_revocable_and_cannot_escalate() {
         );
     }
     let events: ResultsPage<Event> = app
-        .request(
-            Method::GET,
-            &format!("/v1/shipments/{}/events", shipment.id),
-        )
+        .request(Method::GET, &format!("/v1/packages/{}/events", shipment.id))
         .send()
         .await
         .unwrap()
@@ -1462,7 +1450,7 @@ async fn ingress_agent_management_requires_the_real_peer_user_and_browser_header
     let app = App::new(Some("127.0.0.1".parse().unwrap())).await;
     assert_eq!(
         app.request(Method::POST, "/v1/agents")
-            .header("X-Shipments-Request", "1")
+            .header("X-Packages-Request", "1")
             .json(&CreateAgent {
                 name: "Importer".into()
             })
@@ -1487,7 +1475,7 @@ async fn ingress_agent_management_requires_the_real_peer_user_and_browser_header
     let response = app
         .request(Method::POST, "/v1/agents")
         .header("X-Remote-User-Id", "human")
-        .header("X-Shipments-Request", "1")
+        .header("X-Packages-Request", "1")
         .json(&CreateAgent {
             name: "Importer".into(),
         })
@@ -1514,7 +1502,7 @@ async fn ingress_agent_management_requires_the_real_peer_user_and_browser_header
             &format!("/v1/agents/{}", created.credential.id)
         )
         .header("X-Remote-User-Id", "human")
-        .header("X-Shipments-Request", "1")
+        .header("X-Packages-Request", "1")
         .send()
         .await
         .unwrap()
@@ -1542,7 +1530,7 @@ struct RegisteredTracker {
     public_url: String,
 }
 struct ProviderFixture {
-    client: shipments::shipping_api::easypost::EasyPostClient,
+    client: packages::shipping_api::easypost::EasyPostClient,
     state: Arc<std::sync::Mutex<ProviderState>>,
     stop: Arc<std::sync::atomic::AtomicBool>,
     thread: Option<std::thread::JoinHandle<()>>,
@@ -1646,7 +1634,7 @@ impl ProviderFixture {
             }
         });
         Self {
-            client: shipments::shipping_api::easypost::EasyPostClient::for_loopback(
+            client: packages::shipping_api::easypost::EasyPostClient::for_loopback(
                 "disposable-test-key",
                 &format!("http://{address}/"),
             )
@@ -1693,7 +1681,7 @@ async fn doordash_without_original_recipient_link_is_rejected_before_any_provide
     let mut body = input("DoorDash recipient link");
     body.tracking.carrier = Some("DoorDash".parse().unwrap());
     let response = app
-        .request(Method::POST, "/v1/shipments")
+        .request(Method::POST, "/v1/packages")
         .header("Idempotency-Key", "missing-doordash-link")
         .json(&body)
         .send()
@@ -1724,9 +1712,9 @@ async fn every_api_role_rejects_missing_or_invalid_local_tracking_before_provide
         ] {
             let response = app
                 .client
-                .post(format!("{}/v1/shipments", app.url))
+                .post(format!("{}/v1/packages", app.url))
                 .bearer_auth(credential)
-                .header("X-Shipments-Actor", "ha:test")
+                .header("X-Packages-Actor", "ha:test")
                 .header("Idempotency-Key", "missing-number")
                 .header("Content-Type", "application/json")
                 .body(body)
@@ -1748,9 +1736,9 @@ async fn every_api_role_rejects_missing_or_invalid_local_tracking_before_provide
             body.tracking.number = number.into();
             let response = app
                 .client
-                .post(format!("{}/v1/shipments", app.url))
+                .post(format!("{}/v1/packages", app.url))
                 .bearer_auth(credential)
-                .header("X-Shipments-Actor", "ha:test")
+                .header("X-Packages-Actor", "ha:test")
                 .header("Idempotency-Key", "invalid-number")
                 .json(&body)
                 .send()
@@ -1785,7 +1773,7 @@ async fn every_api_role_rejects_missing_or_invalid_local_tracking_before_provide
 async fn unscanned_tracking_is_verified_with_detected_carrier_and_replays_make_no_requests() {
     let app = App::new(None).await;
     let provider = app.provider_fixture.as_ref().unwrap();
-    let worker = shipments::sync::SyncWorker::new(
+    let worker = packages::sync::SyncWorker::new(
         app.store.pool().clone(),
         std::sync::Arc::new(provider.client.clone()),
     );
@@ -1808,7 +1796,7 @@ async fn unscanned_tracking_is_verified_with_detected_carrier_and_replays_make_n
         );
         let key = format!("unscanned-{index}");
         let created = app
-            .request(Method::POST, "/v1/shipments")
+            .request(Method::POST, "/v1/packages")
             .header("Idempotency-Key", &key)
             .json(&body)
             .send()
@@ -1827,7 +1815,7 @@ async fn unscanned_tracking_is_verified_with_detected_carrier_and_replays_make_n
         assert_eq!(provider.calls(), (index + 1) * 2);
         assert!(!worker.tick().await.unwrap());
         let registered: Shipment = app
-            .request(Method::GET, &format!("/v1/shipments/{}", created.id))
+            .request(Method::GET, &format!("/v1/packages/{}", created.id))
             .send()
             .await
             .unwrap()
@@ -1846,7 +1834,7 @@ async fn unscanned_tracking_is_verified_with_detected_carrier_and_replays_make_n
         );
         assert!(registered.sync.last_success_at.is_some());
         let replay = app
-            .request(Method::POST, "/v1/shipments")
+            .request(Method::POST, "/v1/packages")
             .header("Idempotency-Key", &key)
             .json(&body)
             .send()
@@ -1862,7 +1850,7 @@ async fn unscanned_tracking_is_verified_with_detected_carrier_and_replays_make_n
         );
         assert_eq!(provider.calls(), (index + 1) * 2);
         let edit = app
-            .request(Method::PATCH, &format!("/v1/shipments/{}", created.id))
+            .request(Method::PATCH, &format!("/v1/packages/{}", created.id))
             .header("If-Match", format!("\"{}\"", registered.revision))
             .json(&UpdateShipment {
                 title: Some("Metadata edit".into()),
@@ -1918,7 +1906,7 @@ async fn rejected_tracking_changes_preserve_the_verified_shipment() {
         r#"{"error":{"code":"TRACKER.CARRIER_CODE_MISMATCH","message":"private-provider-detail"}}"#,
     );
     let response = app
-        .request(Method::PATCH, &format!("/v1/shipments/{}", created.id))
+        .request(Method::PATCH, &format!("/v1/packages/{}", created.id))
         .header("If-Match", format!("\"{}\"", created.revision))
         .json(&changed)
         .send()
@@ -1998,7 +1986,7 @@ async fn uncertain_admission_survives_restart_and_recovers_before_another_regist
         });
     app.server.close().await.unwrap();
     app.store.close().await.unwrap();
-    let restored = Store::open(&app._dir.path().join("shipments.sqlite3"))
+    let restored = Store::open(&app._dir.path().join("packages.sqlite3"))
         .await
         .unwrap();
     sqlx::query("UPDATE tracking_verifications SET next_attempt_at=0")
@@ -2019,7 +2007,7 @@ async fn uncertain_admission_survives_restart_and_recovers_before_another_regist
     body.tracking.number = number.into();
     for _ in 0..2 {
         let response = Client::new()
-            .post(format!("http://{}/v1/shipments", server.local_addr()))
+            .post(format!("http://{}/v1/packages", server.local_addr()))
             .bearer_auth(OWNER)
             .header("Idempotency-Key", "pending503")
             .json(&body)
@@ -2129,13 +2117,13 @@ async fn provider_failures_are_visible_on_durable_records_with_safe_codes_and_ht
             .await
             .unwrap();
         assert_eq!(provider.calls(), 0);
-        let worker = shipments::sync::SyncWorker::new(
+        let worker = packages::sync::SyncWorker::new(
             app.store.pool().clone(),
             std::sync::Arc::new(provider.client.clone()),
         );
         assert!(worker.tick().await.unwrap());
         let persisted: Shipment = app
-            .request(Method::GET, &format!("/v1/shipments/{}", created.id))
+            .request(Method::GET, &format!("/v1/packages/{}", created.id))
             .send()
             .await
             .unwrap()
@@ -2187,7 +2175,7 @@ async fn provider_failures_are_visible_on_durable_records_with_safe_codes_and_ht
 }
 
 #[tokio::test]
-async fn shared_provider_cooldown_does_not_admit_unverified_shipments() {
+async fn shared_provider_cooldown_does_not_admit_unverified_packages() {
     let app = App::new(None).await;
     let provider = app.provider_fixture.as_ref().unwrap();
     provider.reply_to_registration(429, "private-provider-detail");
@@ -2197,9 +2185,9 @@ async fn shared_provider_cooldown_does_not_admit_unverified_shipments() {
     );
     for (index, credential) in [OWNER, &app.agent, INTEGRATION].into_iter().enumerate() {
         let response = app
-            .request(Method::POST, "/v1/shipments")
+            .request(Method::POST, "/v1/packages")
             .bearer_auth(credential)
-            .header("X-Shipments-Actor", "ha:test")
+            .header("X-Packages-Actor", "ha:test")
             .header("Idempotency-Key", format!("during-pause-{index}"))
             .json(&input(&format!("Valid unscanned parcel{index}")))
             .send()
@@ -2230,7 +2218,7 @@ async fn failed_carrier_detection_never_creates_a_shipment_or_source() {
     });
     for _ in 0..2 {
         let response = app
-            .request(Method::POST, "/v1/shipments")
+            .request(Method::POST, "/v1/packages")
             .header("Idempotency-Key", "undetected-carrier")
             .json(&request)
             .send()
@@ -2272,7 +2260,7 @@ async fn direction_is_required_and_invalid_values_never_reach_the_provider() {
         r#"{"title":"Parcel","direction":42,"tracking":{"number":"DIRECTION-TEST"}}"#,
     ] {
         let response = app
-            .request(Method::POST, "/v1/shipments")
+            .request(Method::POST, "/v1/packages")
             .header("Idempotency-Key", "invalid-direction")
             .header("Content-Type", "application/json")
             .body(body)
@@ -2294,7 +2282,7 @@ async fn owners_and_agents_create_and_change_direction_without_reverifying_track
     let mut request = input("Outbound direction parcel");
     request.direction = Direction::Outbound;
     let created: Shipment = app
-        .request(Method::POST, "/v1/shipments")
+        .request(Method::POST, "/v1/packages")
         .bearer_auth(&app.agent)
         .header("Idempotency-Key", "outbound-create")
         .json(&request)
@@ -2306,7 +2294,7 @@ async fn owners_and_agents_create_and_change_direction_without_reverifying_track
         .unwrap();
     assert_eq!(created.direction, Direction::Outbound);
     let replay: Shipment = app
-        .request(Method::POST, "/v1/shipments")
+        .request(Method::POST, "/v1/packages")
         .bearer_auth(&app.agent)
         .header("Idempotency-Key", "outbound-create")
         .json(&request)
@@ -2320,7 +2308,7 @@ async fn owners_and_agents_create_and_change_direction_without_reverifying_track
     assert_eq!(replay.direction, Direction::Outbound);
     request.direction = Direction::Inbound;
     assert_eq!(
-        app.request(Method::POST, "/v1/shipments")
+        app.request(Method::POST, "/v1/packages")
             .bearer_auth(&app.agent)
             .header("Idempotency-Key", "outbound-create")
             .json(&request)
@@ -2330,7 +2318,7 @@ async fn owners_and_agents_create_and_change_direction_without_reverifying_track
             .status(),
         StatusCode::CONFLICT
     );
-    let path = format!("/v1/shipments/{}", created.id);
+    let path = format!("/v1/packages/{}", created.id);
     let changed: Shipment = app
         .request(Method::PATCH, &path)
         .bearer_auth(&app.agent)
@@ -2409,7 +2397,7 @@ async fn ordinary_ingress_users_can_read_but_cannot_claim_administrator_permissi
     let system: System = response.json().await.unwrap();
     assert_eq!(system.credential_role, "user");
     let response = app
-        .request(Method::GET, "/v1/shipments")
+        .request(Method::GET, "/v1/packages")
         .header("X-Remote-User-Id", "visitor")
         .send()
         .await
@@ -2419,7 +2407,7 @@ async fn ordinary_ingress_users_can_read_but_cannot_claim_administrator_permissi
         assert_eq!(
             app.request(Method::GET, path)
                 .header("X-Remote-User-Id", "visitor")
-                .header("X-Shipments-Admin", "true")
+                .header("X-Packages-Admin", "true")
                 .send()
                 .await
                 .unwrap()
@@ -2430,7 +2418,7 @@ async fn ordinary_ingress_users_can_read_but_cannot_claim_administrator_permissi
     assert_eq!(
         app.request(Method::POST, "/v1/agents")
             .header("X-Remote-User-Id", "visitor")
-            .header("X-Shipments-Request", "1")
+            .header("X-Packages-Request", "1")
             .json(&CreateAgent {
                 name: "Forbidden".into()
             })

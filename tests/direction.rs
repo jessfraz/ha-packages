@@ -1,12 +1,12 @@
 use std::sync::Arc;
 
 use dropshot::ResultsPage;
-use reqwest::Client;
-use shipments::{
+use packages::{
     api,
     models::{CreateShipment, Direction, InputTracking, SetOverride, Shipment, Status, Summary},
     store::Store,
 };
+use reqwest::Client;
 
 #[tokio::test]
 async fn direction_scopes_summaries_search_and_paginated_status_filters() {
@@ -108,7 +108,7 @@ async fn direction_scopes_summaries_search_and_paginated_status_filters() {
     let mut token: Option<String> = None;
     loop {
         let request = client
-            .get(format!("{base}/v1/shipments"))
+            .get(format!("{base}/v1/packages"))
             .bearer_auth(owner)
             .query(&[("limit", "1")]);
         let request = match &token {
@@ -130,7 +130,7 @@ async fn direction_scopes_summaries_search_and_paginated_status_filters() {
     }
     assert_eq!(ids, incoming);
     let outgoing: ResultsPage<Shipment> = client
-        .get(format!("{base}/v1/shipments"))
+        .get(format!("{base}/v1/packages"))
         .bearer_auth(owner)
         .query(&[("direction", "outbound"), ("status", "out_for_delivery")])
         .send()
@@ -142,7 +142,7 @@ async fn direction_scopes_summaries_search_and_paginated_status_filters() {
     assert_eq!(outgoing.items.len(), 1);
     assert_eq!(outgoing.items[0].direction, Direction::Outbound);
     let archived: ResultsPage<Shipment> = client
-        .get(format!("{base}/v1/shipments"))
+        .get(format!("{base}/v1/packages"))
         .bearer_auth(owner)
         .query(&[("direction", "inbound"), ("archived", "true")])
         .send()

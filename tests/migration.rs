@@ -1,9 +1,9 @@
-use sha2::{Digest, Sha256};
-use shipments::{
+use packages::{
     error::Error,
     models::{CreateShipment, EventKind, InputTracking, Shipment, Source, Status, SyncState},
     store::Store,
 };
+use sha2::{Digest, Sha256};
 use sqlx::{
     SqlitePool,
     migrate::Migrator,
@@ -135,9 +135,9 @@ async fn completed_override_migration_clears_tracking_errors_and_preserves_regis
         snapshot.status = manual.unwrap_or(carrier);
         snapshot.carrier_status = Some(carrier);
         snapshot.sync.tracker_id = has_tracker.then(|| format!("trk_completed_{index}"));
-        snapshot.sync.registration_state = shipments::models::RegistrationState::Rejected;
+        snapshot.sync.registration_state = packages::models::RegistrationState::Rejected;
         snapshot.sync.last_error = Some("Previous provider failure".into());
-        snapshot.status_override = manual.map(|status| shipments::models::StatusOverride {
+        snapshot.status_override = manual.map(|status| packages::models::StatusOverride {
             status,
             reason: "Manual confirmation".into(),
             actor_id: "owner".into(),
@@ -272,7 +272,7 @@ async fn configuration_migration_stops_setup_failures_but_keeps_outage_retries()
     let configuration = store.get(ids[0]).await.unwrap();
     assert_eq!(
         configuration.sync.registration_state,
-        shipments::models::RegistrationState::ConfigurationRequired
+        packages::models::RegistrationState::ConfigurationRequired
     );
     assert_eq!(configuration.sync.attempts, 3);
     assert!(configuration.sync.next_attempt_at.is_none());
@@ -285,7 +285,7 @@ async fn configuration_migration_stops_setup_failures_but_keeps_outage_retries()
     let outage = store.get(ids[1]).await.unwrap();
     assert_eq!(
         outage.sync.registration_state,
-        shipments::models::RegistrationState::Pending
+        packages::models::RegistrationState::Pending
     );
     assert!(outage.sync.next_attempt_at.is_some());
     assert_eq!(outage.sync.provider_status, Some(503));
@@ -343,7 +343,7 @@ async fn missing_carrier_migration_deletes_incomplete_imports_and_preserves_reso
         );
         snapshot.status = Status::OutForDelivery;
         snapshot.sync.tracker_id = Some(format!("trk_preserve_{index}"));
-        snapshot.sync.registration_state = shipments::models::RegistrationState::Registered;
+        snapshot.sync.registration_state = packages::models::RegistrationState::Registered;
         let number = &snapshot.tracking.as_ref().unwrap().number;
         sqlx::query("INSERT INTO shipments (id,title,tracking_carrier,tracking_number,archived,tracker_id,registration_state) VALUES (?,?,?,?,?,?,'registered')")
             .bind(snapshot.id.to_string()).bind(&snapshot.title).bind(carrier).bind(number)
@@ -541,11 +541,11 @@ async fn provider_migration_clarifies_unsupported_errors_without_changing_regist
         );
         assert_eq!(
             migrated.sync.provider,
-            shipments::shipping_api::types::ProviderId::EasyPost
+            packages::shipping_api::types::ProviderId::EasyPost
         );
         assert_eq!(
             migrated.sync.registration_state,
-            shipments::models::RegistrationState::Rejected
+            packages::models::RegistrationState::Rejected
         );
         assert_eq!(migrated.sync.registration_started_at, Some(946684800));
         assert_eq!(
@@ -756,7 +756,7 @@ async fn required_tracking_migration_preserves_valid_records_and_historical_snap
     let mut valid = legacy_shipment(Some(tracking("VALID123")), false);
     valid.sources[0].key = "valid-source".into();
     let valid_input = CreateShipment {
-        direction: shipments::models::Direction::Inbound,
+        direction: packages::models::Direction::Inbound,
         title: valid.title.clone(),
         merchant: valid.merchant.clone(),
         order_reference: valid.order_reference.clone(),
@@ -1027,8 +1027,8 @@ async fn carrier_history_upgrade_queues_one_enrichment_without_breaking_retry_or
 }
 
 #[tokio::test]
-async fn direction_upgrade_marks_existing_and_historical_shipments_inbound() {
-    use shipments::models::{Direction, Patch, UpdateShipment};
+async fn direction_upgrade_marks_existing_and_historical_packages_inbound() {
+    use packages::models::{Direction, Patch, UpdateShipment};
     let directory = tempfile::tempdir().unwrap();
     let migrations = directory.path().join("before-direction");
     std::fs::create_dir(&migrations).unwrap();
@@ -1139,7 +1139,7 @@ async fn direction_upgrade_marks_existing_and_historical_shipments_inbound() {
 
 #[tokio::test]
 async fn pending_registration_upgrade_preserves_known_trackers_attempts_and_retry_advice() {
-    use shipments::models::RegistrationState;
+    use packages::models::RegistrationState;
     let directory = tempfile::tempdir().unwrap();
     let migrations = directory.path().join("before-pending");
     std::fs::create_dir(&migrations).unwrap();

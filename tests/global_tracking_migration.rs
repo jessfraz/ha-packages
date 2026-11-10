@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use shipments::{
+use packages::{
     carrier::Carrier,
     error::Error,
     models::{CarrierEvent, CarrierTracking, Direction, Status},
@@ -156,7 +156,7 @@ struct SourceRow {
 
 #[derive(Debug, PartialEq, Eq)]
 struct Snapshot {
-    shipments: Vec<ShipmentRow>,
+    packages: Vec<ShipmentRow>,
     events: Vec<EventRow>,
     sources: Vec<SourceRow>,
 }
@@ -164,7 +164,7 @@ struct Snapshot {
 impl Snapshot {
     async fn load(pool: &SqlitePool) -> Self {
         Self {
-            shipments: sqlx::query_as("SELECT id,tracking_number,tracking_carrier,direction,archived,carrier_status,carrier_tracking,tracker_id,registration_started_at,registration_state,next_attempt_at FROM shipments ORDER BY id")
+            packages: sqlx::query_as("SELECT id,tracking_number,tracking_carrier,direction,archived,carrier_status,carrier_tracking,tracker_id,registration_started_at,registration_state,next_attempt_at FROM shipments ORDER BY id")
                 .fetch_all(pool).await.unwrap(),
             events: sqlx::query_as("SELECT * FROM events ORDER BY id")
                 .fetch_all(pool).await.unwrap(),
@@ -196,7 +196,7 @@ fn assert_unique_violation(error: sqlx::Error) {
 }
 
 #[tokio::test]
-async fn upgrade_preserves_shipments_and_globally_enforces_tracking_numbers() {
+async fn upgrade_preserves_packages_and_globally_enforces_tracking_numbers() {
     let fixture = Fixture::new().await;
     let usps: Carrier = "USPS".parse().unwrap();
     let ups: Carrier = "UPS".parse().unwrap();

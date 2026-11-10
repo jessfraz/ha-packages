@@ -3,10 +3,10 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+use packages::{amazon::AmazonClient, api, logging, models::System, store::Store};
 use reqwest::{Client, Method, StatusCode};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
-use shipments::{amazon::AmazonClient, api, logging, models::System, store::Store};
 
 const OWNER: &str = "synthetic-amazon-api-owner-credential-32-bytes";
 const AGENT: &str = "synthetic-amazon-agent-credential-32-bytes";
@@ -91,7 +91,7 @@ async fn account_management_requires_owner_and_keeps_one_time_data_out_of_health
         (Method::POST, "/v1/amazon/refresh"),
         (
             Method::POST,
-            "/v1/shipments/01930000-0000-7000-8000-000000000001/amazon",
+            "/v1/packages/01930000-0000-7000-8000-000000000001/amazon",
         ),
         (Method::DELETE, "/v1/amazon"),
     ];
@@ -137,13 +137,13 @@ async fn account_management_requires_owner_and_keeps_one_time_data_out_of_health
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(response.headers()["cache-control"], "no-store");
-    let status: shipments::amazon::AmazonStatus = response.json().await.unwrap();
-    assert_eq!(status.state, shipments::amazon::AmazonState::Disconnected);
+    let status: packages::amazon::AmazonStatus = response.json().await.unwrap();
+    assert_eq!(status.state, packages::amazon::AmazonState::Disconnected);
     assert!(!status.imports_enabled);
     let response = client
         .post(format!("{base}/v1/amazon/sign-in"))
         .bearer_auth(OWNER)
-        .header("X-Shipments-Actor", "owner-a")
+        .header("X-Packages-Actor", "owner-a")
         .send()
         .await
         .unwrap();
@@ -163,13 +163,13 @@ async fn account_management_requires_owner_and_keeps_one_time_data_out_of_health
     let response = client
         .post(format!("{base}/v1/amazon/complete"))
         .bearer_auth(OWNER)
-        .header("X-Shipments-Actor", "owner-b")
+        .header("X-Packages-Actor", "owner-b")
         .json(&serde_json::json!({"flow_id":flow.flow_id,"landing_url":callback}))
         .send()
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-    let response=client.post(format!("{base}/v1/amazon/complete")).bearer_auth(OWNER).header("X-Shipments-Actor","owner-a")
+    let response=client.post(format!("{base}/v1/amazon/complete")).bearer_auth(OWNER).header("X-Packages-Actor","owner-a")
         .json(&serde_json::json!({"flow_id":flow.flow_id,"landing_url":"https://not-amazon.invalid/ap/maplanding?openid.oa2.authorization_code=PRIVATE-AUTHORIZATION-CODE"})).send().await.unwrap();
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     assert_eq!(response.headers()["cache-control"], "no-store");
@@ -199,12 +199,12 @@ async fn account_management_requires_owner_and_keeps_one_time_data_out_of_health
     let system: System = serde_json::from_str(&body).unwrap();
     assert_eq!(
         system.amazon.state,
-        shipments::amazon::AmazonState::Disconnected
+        packages::amazon::AmazonState::Disconnected
     );
     assert!(
         !system
             .enabled_providers
-            .contains(&shipments::shipping_api::types::ProviderId::AmazonAccount)
+            .contains(&packages::shipping_api::types::ProviderId::AmazonAccount)
     );
     assert!(!system.provider_enabled);
     for secret in [
@@ -262,7 +262,7 @@ async fn account_management_requires_owner_and_keeps_one_time_data_out_of_health
 
 #[tokio::test]
 async fn existing_amazon_adoption_checks_review_and_eligibility_before_upstream() {
-    use shipments::{
+    use packages::{
         carrier::Carrier,
         models::{CarrierTracking, CreateShipment, Direction, InputTracking, Status},
         shipping_api::types::{ProviderId, Tracker},
@@ -350,7 +350,7 @@ async fn existing_amazon_adoption_checks_review_and_eligibility_before_upstream(
         (&records[1], Some(records[1].revision), StatusCode::CONFLICT),
     ] {
         let mut request = client
-            .post(format!("{base}/v1/shipments/{}/amazon", record.id))
+            .post(format!("{base}/v1/packages/{}/amazon", record.id))
             .bearer_auth(OWNER);
         if let Some(revision) = revision {
             request = request.header("If-Match", format!("\"{revision}\""));
@@ -376,7 +376,7 @@ async fn existing_amazon_adoption_checks_review_and_eligibility_before_upstream(
 
 #[tokio::test]
 async fn existing_amazon_adoption_verifies_upstream_and_commits_the_same_record() {
-    use shipments::{
+    use packages::{
         carrier::Carrier,
         models::{
             CarrierEvent, CarrierTracking, CreateShipment, Direction, InputTracking, Shipment,
@@ -493,7 +493,7 @@ async fn existing_amazon_adoption_verifies_upstream_and_commits_the_same_record(
     .unwrap();
     let response = Client::new()
         .post(format!(
-            "http://{}/v1/shipments/{}/amazon",
+            "http://{}/v1/packages/{}/amazon",
             server.local_addr(),
             before.id
         ))
@@ -854,7 +854,7 @@ async fn every_downstream_connection_boundary_has_a_safe_correlated_error_and_lo
             assert!(path.exists());
             assert_eq!(
                 account.status().await.state,
-                shipments::amazon::AmazonState::Connected
+                packages::amazon::AmazonState::Connected
             );
         } else {
             assert!(!path.exists());

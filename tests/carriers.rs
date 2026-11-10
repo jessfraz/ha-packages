@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
+use packages::{api, error::Error, models::CreateShipment, store::Store};
 use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
-use shipments::{api, error::Error, models::CreateShipment, store::Store};
 
 #[derive(Serialize)]
 struct UnvalidatedTracking<'a> {
@@ -13,7 +13,7 @@ struct UnvalidatedTracking<'a> {
 #[derive(Serialize)]
 struct UnvalidatedShipment<'a> {
     title: &'a str,
-    direction: shipments::models::Direction,
+    direction: packages::models::Direction,
     tracking: UnvalidatedTracking<'a>,
 }
 
@@ -25,7 +25,7 @@ struct Rejection {
 #[tokio::test]
 async fn unsupported_carrier_is_rejected_before_provider_configuration_is_required() {
     let directory = tempfile::tempdir().unwrap();
-    let store = Store::open(&directory.path().join("shipments.sqlite3"))
+    let store = Store::open(&directory.path().join("packages.sqlite3"))
         .await
         .unwrap();
     let owner = "carrier-test-owner-credential-at-least-32-bytes";
@@ -35,12 +35,12 @@ async fn unsupported_carrier_is_rejected_before_provider_configuration_is_requir
     )
     .unwrap();
     let response = reqwest::Client::new()
-        .post(format!("http://{}/v1/shipments", server.local_addr()))
+        .post(format!("http://{}/v1/packages", server.local_addr()))
         .bearer_auth(owner)
         .header("Idempotency-Key", "unsupported-carrier")
         .json(&UnvalidatedShipment {
             title: "Carrier validation parcel",
-            direction: shipments::models::Direction::Inbound,
+            direction: packages::models::Direction::Inbound,
             tracking: UnvalidatedTracking {
                 number: "TRACK-UNSUPPORTED-CARRIER",
                 carrier: "UnrecognizedCarrier",
@@ -65,7 +65,7 @@ async fn canonical_carriers_preserve_legacy_create_replays_and_database_identity
     let legacy_fingerprint = "7544857e9aaff2976b141e1cb728de5f1133ff55fcaac7302e8b257e469fa71c";
     let mut input: CreateShipment = serde_json::from_str(r#"{"title":"Legacy parcel","direction":"inbound","merchant":null,"order_reference":null,"tracking":{"carrier":"usps","number":"LEGACY-TRACK"},"source":null}"#).unwrap();
     let directory = tempfile::tempdir().unwrap();
-    let store = Store::open(&directory.path().join("shipments.sqlite3"))
+    let store = Store::open(&directory.path().join("packages.sqlite3"))
         .await
         .unwrap();
     let created = store

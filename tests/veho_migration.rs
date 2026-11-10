@@ -1,6 +1,6 @@
 //! Veho provider migration preserves identity and schedules safe reconciliation.
 
-use shipments::{
+use packages::{
     carrier::Carrier,
     models::{CarrierTracking, RegistrationState, Source, Status},
     shipping_api::types::ProviderId,
@@ -79,7 +79,7 @@ async fn veho_upgrade_reroutes_easypost_records_and_preserves_history_and_owners
             std::fs::copy(entry.path(), old_migrations.join(name)).unwrap();
         }
     }
-    let database = directory.path().join("shipments.sqlite3");
+    let database = directory.path().join("packages.sqlite3");
     let old = SqlitePoolOptions::new()
         .max_connections(1)
         .connect_with(

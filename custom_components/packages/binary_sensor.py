@@ -1,0 +1,69 @@
+"""Problem indicators for carrier exceptions and synchronization failures."""
+
+from homeassistant.components.binary_sensor import (
+    BinarySensorDeviceClass,
+    BinarySensorEntity,
+    BinarySensorEntityDescription,
+)
+from homeassistant.config_entries import ConfigEntry
+from homeassistant.core import HomeAssistant, callback
+from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
+from homeassistant.helpers.update_coordinator import CoordinatorEntity
+
+from .coordinator import PackagesCoordinator
+from .entity import AmazonDiscoveryEntity, packages_device_info
+
+
+async def async_setup_entry(
+    hass: HomeAssistant,
+    entry: ConfigEntry[PackagesCoordinator],
+    async_add_entities: AddConfigEntryEntitiesCallback,
+) -> None:
+    async_add_entities(
+        ShipmentProblem(entry.runtime_data, entry, key)
+        for key in ("exceptions", "sync_errors")
+    )
+    async_add_entities([AmazonDiscoveryProblem(entry.runtime_data, entry)])
+
+
+class AmazonDiscoveryProblem(AmazonDiscoveryEntity, BinarySensorEntity):
+    """Report actual failures; unknown transport or stale reports are unavailable."""
+
+    _attr_device_class = BinarySensorDeviceClass.PROBLEM
+
+    def __init__(self, coordinator: PackagesCoordinator, entry: ConfigEntry) -> None:
+        super().__init__(coordinator, entry, "amazon_discovery_problem")
+
+    def _update_attributes(self) -> None:
+        super()._update_attributes()
+        report = self.health
+        self._attr_is_on = report.problem if report else None
+
+
+class ShipmentProblem(CoordinatorEntity[PackagesCoordinator], BinarySensorEntity):
+    """Use backend-owned counts so unknown transport health is unavailable."""
+
+    _attr_has_entity_name = True
+
+    def __init__(
+        self,
+        coordinator: PackagesCoordinator,
+        entry: ConfigEntry[PackagesCoordinator],
+        key: str,
+    ) -> None:
+        super().__init__(coordinator)
+        self.entity_description = BinarySensorEntityDescription(
+            key=key, translation_key=key, device_class=BinarySensorDeviceClass.PROBLEM
+        )
+        self._attr_unique_id = f"{entry.entry_id}_{key}_problem"
+        self._attr_device_info = packages_device_info(entry)
+        self._update_attributes()
+
+    @callback
+    def _handle_coordinator_update(self) -> None:
+        """Invalidate HA's cached value when the coordinator publishes data."""
+        self._update_attributes()
+        super()._handle_coordinator_update()
+
+    def _update_attributes(self) -> None:
+        self._attr_is_on = self.coordinator.data[self.entity_description.key] > 0

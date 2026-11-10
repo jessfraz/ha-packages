@@ -14,7 +14,7 @@ from homeassistant.loader import async_get_integration
 from homeassistant.setup import async_setup_component
 from pytest_homeassistant.common import MockConfigEntry, MockUser
 
-from custom_components.shipments.const import CONF_BACKEND_URL, CONF_TOKEN, DOMAIN
+from custom_components.packages.const import CONF_BACKEND_URL, CONF_TOKEN, DOMAIN
 
 SUMMARY = {
     "active": 4,
@@ -132,7 +132,7 @@ class Backend:
     system_read_started: asyncio.Event = field(default_factory=asyncio.Event)
     system_read_release: asyncio.Event | None = None
 
-    def selected_shipments(self, query: dict[str, str]) -> list[FixtureShipment]:
+    def selected_packages(self, query: dict[str, str]) -> list[FixtureShipment]:
         """Honor the backend's public list filters over independently owned rows."""
         rows = self.shipment_rows or []
         rows = [
@@ -173,7 +173,7 @@ class Backend:
 
     def shipment_page(self, query: dict[str, str]) -> dict[str, object]:
         if self.shipment_rows is not None:
-            rows = self.selected_shipments(query)
+            rows = self.selected_packages(query)
         elif "delivered_after" in query or query.get("status") == "out_for_delivery":
             # Most adapter tests set only counts. Supply matching real-shaped rows
             # unless a test explicitly owns the list contents or HTTP response.
@@ -246,18 +246,18 @@ class Backend:
                 summary = self.delivery_summary.copy()
                 if self.shipment_rows is not None:
                     summary["delivered"] = len(
-                        self.selected_shipments(dict(request.query))
+                        self.selected_packages(dict(request.query))
                     )
                 return web.json_response(summary)
             summary = self.summaries[request.query.get("direction", "")].copy()
             if self.shipment_rows is not None:
                 summary["out_for_delivery"] = len(
-                    self.selected_shipments(
+                    self.selected_packages(
                         {**request.query, "status": "out_for_delivery"}
                     )
                 )
             return web.json_response(summary)
-        if request.path == "/v1/shipments" and request.method == "GET":
+        if request.path == "/v1/packages" and request.method == "GET":
             return web.json_response(self.shipment_page(dict(request.query)))
         if request.path == "/v1/delivery-estimates":
             return web.json_response({"items": [], "next_page": None})

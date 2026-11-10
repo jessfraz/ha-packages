@@ -4,14 +4,14 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width,initial-scale=1">
     <meta name="color-scheme" content="light dark">
-    <title>Shipments</title>
+    <title>Packages</title>
     <link rel="stylesheet" href="style.css">
     <script src="app.js" type="module"></script>
   </head>
   <body data-home-assistant="false">
     <header>
       <h1>
-        <a class="wordmark" href="./" aria-label="Shipments home">
+        <a class="wordmark" href="./" aria-label="Packages home">
           <svg width="30" height="30" viewBox="0 0 256 256" aria-hidden="true" focusable="false">
             <g stroke="var(--brand-ink)" stroke-width="12" stroke-linecap="round" stroke-linejoin="round">
               <path fill="var(--brand-soft)" d="M128 8 244 66 128 124 12 66Z"/>
@@ -20,7 +20,7 @@
               <path fill="none" d="M70 37 186 95 186 139"/>
             </g>
           </svg>
-          Shipments
+          Packages
         </a>
       </h1>
       <button id="add">Add shipment</button>
@@ -29,8 +29,8 @@
       <p id="notice" role="status" aria-live="polite"></p>
       <section id="startup-connection" class="connection" aria-labelledby="connection-title" hidden>
         <h2 id="connection-title">Connecting to Home Assistant</h2>
-        <p id="connection-status" role="status" aria-live="polite">Waiting for Home Assistant to connect. Your shipments will open automatically.</p>
-        <p class="muted">Home Assistant handles pairing and authentication. If this continues, check the Shipments integration in Settings → Devices &amp; services.</p>
+        <p id="connection-status" role="status" aria-live="polite">Waiting for Home Assistant to connect. Your packages will open automatically.</p>
+        <p class="muted">Home Assistant handles pairing and authentication. If this continues, check the Packages integration in Settings → Devices &amp; services.</p>
         <button id="retry-connection" type="button" class="quiet">Try again now</button>
       </section>
       <form id="login" hidden>
@@ -54,7 +54,7 @@
         <div id="summary" class="summary" aria-label="Shipment summary"></div>
         <div class="toolbar">
           <form id="search">
-            <label class="sr-only" for="query">Search shipments</label>
+            <label class="sr-only" for="query">Search packages</label>
             <input
               id="query"
               type="search"
@@ -79,7 +79,7 @@
           </button>
         </div>
         <p id="view-note" class="view-note muted" role="status" hidden></p>
-        <div id="list" class="shipments"></div>
+        <div id="list" class="packages"></div>
         <button id="more" hidden>Load more</button>
         <p id="health" class="muted" hidden></p>
         <div id="management">
@@ -91,7 +91,7 @@
           </div>
           <ul id="installation-checks"></ul>
           <p id="backup-date" class="muted"></p>
-          <a href="https://github.com/jessfraz/ha-packages/blob/main/shipments/DOCS.md" target="_blank" rel="noopener noreferrer">Installation and pairing instructions ↗</a>
+          <a href="https://github.com/jessfraz/ha-packages/blob/main/packages/DOCS.md" target="_blank" rel="noopener noreferrer">Installation and pairing instructions ↗</a>
         </details>
         <details id="amazon" class="installation" hidden>
           <summary>Amazon Account <span id="amazon-state" class="optional-label">Not connected</span></summary>
@@ -100,7 +100,7 @@
           <p id="amazon-last-success" class="muted"></p>
           <div class="amazon-actions">
             <button id="amazon-start" type="button">Connect Amazon</button>
-            <button id="amazon-preview" class="quiet" type="button" hidden>Preview shipments</button>
+            <button id="amazon-preview" class="quiet" type="button" hidden>Preview packages</button>
             <button id="amazon-enable" type="button" hidden>Enable automatic imports</button>
             <button id="amazon-refresh" class="quiet" type="button" hidden>Refresh tracking</button>
             <button id="amazon-disconnect" class="quiet" type="button" hidden>Disconnect</button>
@@ -124,7 +124,7 @@
         </details>
         <details id="agent-access" class="installation" hidden>
           <summary>Agent access <span class="optional-label">Optional</span></summary>
-          <p class="muted">Give each agent its own credential. Agents can read shipments, add or edit records, and refresh tracking. They cannot make manual corrections, archive shipments, or manage credentials.</p>
+          <p class="muted">Give each agent its own credential. Agents can read packages, add or edit records, and refresh tracking. They cannot make manual corrections, archive packages, or manage credentials.</p>
           <form id="agent-form" class="agent-form">
             <label for="agent-name">Agent name<input id="agent-name" name="name" required maxlength="100" autocomplete="off" placeholder="e.g. Parcel assistant"></label>
             <button id="create-agent">Create credential</button>
@@ -152,7 +152,7 @@
       </section>
     </main>
     <footer id="app-footer" class="app-footer" hidden>
-      <p>Shipments <span id="app-version" class="app-version"></span></p>
+      <p>Packages <span id="app-version" class="app-version"></span></p>
       <p id="service-status"></p>
       <a class="source-link" href="https://github.com/jessfraz/ha-packages" target="_blank" rel="noopener noreferrer">Source code <span aria-hidden="true">↗</span></a>
     </footer>

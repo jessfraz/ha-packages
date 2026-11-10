@@ -31,17 +31,17 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 
 # Export through the real Store admission path and checkpoint before copying.
-SHIPMENTS_CONTAINER_FIXTURE="$scratch/shipments.sqlite3" \
+PACKAGES_CONTAINER_FIXTURE="$scratch/packages.sqlite3" \
     cargo test --locked --test container_fixture export_container_fixture -- --ignored --exact
 docker volume create "$volume" >/dev/null
 docker create --name "$container" \
     --publish 127.0.0.1::8080 \
     --mount "type=volume,source=$volume,target=/data" \
-    --env "SHIPMENTS_API_TOKEN=$token" \
+    --env "PACKAGES_API_TOKEN=$token" \
     "$image" >/dev/null
-docker cp "$scratch/shipments.sqlite3" "$container:/data/shipments.sqlite3"
+docker cp "$scratch/packages.sqlite3" "$container:/data/packages.sqlite3"
 docker run --rm --mount "type=volume,source=$volume,target=/data" \
-    --entrypoint chown "$image" 10001:10001 /data/shipments.sqlite3
+    --entrypoint chown "$image" 10001:10001 /data/packages.sqlite3
 docker start "$container" >/dev/null
 base_url="http://$(docker port "$container" 8080/tcp)"
 
@@ -94,7 +94,7 @@ stop_container() {
 }
 
 check_shipment() {
-    request GET "/v1/shipments/$id" 200 --header "Authorization: Bearer $token"
+    request GET "/v1/packages/$id" 200 --header "Authorization: Bearer $token"
     jq --exit-status --arg id "$id" \
         '.id == $id and .title == "Container persistence check" and .merchant == "Test fixture" and
          .tracking.number == "9400111899223856926381" and .tracking.carrier == "USPS" and
@@ -116,30 +116,30 @@ jq --exit-status '.provider_enabled == true and .enabled_providers == ["doordash
     "$scratch/system.json" >/dev/null
 check_process_user
 request GET /v1/system 401
-request POST /v1/shipments 400 \
+request POST /v1/packages 400 \
     --header "Authorization: Bearer $token" \
     --header 'Content-Type: application/json' \
     --header 'Idempotency-Key: container-required-tracking-check' \
     --data '{"direction":"inbound","title":"Missing tracking"}'
-request POST /v1/shipments 400 \
+request POST /v1/packages 400 \
     --header "Authorization: Bearer $token" \
     --header 'Content-Type: application/json' \
     --header 'Idempotency-Key: container-blank-tracking-check' \
     --data '{"direction":"inbound","title":"Blank tracking","tracking":{"number":" "}}'
 jq --exit-status '.error_code == "tracking_required"' "$scratch/response.json" >/dev/null
-request GET /v1/shipments 200 --header "Authorization: Bearer $token"
+request GET /v1/packages 200 --header "Authorization: Bearer $token"
 jq --exit-status '.items | length == 2' "$scratch/response.json" >/dev/null
 id=$(jq --exit-status --raw-output '.items[] | select(.title == "Container persistence check") | .id' "$scratch/response.json")
 agent_shipment_id=$(jq --exit-status --raw-output '.items[] | select(.title == "Agent shipment") | .id' "$scratch/response.json")
 # Neither owner nor agent access may bypass provider verification. The imported
 # fixture remains readable while missing provider configuration blocks writes.
-request POST /v1/shipments 503 \
+request POST /v1/packages 503 \
     --header "Authorization: Bearer $token" \
     --header 'Content-Type: application/json' \
     --header 'Idempotency-Key: container-persistence-check' \
     --data '{"direction":"inbound","title":"Unverified owner shipment","tracking":{"number":"9400111899223856926383","carrier":"USPS"}}'
 jq --exit-status '.error_code == "tracking_provider_unconfigured"' "$scratch/response.json" >/dev/null
-request GET /v1/shipments 200 --header "Authorization: Bearer $token"
+request GET /v1/packages 200 --header "Authorization: Bearer $token"
 jq --exit-status '.items | length == 2' "$scratch/response.json" >/dev/null
 check_shipment
 
@@ -211,36 +211,36 @@ jq --exit-status --arg id "$agent_id" \
 request GET /v1/agents 403 --header "Authorization: Bearer $integration_token"
 request GET /v1/system 200 --header "Authorization: Bearer $agent_token"
 jq --exit-status '.credential_role == "agent"' "$scratch/response.json" >/dev/null
-request POST /v1/shipments 503 \
+request POST /v1/packages 503 \
     --header "Authorization: Bearer $agent_token" \
     --header 'Content-Type: application/json' \
     --header 'Idempotency-Key: container-agent-check' \
     --data '{"direction":"inbound","title":"Saved by agent","tracking":{"number":"9400111899223856926382"}}'
 jq --exit-status '.error_code == "tracking_provider_unconfigured"' "$scratch/response.json" >/dev/null
-request GET /v1/shipments 200 --header "Authorization: Bearer $agent_token"
+request GET /v1/packages 200 --header "Authorization: Bearer $agent_token"
 jq --exit-status '.items | length == 2' "$scratch/response.json" >/dev/null
-request GET "/v1/shipments/$agent_shipment_id" 200 --header "Authorization: Bearer $agent_token"
+request GET "/v1/packages/$agent_shipment_id" 200 --header "Authorization: Bearer $agent_token"
 agent_revision=$(jq --exit-status --raw-output '.revision' "$scratch/response.json")
-request PATCH "/v1/shipments/$agent_shipment_id" 200 \
+request PATCH "/v1/packages/$agent_shipment_id" 200 \
     --header "Authorization: Bearer $agent_token" \
     --header 'Content-Type: application/json' \
     --header "If-Match: \"$agent_revision\"" \
     --data '{"order_reference":"container-agent-order","tracking":{"number":"1Z999AA10123456784","carrier":"ups"}}'
 agent_revision=$(jq --exit-status --raw-output '.revision' "$scratch/response.json")
-request POST "/v1/shipments/$agent_shipment_id/sources" 200 \
+request POST "/v1/packages/$agent_shipment_id/sources" 200 \
     --header "Authorization: Bearer $agent_token" \
     --header 'Content-Type: application/json' \
     --header "If-Match: \"$agent_revision\"" \
     --data '{"namespace":"container-smoke","key":"agent-evidence"}'
 agent_revision=$(jq --exit-status --raw-output '.revision' "$scratch/response.json")
-request POST "/v1/shipments/$agent_shipment_id/refresh" 200 \
+request POST "/v1/packages/$agent_shipment_id/refresh" 200 \
     --header "Authorization: Bearer $agent_token" \
     --header "If-Match: \"$agent_revision\""
 agent_revision=$(jq --exit-status --raw-output '.revision' "$scratch/response.json")
-request DELETE "/v1/shipments/$agent_shipment_id/status-override" 403 \
+request DELETE "/v1/packages/$agent_shipment_id/status-override" 403 \
     --header "Authorization: Bearer $agent_token" \
     --header "If-Match: \"$agent_revision\""
-request PUT "/v1/shipments/$agent_shipment_id/archive" 403 \
+request PUT "/v1/packages/$agent_shipment_id/archive" 403 \
     --header "Authorization: Bearer $agent_token" \
     --header "If-Match: \"$agent_revision\""
 request GET /v1/installation 403 --header "Authorization: Bearer $agent_token"
@@ -263,7 +263,7 @@ fi
 request GET /v1/system 200 --header "Authorization: Bearer $integration_token"
 jq --exit-status '.credential_role == "integration"' "$scratch/response.json" >/dev/null
 check_shipment
-request GET "/v1/shipments/$agent_shipment_id" 200 --header "Authorization: Bearer $agent_token"
+request GET "/v1/packages/$agent_shipment_id" 200 --header "Authorization: Bearer $agent_token"
 jq --exit-status --arg id "$agent_shipment_id" \
     '.id == $id and .title == "Agent shipment" and .order_reference == "container-agent-order" and
      .tracking.number == "1Z999AA10123456784" and .tracking.carrier == "UPS" and
@@ -282,4 +282,4 @@ jq --exit-status '.items == []' "$scratch/response.json" >/dev/null
 check_shipment
 stop_container
 
-echo "Container smoke passed ($expected_arch): uid10001, standalone/app/agent access, private credentials, installation checks, and durable shipments/credentials/revocations after clean restart."
+echo "Container smoke passed ($expected_arch): uid10001, standalone/app/agent access, private credentials, installation checks, and durable packages/credentials/revocations after clean restart."

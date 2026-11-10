@@ -5,17 +5,17 @@ import json
 import pytest
 from homeassistant.core import HomeAssistant
 
-from custom_components.shipments.const import MAX_REQUEST_BYTES, MAX_RESPONSE_BYTES
+from custom_components.packages.const import MAX_REQUEST_BYTES, MAX_RESPONSE_BYTES
 
 from .conftest import SHIPMENT_ID, Backend
 
-PREFIX = "/api/shipments/v1"
+PREFIX = "/api/packages/v1"
 
 
 async def test_proxy_identity_headers_and_error_status(
     hass_client, hass_admin_user, entry, backend: Backend
 ) -> None:
-    path = f"/v1/shipments/{SHIPMENT_ID}"
+    path = f"/v1/packages/{SHIPMENT_ID}"
     backend.responses[("PATCH", path)] = (
         412,
         b'{"error_code":"version_conflict"}',
@@ -23,12 +23,12 @@ async def test_proxy_identity_headers_and_error_status(
     )
     client = await hass_client()
     response = await client.patch(
-        f"{PREFIX}/shipments/{SHIPMENT_ID}",
+        f"{PREFIX}/packages/{SHIPMENT_ID}",
         json={"title": "Office supplies", "tracking": {"number": "TEST123"}},
         headers={
             "If-Match": '"7"',
             "Idempotency-Key": "retry-123",
-            "X-Shipments-Actor": "forged-person",
+            "X-Packages-Actor": "forged-person",
             "X-Caller-Secret": "caller-value",
         },
     )
@@ -38,7 +38,7 @@ async def test_proxy_identity_headers_and_error_status(
     assert await response.json() == {"error_code": "version_conflict"}
     forwarded = backend.requests[-1]
     assert forwarded.headers["Authorization"] == "Bearer test-owner-token"
-    assert forwarded.headers["X-Shipments-Actor"] == f"ha:{hass_admin_user.id}"
+    assert forwarded.headers["X-Packages-Actor"] == f"ha:{hass_admin_user.id}"
     assert forwarded.headers["If-Match"] == '"7"'
     assert forwarded.headers["Idempotency-Key"] == "retry-123"
     assert "X-Caller-Secret" not in forwarded.headers
@@ -61,7 +61,7 @@ async def test_decisions_require_admin(
     client = await hass_client(hass_user_token)
     count = len(backend.requests)
     response = await getattr(client, method)(
-        f"{PREFIX}/shipments/{SHIPMENT_ID}/{operation}",
+        f"{PREFIX}/packages/{SHIPMENT_ID}/{operation}",
         headers={"If-Match": '"1"'},
     )
     assert response.status == 403
@@ -73,7 +73,7 @@ async def test_non_admin_can_add_and_read(
 ) -> None:
     client = await hass_client(hass_user_token)
     response = await client.post(
-        f"{PREFIX}/shipments",
+        f"{PREFIX}/packages",
         json={
             "title": "Office supplies",
             "direction": "inbound",
@@ -85,8 +85,8 @@ async def test_non_admin_can_add_and_read(
     forwarded = next(
         request for request in backend.requests if request.method == "POST"
     )
-    assert forwarded.headers["X-Shipments-Actor"] == f"ha:{hass_user.id}"
-    assert (await client.get(f"{PREFIX}/shipments")).status == 200
+    assert forwarded.headers["X-Packages-Actor"] == f"ha:{hass_user.id}"
+    assert (await client.get(f"{PREFIX}/packages")).status == 200
 
 
 async def test_carrier_catalog_is_an_authenticated_read(
@@ -105,7 +105,7 @@ async def test_carrier_catalog_is_an_authenticated_read(
     assert forwarded.method == "GET"
     assert forwarded.path == "/v1/carriers"
     assert forwarded.headers["Authorization"] == "Bearer test-owner-token"
-    assert forwarded.headers["X-Shipments-Actor"] == f"ha:{hass_user.id}"
+    assert forwarded.headers["X-Packages-Actor"] == f"ha:{hass_user.id}"
 
 
 @pytest.mark.parametrize("sort", ["expected", "delivered"])
@@ -114,13 +114,13 @@ async def test_shipment_direction_sort_and_exception_filters_are_forwarded(
 ) -> None:
     client = await hass_client(hass_user_token)
     query = {"direction": "outbound", "sort": sort, "exceptions": "true"}
-    response = await client.get(f"{PREFIX}/shipments", params=query)
+    response = await client.get(f"{PREFIX}/packages", params=query)
     assert response.status == 200
     forwarded = backend.requests[-1]
     assert forwarded.method == "GET"
-    assert forwarded.path == "/v1/shipments"
+    assert forwarded.path == "/v1/packages"
     assert forwarded.query == query
-    assert forwarded.headers["X-Shipments-Actor"] == f"ha:{hass_user.id}"
+    assert forwarded.headers["X-Packages-Actor"] == f"ha:{hass_user.id}"
 
 
 @pytest.mark.parametrize("direction", ["inbound", "outbound"])
@@ -141,14 +141,14 @@ async def test_summary_direction_filter_is_forwarded(
     [
         ("get", "../../system", 404),
         ("get", "https://elsewhere.invalid", 404),
-        ("get", "shipments/not-a-uuid", 404),
+        ("get", "packages/not-a-uuid", 404),
         ("post", "system", 405),
         ("post", "carriers", 405),
-        ("delete", "shipments", 405),
+        ("delete", "packages", 405),
         ("get", "summary?url=https://elsewhere.invalid", 400),
         ("get", "carriers?url=https://elsewhere.invalid", 400),
-        ("get", "shipments?destination=https://elsewhere.invalid", 400),
-        ("post", f"shipments/{SHIPMENT_ID}/refresh?limit=1", 400),
+        ("get", "packages?destination=https://elsewhere.invalid", 400),
+        ("post", f"packages/{SHIPMENT_ID}/refresh?limit=1", 400),
     ],
 )
 async def test_fixed_route_allowlist(
@@ -166,7 +166,7 @@ async def test_list_and_event_query_forwarding(
 ) -> None:
     client = await hass_client()
     response = await client.get(
-        f"{PREFIX}/shipments",
+        f"{PREFIX}/packages",
         params={"search": "book & pen", "limit": "10", "active": "true"},
     )
     assert response.status == 200
@@ -176,7 +176,7 @@ async def test_list_and_event_query_forwarding(
         "active": "true",
     }
     response = await client.get(
-        f"{PREFIX}/shipments/{SHIPMENT_ID}/events", params={"page_token": "next+one"}
+        f"{PREFIX}/packages/{SHIPMENT_ID}/events", params={"page_token": "next+one"}
     )
     assert response.status == 200
     assert backend.requests[-1].query == {"page_token": "next+one"}
@@ -185,13 +185,13 @@ async def test_list_and_event_query_forwarding(
 async def test_upstream_redirect_is_not_followed(
     hass_client, entry, backend: Backend
 ) -> None:
-    backend.responses[("GET", "/v1/shipments")] = (
+    backend.responses[("GET", "/v1/packages")] = (
         302,
         b"",
         {"Location": f"{backend.url}/credential-sink"},
     )
     client = await hass_client()
-    response = await client.get(f"{PREFIX}/shipments", allow_redirects=False)
+    response = await client.get(f"{PREFIX}/packages", allow_redirects=False)
     assert response.status == 302
     assert "Location" not in response.headers
     assert not any(request.path == "/credential-sink" for request in backend.requests)
@@ -201,20 +201,20 @@ async def test_request_limit(hass_client, entry, backend: Backend) -> None:
     client = await hass_client()
     count = len(backend.requests)
     response = await client.post(
-        f"{PREFIX}/shipments", data=b"x" * (MAX_REQUEST_BYTES + 1)
+        f"{PREFIX}/packages", data=b"x" * (MAX_REQUEST_BYTES + 1)
     )
     assert response.status == 413
     assert len(backend.requests) == count
 
 
 async def test_response_limit(hass_client, entry, backend: Backend) -> None:
-    backend.responses[("GET", "/v1/shipments")] = (
+    backend.responses[("GET", "/v1/packages")] = (
         200,
         b"x" * (MAX_RESPONSE_BYTES + 1),
         {},
     )
     client = await hass_client()
-    assert (await client.get(f"{PREFIX}/shipments")).status == 502
+    assert (await client.get(f"{PREFIX}/packages")).status == 502
 
 
 async def test_request_limit_on_chunked_body(
@@ -226,7 +226,7 @@ async def test_request_limit_on_chunked_body(
 
     client = await hass_client()
     count = len(backend.requests)
-    assert (await client.post(f"{PREFIX}/shipments", data=chunks())).status == 413
+    assert (await client.post(f"{PREFIX}/packages", data=chunks())).status == 413
     assert len(backend.requests) == count
 
 
@@ -234,11 +234,11 @@ async def test_upstream_timeout(
     hass_client, entry, backend: Backend, monkeypatch
 ) -> None:
     monkeypatch.setattr(
-        "custom_components.shipments.client.REQUEST_TIMEOUT_SECONDS", 0.01
+        "custom_components.packages.client.REQUEST_TIMEOUT_SECONDS", 0.01
     )
     backend.delay_seconds = 0.03
     client = await hass_client()
-    assert (await client.get(f"{PREFIX}/shipments")).status == 504
+    assert (await client.get(f"{PREFIX}/packages")).status == 504
 
 
 async def test_proxy_unavailable_after_unload(

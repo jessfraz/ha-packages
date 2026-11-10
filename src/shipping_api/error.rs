@@ -286,7 +286,7 @@ fn format_rejection(
                 Rejection::CarrierCodeMismatch => f.write_str("The tracking number does not match the selected carrier. Check the number and carrier."),
                 Rejection::MultipleCarriersForCode => f.write_str("The tracking number matches multiple carriers. Specify its carrier."),
                 Rejection::InvalidParams => write!(f, "{provider} could not accept this tracking number and carrier. Check both values."),
-                Rejection::InvalidTestCode => write!(f, "This {provider} test key accepts only {provider} test tracking numbers. Use a production key for real shipments."),
+                Rejection::InvalidTestCode => write!(f, "This {provider} test key accepts only {provider} test tracking numbers. Use a production key for real packages."),
                 Rejection::NoCarrierAccount => write!(f, "The {provider} account needs a carrier account for this carrier. Configure it in {provider} and try again."),
                 Rejection::CarrierCredentialsMissing => write!(f, "{provider} has no credentials for this carrier. Configure this carrier in {provider}, then retry. This does not mean the tracking number is invalid."),
                 Rejection::RecipientLinkRequired => f.write_str("DoorDash requires its original recipient tracking link in tracking.recipient_url. Copy the link from the merchant's shipping email."),

@@ -1,4 +1,4 @@
-use shipments::{carrier::Carrier, models::InputTracking};
+use packages::{carrier::Carrier, models::InputTracking};
 
 #[test]
 fn admission_resolves_defaults_and_preserves_explicit_products() {
