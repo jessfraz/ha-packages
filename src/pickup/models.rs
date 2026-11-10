@@ -306,6 +306,14 @@ pub struct Parcel {
     pub details: ParcelInput,
 }
 
+/// Optional UI precondition. Normal CLI scheduling does not require a preview.
+#[derive(Clone, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ReviewedSite {
+    pub id: Uuid,
+    pub revision: i64,
+}
+
 #[derive(Clone, Default, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ScheduleRequest {
@@ -313,6 +321,8 @@ pub struct ScheduleRequest {
     pub tracking: Vec<String>,
     pub carrier: Option<PickupCarrier>,
     pub site_id: Option<Uuid>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reviewed_site: Option<ReviewedSite>,
     pub date: Option<String>,
     pub ready_time: Option<String>,
     pub close_time: Option<String>,

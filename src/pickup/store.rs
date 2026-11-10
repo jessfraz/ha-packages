@@ -299,7 +299,7 @@ impl Store {
                     .fetch_optional(&mut *tx)
                     .await?;
             if site_revision != Some(plan.site.revision) {
-                return Err(conflict());
+                return Err(Error::new(ErrorCode::LocationChanged));
             }
             let intent = intent_fingerprint(&plan, &account)?;
             if let Some(id) = sqlx::query_scalar::<_, String>(
@@ -444,6 +444,18 @@ impl Store {
             return Ok(record);
         }
         let tracking = normalize_tracking(reference)?;
+        // Current claims identify the active operation. Historical attempts
+        // remain explicit only when no current claim exists.
+        let current = match carrier {
+            Some(carrier) => sqlx::query_as::<_,JobRow>("SELECT j.id,j.batch_id,j.revision,j.state,j.accept_fee,j.plan,j.offer,j.confirmation,j.error,j.created_at,j.updated_at FROM pickup_label_claims c JOIN pickup_jobs j ON j.id=c.pickup_id WHERE c.tracking=? AND c.carrier=? LIMIT 2").bind(&tracking).bind(carrier.as_str()).fetch_all(&self.pool).await?,
+            None => sqlx::query_as::<_,JobRow>("SELECT j.id,j.batch_id,j.revision,j.state,j.accept_fee,j.plan,j.offer,j.confirmation,j.error,j.created_at,j.updated_at FROM pickup_label_claims c JOIN pickup_jobs j ON j.id=c.pickup_id WHERE c.tracking=? LIMIT 2").bind(&tracking).fetch_all(&self.pool).await?,
+        };
+        if current.len() > 1 {
+            return Err(Error::new(ErrorCode::Ambiguous));
+        }
+        if let Some(row) = current.into_iter().next() {
+            return row.record();
+        }
         let ids =
             match carrier {
                 Some(carrier) => sqlx::query_scalar::<_, String>(

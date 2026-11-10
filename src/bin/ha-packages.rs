@@ -137,6 +137,7 @@ impl PickupPlanArgs {
             tracking: self.tracking,
             carrier: self.carrier,
             site_id: self.site,
+            reviewed_site: None,
             date: self.date,
             ready_time: self.ready_time,
             close_time: self.close_time,
@@ -468,6 +469,7 @@ enum ApiErrorCode {
     PickupParcelDetailsRequired,
     PickupWatchNotReady,
     PickupLocationRequired,
+    PickupLocationChanged,
     PickupAmbiguous,
     PickupRevisionRequired,
 }

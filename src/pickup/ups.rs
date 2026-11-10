@@ -1,5 +1,6 @@
 //! UPS Pickup REST v2409. Account billing only; no card collection or alternate
 //! payment fallback. transId is correlation, not provider idempotency.
+//! REST uses the spec's /api server base; OAuth stays at /security on the host.
 //! https://github.com/UPS-API/api-documentation/blob/main/Pickup.yaml
 
 use reqwest::Method;
@@ -329,7 +330,7 @@ impl Pickup for Ups {
                     .http
                     .request(
                         Method::POST,
-                        "/shipments/v2409/pickup/oncall",
+                        "/api/shipments/v2409/pickup/oncall",
                         &[],
                         Some(&body),
                         &[],
@@ -445,7 +446,7 @@ impl Pickup for Ups {
                 .http
                 .request(
                     Method::POST,
-                    "/pickupcreation/v2409/pickup",
+                    "/api/pickupcreation/v2409/pickup",
                     &[],
                     Some(&body),
                     &[],
@@ -479,7 +480,7 @@ impl Pickup for Ups {
                 .http
                 .request::<()>(
                     Method::GET,
-                    "/shipments/v2409/pickup/oncall",
+                    "/api/shipments/v2409/pickup/oncall",
                     &[],
                     None,
                     &[("AccountNumber", &self.account)],
@@ -519,7 +520,7 @@ impl Pickup for Ups {
                 .http
                 .request::<()>(
                     Method::DELETE,
-                    "/shipments/v2409/pickup/02",
+                    "/api/shipments/v2409/pickup/02",
                     &[],
                     None,
                     &[("Prn", &saved.number)],

@@ -256,6 +256,14 @@ both container architectures.
 See [CONTRIBUTING.md](CONTRIBUTING.md) for setup, checks, and release steps,
 and the [changelog](packages/CHANGELOG.md) for release history.
 
+The real-browser pickup review regression runs against the Rust service with
+fictional owner/admin sessions. Set `PACKAGES_PLAYWRIGHT_MODULE` to the installed
+Playwright ESM module, then run:
+
+```sh
+cargo test --locked --test api pickup_review_two_admin_address_race_requires_a_new_review_before_any_admission -- --ignored --exact
+```
+
 ## License
 
 [MIT](LICENSE).

@@ -227,9 +227,22 @@ async fn schedule(
     request: RequestContext<Arc<Context>>,
     body: TypedBody<ScheduleRequest>,
 ) -> Result<HttpResponseHeaders<HttpResponseAccepted<Batch>, Headers>, HttpError> {
-    pickup_authorize(&request).await?;
+    let actor = pickup_authorize(&request).await?;
     let operation_key = key(&request)?.to_owned();
     let body = body.into_inner();
+    if let Some(receipt) = request
+        .context()
+        .pickups
+        .replay(&actor, &operation_key, &body)
+        .await?
+    {
+        pickup_authorize(&request).await?;
+        return Ok(HttpResponseHeaders::new(
+            HttpResponseAccepted(receipt),
+            headers(None),
+        ));
+    }
+    request.context().pickups.check_reviewed_site(&body).await?;
     pickup_prepare_watches(&request, &body).await?;
     let actor = pickup_authorize(&request).await?;
     let receipt = request

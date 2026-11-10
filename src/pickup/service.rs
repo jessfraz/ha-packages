@@ -114,6 +114,33 @@ impl Manager {
     pub async fn status(&self) -> Result<PickupStatus> {
         self.store.status().await
     }
+    async fn request_site(&self, request: &ScheduleRequest) -> Result<Site> {
+        if let Some(reviewed) = &request.reviewed_site {
+            if request.site_id.is_some_and(|id| id != reviewed.id) {
+                return Err(invalid());
+            }
+            let site = self.store.site(Some(reviewed.id)).await?;
+            if reviewed.revision < 1 || site.revision != reviewed.revision {
+                return Err(Error::new(ErrorCode::LocationChanged));
+            }
+            return Ok(site);
+        }
+        self.store.site(request.site_id).await
+    }
+    pub async fn check_reviewed_site(&self, request: &ScheduleRequest) -> Result<()> {
+        if request.reviewed_site.is_some() {
+            self.request_site(request).await?;
+        }
+        Ok(())
+    }
+    pub async fn replay(
+        &self,
+        actor: &str,
+        key: &str,
+        request: &ScheduleRequest,
+    ) -> Result<Option<Batch>> {
+        self.store.existing_batch(actor, key, request).await
+    }
     pub async fn sites(&self) -> Result<Vec<Site>> {
         self.store.sites().await
     }
@@ -179,7 +206,7 @@ impl Manager {
         if tracking.iter().collect::<HashSet<_>>().len() != tracking.len() {
             return Err(invalid());
         }
-        let site = self.store.site(request.site_id).await?;
+        let site = self.request_site(request).await?;
         let ready = request
             .ready_time
             .as_ref()
@@ -401,7 +428,7 @@ impl Manager {
         {
             return Err(Error::new(ErrorCode::Unsupported));
         }
-        let site = self.store.site(request.site_id).await?;
+        let site = self.request_site(request).await?;
         let ready_time = request
             .ready_time
             .clone()

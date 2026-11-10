@@ -2610,7 +2610,7 @@ async fn pickup_cli(app: &App, args: Vec<String>) -> std::process::Output {
     .await
     .unwrap()
 }
-async fn schedule_with_worker(app: &App) -> std::process::Output {
+async fn pickup_cli_with_worker(app: &App, args: Vec<String>) -> std::process::Output {
     let manager = app.pickup_manager.clone();
     let (stop, rx) = tokio::sync::watch::channel(false);
     let worker = tokio::spawn(async move {
@@ -2619,7 +2619,13 @@ async fn schedule_with_worker(app: &App) -> std::process::Output {
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
     });
-    let output = pickup_cli(
+    let output = pickup_cli(app, args).await;
+    stop.send(true).unwrap();
+    worker.await.unwrap();
+    output
+}
+async fn schedule_with_worker(app: &App) -> std::process::Output {
+    pickup_cli_with_worker(
         app,
         vec![
             "pickups".into(),
@@ -2628,11 +2634,9 @@ async fn schedule_with_worker(app: &App) -> std::process::Output {
             "--accept-fee".into(),
         ],
     )
-    .await;
-    stop.send(true).unwrap();
-    worker.await.unwrap();
-    output
+    .await
 }
+
 #[tokio::test]
 async fn pickup_cli_one_command_adds_missing_verified_watch_then_reuses_receipt_with_new_default_key()
  {
@@ -3130,5 +3134,238 @@ async fn pickup_cli_preserves_an_archived_watch_instead_of_silently_readding_it(
     let preserved = app.store.get(archived.id).await.unwrap();
     assert!(preserved.archived);
     assert_eq!(preserved.direction, Direction::Inbound);
+    app.close().await;
+}
+
+#[tokio::test]
+async fn pickup_tracking_commands_choose_current_claim_after_a_cancelled_attempt() {
+    use packages::pickup::models::*;
+    let (app, _) = pickup_app(false).await;
+    let first: Batch = cli_data(&schedule_with_worker(&app).await);
+    let cancelled: Record = cli_data(
+        &pickup_cli_with_worker(
+            &app,
+            vec!["pickups".into(), "cancel".into(), "TESTPICKUP123".into()],
+        )
+        .await,
+    );
+    assert_eq!(cancelled.id, first.items[0].id);
+    assert_eq!(cancelled.state, State::Cancelled);
+    let second: Batch = cli_data(&schedule_with_worker(&app).await);
+    assert_ne!(first.items[0].id, second.items[0].id);
+    for carrier in [None, Some("ups")] {
+        let mut args = vec!["pickups".into(), "get".into(), "TESTPICKUP123".into()];
+        if let Some(carrier) = carrier {
+            args.extend(["--carrier".into(), carrier.into()]);
+        }
+        let current: Record = cli_data(&pickup_cli(&app, args).await);
+        assert_eq!(current.id, second.items[0].id);
+    }
+    let refreshed: Record = cli_data(
+        &pickup_cli(
+            &app,
+            vec!["pickups".into(), "refresh".into(), "TESTPICKUP123".into()],
+        )
+        .await,
+    );
+    assert_eq!(refreshed.id, second.items[0].id);
+    let cancelled: Record = cli_data(
+        &pickup_cli_with_worker(
+            &app,
+            vec!["pickups".into(), "cancel".into(), "TESTPICKUP123".into()],
+        )
+        .await,
+    );
+    assert_eq!(cancelled.id, second.items[0].id);
+    assert_eq!(cancelled.state, State::Cancelled);
+    let historical = pickup_cli(
+        &app,
+        vec!["pickups".into(), "get".into(), "TESTPICKUP123".into()],
+    )
+    .await;
+    assert!(!historical.status.success());
+    assert!(String::from_utf8_lossy(&historical.stderr).contains("pickup_ambiguous"));
+    // A new active uncertain attempt must also be reachable for reconciliation.
+    let body = ScheduleRequest {
+        tracking: vec!["TESTPICKUP123".into()],
+        accept_fee: true,
+        ..Default::default()
+    };
+    let response = app
+        .request(Method::POST, "/v1/pickups")
+        .header("Idempotency-Key", "third-uncertain")
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    let third: Batch = response.json().await.unwrap();
+    let uncertain = packages::pickup::service::Manager::unconfigured(&app.store).with_provider(
+        Arc::new(PickupFixture {
+            creates: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            uncertain: true,
+            pause: false,
+        }),
+    );
+    let (_stop, rx) = tokio::sync::watch::channel(false);
+    assert!(uncertain.tick(rx).await.unwrap());
+    let input = ReconcileRequest {
+        carrier_portal_checked: true,
+        outcome: ReconcileOutcome::Scheduled {
+            confirmation: Confirmation {
+                number: "THIRD-FIXTURE".into(),
+                pickup_date: "2027-02-02".into(),
+                location_code: None,
+                etag: None,
+            },
+        },
+    };
+    let file = tempfile::NamedTempFile::new().unwrap();
+    serde_json::to_writer(&file, &input).unwrap();
+    let reconciled: Record = cli_data(
+        &pickup_cli(
+            &app,
+            vec![
+                "pickups".into(),
+                "reconcile".into(),
+                "TESTPICKUP123".into(),
+                "--input".into(),
+                file.path().to_str().unwrap().into(),
+            ],
+        )
+        .await,
+    );
+    assert_eq!(reconciled.id, third.items[0].id);
+    assert_eq!(reconciled.state, State::Scheduled);
+    app.close().await;
+}
+
+#[tokio::test]
+#[ignore = "requires PACKAGES_PLAYWRIGHT_MODULE pointing to the installed Playwright ESM module"]
+async fn pickup_review_two_admin_address_race_requires_a_new_review_before_any_admission() {
+    let (app, creates) = pickup_app(false).await;
+    let presence = packages::installation::IntegrationPresence {
+        version: env!("CARGO_PKG_VERSION").into(),
+        administrator_ids: vec!["admin-two".into()],
+        delivery_day: None,
+        backup: packages::installation::BackupReport {
+            status: packages::installation::BackupStatus::Standalone,
+            last_backup: None,
+        },
+    };
+    let response = app
+        .client
+        .post(format!("{}/v1/integration/presence", app.url))
+        .bearer_auth(INTEGRATION)
+        .header("X-Packages-Actor", "ha:integration")
+        .json(&presence)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    let manager = app.pickup_manager.clone();
+    let (stop, rx) = tokio::sync::watch::channel(false);
+    let worker = tokio::spawn(async move {
+        while !*rx.borrow() {
+            manager.tick(rx.clone()).await.unwrap();
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    });
+    let url = app.url.clone();
+    let script =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests_browser/pickup-review.mjs");
+    let result = tokio::task::spawn_blocking(move || {
+        std::process::Command::new("node")
+            .arg(script)
+            .env("PACKAGES_TEST_URL", url)
+            .env("PACKAGES_TEST_OWNER", OWNER)
+            .env("PACKAGES_TEST_SECOND_ADMIN_TOKEN", INTEGRATION)
+            .output()
+            .unwrap()
+    })
+    .await
+    .unwrap();
+    stop.send(true).unwrap();
+    worker.await.unwrap();
+    assert_eq!(
+        creates.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "A pickup was dispatched after the reviewed address changed"
+    );
+    assert_eq!(
+        app.provider_fixture.as_ref().unwrap().calls(),
+        0,
+        "Stale reviewed locations must be rejected before tracking admission"
+    );
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert!(app.pickup_manager.list(None, 10).await.unwrap().is_empty());
+    app.close().await;
+}
+
+#[tokio::test]
+async fn pickup_review_bound_idempotent_replay_returns_the_original_receipt_after_site_changes() {
+    use packages::pickup::models::*;
+    let (app, creates) = pickup_app(false).await;
+    let site = app.pickup_manager.sites().await.unwrap().remove(0);
+    let input = ScheduleRequest {
+        tracking: vec!["TESTPICKUP123".into()],
+        site_id: Some(site.id),
+        reviewed_site: Some(ReviewedSite {
+            id: site.id,
+            revision: site.revision,
+        }),
+        accept_fee: true,
+        ..Default::default()
+    };
+    let response = app
+        .request(Method::POST, "/v1/pickups")
+        .header("Idempotency-Key", "reviewed-operation")
+        .json(&input)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    let batch: Batch = response.json().await.unwrap();
+    let (_stop, rx) = tokio::sync::watch::channel(false);
+    assert!(app.pickup_manager.tick(rx).await.unwrap());
+    let mut updated = site.details;
+    updated.address.street = "124 Example Street".into();
+    app.pickup_manager
+        .save_site(Some(site.id), Some(site.revision), updated, true)
+        .await
+        .unwrap();
+    let archived: Shipment =
+        cli_data(&pickup_cli(&app, vec!["archive".into(), "TESTPICKUP123".into()]).await);
+    assert!(archived.archived);
+    let response = app
+        .request(Method::POST, "/v1/pickups")
+        .header("Idempotency-Key", "reviewed-operation")
+        .json(&input)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    let replay: Batch = response.json().await.unwrap();
+    assert_eq!(replay.items[0].id, batch.items[0].id);
+    assert_eq!(replay.items[0].state, State::Scheduled);
+    assert_eq!(
+        replay.items[0].plan.site.details.address.street,
+        "123 Example Street"
+    );
+    assert_eq!(creates.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert_eq!(
+        app.provider_fixture
+            .as_ref()
+            .unwrap()
+            .methods()
+            .iter()
+            .filter(|m| **m == Method::POST)
+            .count(),
+        1
+    );
     app.close().await;
 }

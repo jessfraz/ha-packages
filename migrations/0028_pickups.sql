@@ -72,6 +72,7 @@ CREATE TABLE pickup_label_claims (
     PRIMARY KEY(carrier,tracking)
 );
 CREATE INDEX pickup_label_claims_job ON pickup_label_claims(pickup_id);
+CREATE INDEX pickup_label_claims_tracking ON pickup_label_claims(tracking,carrier,pickup_id);
 
 CREATE TABLE pickup_intent_claims (
     fingerprint BLOB PRIMARY KEY NOT NULL,

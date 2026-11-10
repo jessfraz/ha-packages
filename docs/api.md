@@ -365,7 +365,10 @@ contacts, tracking numbers or carrier confirmations.
   `Idempotency-Key`. The CLI generates keys and fetches ETags for ordinary use.
 
 Scheduling accepts tracking numbers and optional carrier, site, date, window,
-service, weight and destination overrides. `accept_fee` is boolean consent to the
+service, weight and destination overrides. UI commits include an optional
+`reviewed_site: {id, revision}` precondition. A stale location returns
+`412 pickup_location_changed` before tracking admission; a fresh review is
+required. Normal CLI scheduling does not require a preview or manual revision. `accept_fee` is boolean consent to the
 carrier-assessed fee, not a numeric limit. Strong request binding and durable
 claims prevent a new generated command key from booking the same active labels
 again. Unknown physical outcomes remain fenced until explicit reconciliation.

@@ -280,7 +280,12 @@ async fn ups_quotes_and_bills_shipping_account_then_uses_header_based_status_and
     let reference = plan(PickupService::UpsGround);
     let expected = reference.reference.simple().to_string();
     let record_reference = expected.clone();
+    // UPS Pickup.yaml declares /api in both REST server URLs. OAuth is
+    // independently host-level, so assert the actual paths received on wire.
+    let paths = Arc::new(Mutex::new(Vec::new()));
+    let observed = paths.clone();
     let fixture = Fixture::new(move |r| {
+        observed.lock().unwrap().push(r.path.clone());
         if let Some(reply) = token(&r, "/security/v1/oauth/token") {
             assert!(r.headers["authorization"].starts_with("Basic "));
             assert_eq!(r.body, b"grant_type=client_credentials");
@@ -288,10 +293,10 @@ async fn ups_quotes_and_bills_shipping_account_then_uses_header_based_status_and
         }
         assert_eq!(r.headers["authorization"], "Bearer fixture-access");
         match (r.method.as_str(), r.path.as_str()) {
-            ("POST", "/shipments/v2409/pickup/oncall") => Some(Reply::ok(
+            ("POST", "/api/shipments/v2409/pickup/oncall") => Some(Reply::ok(
                 r#"{"PickupRateResponse":{"Response":{"ResponseStatus":{"Code":"1"}},"RateResult":{"CurrencyCode":"USD","GrandTotalOfAllCharge":"8.50"}}}"#,
             )),
-            ("POST", "/pickupcreation/v2409/pickup") => {
+            ("POST", "/api/pickupcreation/v2409/pickup") => {
                 let body: Envelope = serde_json::from_slice(&r.body).unwrap();
                 let body = body.pickup_creation_request;
                 assert_eq!(body.payment_method, "01");
@@ -303,27 +308,39 @@ async fn ups_quotes_and_bills_shipping_account_then_uses_header_based_status_and
                     r#"{"PickupCreationResponse":{"Response":{"ResponseStatus":{"Code":"1"}},"PRN":"UPS-FIXTURE"}}"#,
                 ))
             }
-            ("GET", "/shipments/v2409/pickup/oncall") => {
+            ("GET", "/api/shipments/v2409/pickup/oncall") => {
                 assert_eq!(r.headers["accountnumber"], "ABC123");
                 Some(Reply::ok(&format!(
                     r#"{{"PickupPendingStatusResponse":{{"Response":{{"ResponseStatus":{{"Code":"1"}}}},"PendingStatus":[{{"PRN":"UPS-FIXTURE","ServiceDate":"20270202","ReferenceNumber":"{expected}"}}]}}}}"#
                 )))
             }
-            ("DELETE", "/shipments/v2409/pickup/02") => {
+            ("DELETE", "/api/shipments/v2409/pickup/02") => {
                 assert_eq!(r.headers["prn"], "UPS-FIXTURE");
                 assert!(r.body.is_empty());
                 Some(Reply::ok(
                     r#"{"PickupCancelResponse":{"Response":{"ResponseStatus":{"Code":"1"}}}}"#,
                 ))
             }
-            _ => panic!("unexpected {} {}", r.method, r.path),
+            _ => Some(Reply {
+                status: 404,
+                headers: String::new(),
+                body: format!("Unrecognized official UPS REST path: {}", r.path),
+            }),
         }
     });
     let client = ups::Ups::new(account("ABC123"))
         .unwrap()
         .with_origin(fixture.origin.clone());
+    let preview = client.preview(&reference).await;
     assert_eq!(
-        client.preview(&reference).await.unwrap().fee,
+        &paths.lock().unwrap()[..],
+        &[
+            "/security/v1/oauth/token",
+            "/api/shipments/v2409/pickup/oncall"
+        ]
+    );
+    assert_eq!(
+        preview.unwrap().fee,
         Fee::Estimate {
             currency: "USD".into(),
             amount: "8.50".into()
@@ -593,12 +610,12 @@ async fn shutdown_drains_a_fenced_real_http_dispatch_and_a_new_key_reuses_its_re
         if let Some(reply) = token(&r, "/security/v1/oauth/token") {
             return Some(reply);
         }
-        if r.path == "/shipments/v2409/pickup/oncall" {
+        if r.path == "/api/shipments/v2409/pickup/oncall" {
             return Some(Reply::ok(
                 r#"{"PickupRateResponse":{"Response":{"ResponseStatus":{"Code":"1"}},"RateResult":{"CurrencyCode":"USD","GrandTotalOfAllCharge":"8.50"}}}"#,
             ));
         }
-        assert_eq!(r.path, "/pickupcreation/v2409/pickup");
+        assert_eq!(r.path, "/api/pickupcreation/v2409/pickup");
         *seen.lock().unwrap() += 1;
         std::thread::sleep(std::time::Duration::from_millis(150));
         Some(Reply::ok(

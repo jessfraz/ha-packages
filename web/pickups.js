@@ -445,7 +445,22 @@ export function installPickups(root, opener, packages, request, onForbidden) {
           body: JSON.stringify(input),
         });
         if (!current(version)) return;
-        reviewed = input;
+        const site = previews[0]?.plan.site;
+        if (
+          !site ||
+          previews.some(
+            (preview) =>
+              preview.plan.site.id !== site.id ||
+              preview.plan.site.revision !== site.revision,
+          )
+        ) {
+          throw new Error("Pickup address changed. Review the details again.");
+        }
+        reviewed = {
+          ...input,
+          site_id: site.id,
+          reviewed_site: { id: site.id, revision: site.revision },
+        };
         operationKey = crypto.randomUUID();
         const details = find("pickup-review-details");
         details.replaceChildren();
@@ -540,6 +555,11 @@ export function installPickups(root, opener, packages, request, onForbidden) {
         find("pickup-new").focus();
       }
     } catch (error) {
+      if (current(version) && error.code === "pickup_location_changed") {
+        editPlan();
+        field(form, "tracking").focus();
+        await load();
+      }
       showError(error, "pickup-schedule-error", version);
     } finally {
       if (current(version)) setBusy(false);
