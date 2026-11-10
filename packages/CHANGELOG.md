@@ -1,3 +1,10 @@
+## 0.8.2
+
+- Schedule pickups directly from the header and keep pickup history in the tabs.
+- Keep package refresh running after visiting Pickups.
+- Recognize Amazon orders that are still waiting for parcel details.
+- Fix select spacing and let Dependabot track App Kit releases.
+
 ## 0.8.1
 
 - Support split shipments described by the same email or order source.

@@ -175,7 +175,7 @@ export function installAmazonSettings(root, request, onUnauthorized) {
       : connected ? status.imports_enabled ? "Connected" : previewed ? "Signed in · preview checked" : "Signed in · preview required"
       : "Not connected";
     byId("amazon-description").textContent = status?.state === "auth_required"
-      ? "Amazon no longer accepts the saved sign-in. Reconnect to resume shipment updates."
+      ? "Amazon no longer accepts the saved sign-in. Reconnect to resume package updates."
       : challenged ? "Your saved sign-in is retained. Open Amazon orders in your browser, complete any requested check, then choose Preview packages."
       : connected
         ? status.imports_enabled
@@ -301,7 +301,7 @@ export function installAmazonSettings(root, request, onUnauthorized) {
       clearPreview();
       updateStatus(result);
       message(result.imports_enabled
-        ? "Amazon reconnected. Shipment updates will resume."
+        ? "Amazon reconnected. Package updates will resume."
         : "Amazon sign-in saved. Preview packages to check page support before enabling imports.");
     });
   });
@@ -314,7 +314,7 @@ export function installAmazonSettings(root, request, onUnauthorized) {
   });
 
   byId("amazon-preview").addEventListener("click", () => run(
-    "Reading a shipment preview…", "Could not read a preview. Your saved packages have not been changed.",
+    "Reading a package preview…", "Could not read a preview. Your saved packages have not been changed.",
     async (signal, current) => {
       clearPreview();
       const result = await request("v1/amazon/preview", { method: "POST", body: "{}", signal });
@@ -340,7 +340,7 @@ export function installAmazonSettings(root, request, onUnauthorized) {
         list.append(row);
       }
       byId("amazon-preview-note").textContent = result.packages.length
-        ? `${result.packages.length} verified shipment${result.packages.length === 1 ? "" : "s"}. Nothing has been added or changed.`
+        ? `${result.packages.length} verified package${result.packages.length === 1 ? "" : "s"}. Nothing has been added or changed.`
         : result.has_more ? "More recent orders remain to be checked. Nothing has been added or changed."
           : "No verified packages are ready to import. Nothing has been added or changed.";
       byId("amazon-deferred").textContent = result.deferred

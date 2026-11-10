@@ -767,10 +767,10 @@ button.stat[aria-pressed="true"]:hover { opacity: 1; }
   color: var(--blue-ink);
 }
 
-.direction-tabs { display: flex; gap: 4px; margin: 0 0 20px; }
+.direction-tabs { display: flex; flex-wrap: wrap; gap: 4px; margin: 0 0 20px; }
 .direction-tabs button { border-color: transparent; padding: 7px 12px; background: transparent; color: var(--muted); }
 .direction-tabs button:hover { opacity: 1; color: inherit; }
-.direction-tabs button[aria-pressed="true"] { border-color: var(--line); background: var(--paper); color: inherit; }
+.direction-tabs button[aria-current="page"] { border-color: var(--line); background: var(--paper); color: inherit; }
 .direction-inbound { background: #d5eee9; color: #155d50; }
 .direction-outbound { background: #f5dce9; color: #852b58; }
 .registration-pending { background: var(--neutral-fill); color: var(--neutral-ink); }
@@ -831,6 +831,8 @@ button.stat[aria-pressed="true"]:hover { opacity: 1; }
 }
 
 #pickups-dashboard .header-actions,
+#pickup-schedule-dialog .header-actions,
+#pickup-cancel-dialog .header-actions,
 .pickup-heading {
   display: flex;
   align-items: center;
@@ -908,7 +910,8 @@ button.stat[aria-pressed="true"]:hover { opacity: 1; }
   flex: none;
   margin-top: 0.2rem;
 }
-#pickups-dashboard textarea {
+#pickup-site-dialog textarea,
+#pickup-schedule-dialog textarea {
   width: 100%;
   resize: vertical;
   box-sizing: border-box;

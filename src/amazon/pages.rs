@@ -54,8 +54,16 @@ pub(crate) struct ParcelPage {
     pub titles: Vec<String>,
 }
 
+#[derive(Clone)]
+pub(crate) struct PendingItemPage {
+    pub order: String,
+    pub item: String,
+    pub path: String,
+}
+
 pub(crate) struct Listing {
     pub parcels: Vec<ParcelPage>,
+    pub pending_items: Vec<PendingItemPage>,
     pub next_page: Option<String>,
     pub deferred: usize,
     pub deferred_reasons: DeferredCounts,
@@ -361,6 +369,19 @@ fn query_identity(path: &str) -> Result<ParcelIdentity, Error> {
     })
 }
 
+fn pending_item_identity(path: &str) -> Option<(String, String)> {
+    let path = allowed_path(path).ok()?;
+    if !is_tracking(&path) {
+        return None;
+    }
+    let url = Url::parse(ORIGIN).ok()?.join(&path).ok()?;
+    let mut values: BTreeMap<_, _> = url.query_pairs().into_owned().collect();
+    let order = values.remove("orderId")?;
+    let item = values.remove("itemId")?;
+    // A partial parcel identity cannot be reinterpreted as an unshipped item.
+    values.is_empty().then_some((order, item))
+}
+
 pub(crate) fn same_parcel_identity(original: &str, destination: &str) -> bool {
     match (query_identity(original), query_identity(destination)) {
         (Ok(original), Ok(destination)) => {
@@ -375,15 +396,17 @@ pub(crate) fn same_parcel_identity(original: &str, destination: &str) -> bool {
                     .is_none_or(|index| destination.index.as_ref() == Some(index))
         }
         (Err(_), Err(_)) => {
-            listing_identity(original)
-                .zip(listing_identity(destination))
-                .is_some_and(|(original, destination)| {
-                    original.page == destination.page
-                        && original
-                            .time_filter
-                            .as_ref()
-                            .is_none_or(|filter| destination.time_filter.as_ref() == Some(filter))
-                })
+            pending_item_identity(original)
+                .zip(pending_item_identity(destination))
+                .is_some_and(|(original, destination)| original == destination)
+                || listing_identity(original)
+                    .zip(listing_identity(destination))
+                    .is_some_and(|(original, destination)| {
+                        original.page == destination.page
+                            && original.time_filter.as_ref().is_none_or(|filter| {
+                                destination.time_filter.as_ref() == Some(filter)
+                            })
+                    })
                 || order_details_identity(original)
                     .zip(order_details_identity(destination))
                     .is_some_and(|(original, destination)| original == destination)
@@ -449,6 +472,8 @@ pub(crate) fn listing(page: &str) -> Result<Listing, Error> {
     let html = Html::parse_document(page);
     let mut groups: BTreeMap<(String, String, PackageSlot), usize> = BTreeMap::new();
     let mut parcels = Vec::new();
+    let mut pending_items = Vec::new();
+    let mut pending_identities = BTreeSet::new();
     let mut reasons = DeferredCounts::default();
     let mut classified_terminal = 0;
     let mut found = false;
@@ -471,6 +496,12 @@ pub(crate) fn listing(page: &str) -> Result<Listing, Error> {
         };
         if cancelled_listing_card(node, &path)? {
             classified_terminal += 1;
+            continue;
+        }
+        if let Some((order, item)) = pending_item_identity(&path) {
+            if pending_identities.insert((order.clone(), item.clone())) {
+                pending_items.push(PendingItemPage { order, item, path });
+            }
             continue;
         }
         let Ok(identity) = query_identity(&path) else {
@@ -529,6 +560,7 @@ pub(crate) fn listing(page: &str) -> Result<Listing, Error> {
     }
     Ok(Listing {
         parcels,
+        pending_items,
         next_page: next_listing_page(&html)?,
         deferred: reasons.total(),
         deferred_reasons: reasons,
@@ -1002,6 +1034,7 @@ struct PageState {
     short_status: Option<String>,
     progress_tracker: Option<Progress>,
     order_id: Option<String>,
+    item_id: Option<String>,
     shipment_id: Option<String>,
     package_id: Option<String>,
     package_index: Option<String>,
@@ -1106,6 +1139,76 @@ fn observed_status(state: &PageState) -> Option<Status> {
         .and_then(|progress| progress.last_reached_milestone.as_deref())
         .and_then(status)
         .or_else(|| state.short_status.as_deref().and_then(status))
+}
+
+pub(crate) fn unshipped_item(
+    page: &str,
+    path: &str,
+    expected: &PendingItemPage,
+) -> Result<(), Error> {
+    if diagnostic_page_shape(page).is_some()
+        || !pending_item_identity(path)
+            .is_some_and(|(order, item)| order == expected.order && item == expected.item)
+    {
+        return Err(provider_error(ErrorKind::InvalidResponse));
+    }
+    let html = Html::parse_document(page);
+    let states = page_state_blocks(&html)?;
+    let [state] = states.as_slice() else {
+        return Err(provider_error(ErrorKind::InvalidResponse));
+    };
+    let state: PageState =
+        serde_json::from_str(state).map_err(|_| provider_error(ErrorKind::InvalidResponse))?;
+    let status: Vec<_> = html
+        .select(&selector("#primaryStatus, .pt-status-main-status")?)
+        .collect();
+    let milestones: Vec<_> = html
+        .select(&selector(".pt-status-milestone-label[aria-label]")?)
+        .filter_map(|node| node.value().attr("aria-label"))
+        .collect();
+    if state.order_id.as_deref() != Some(expected.order.as_str())
+        || state.item_id.as_deref() != Some(expected.item.as_str())
+        || state.shipment_id.is_some()
+        || state.package_id.is_some()
+        || state.package_index.is_some()
+        || state
+            .tracking_id
+            .as_deref()
+            .is_some_and(|v| !v.trim().is_empty())
+        || state
+            .carrier_code
+            .as_deref()
+            .is_some_and(|v| !v.trim().is_empty())
+        || !matches!(
+            state.short_status.as_deref(),
+            Some("ORDER_PLACED" | "ORDERED")
+        )
+        || state
+            .progress_tracker
+            .as_ref()
+            .and_then(|p| p.last_reached_milestone.as_deref())
+            != Some("ORDERED")
+        || !matches!(status.as_slice(), [only] if normalized_text(*only) == "Ordered")
+        || !milestones.contains(&"Ordered: Complete")
+        || !milestones.contains(&"Shipped: Incomplete")
+        || milestones.iter().any(|label| {
+            !matches!(
+                *label,
+                "Ordered: Complete"
+                    | "Shipped: Incomplete"
+                    | "Out for delivery: Incomplete"
+                    | "Delivered: Incomplete"
+            )
+        })
+        || !shipping_carrier_labels(&html)?.is_empty()
+        || html
+            .root_element()
+            .text()
+            .any(|text| text.contains("Tracking ID:"))
+    {
+        return Err(provider_error(ErrorKind::InvalidResponse));
+    }
+    Ok(())
 }
 
 pub(crate) fn tracking_failure_shape(page: &str) -> &'static str {
@@ -3135,6 +3238,116 @@ mod tests {
         assert_eq!(
             pages::tracking(&same, PATH, None).unwrap().carrier,
             Carrier::Usps
+        );
+    }
+
+    fn pending_item_page() -> &'static str {
+        r#"<h1 class="pt-status-main-status">Ordered</h1>
+        <div class="pt-status-milestone-label active current-label" aria-label="Ordered: Complete">Ordered</div>
+        <div class="pt-status-milestone-label" aria-label="Shipped: Incomplete">Shipped</div>
+        <script data-a-state='{"key":"page-state"}'>
+        {"orderId":"111-1234567-1234567","itemId":"ITEM_1","trackingId":"","shortStatus":"ORDER_PLACED","progressTracker":{"lastReachedMilestone":"ORDERED"}}
+        </script>"#
+    }
+
+    #[test]
+    fn pending_item_listing_keeps_item_identity_separate_from_parcels() {
+        const ITEM: &str = "/progress-tracker/package?orderId=111-1234567-1234567&itemId=ITEM_1";
+        let anchor = |path: &str| {
+            format!(
+                r#"<a class="item-card__link" href="{path}" aria-label="Example item, Order placed 1 October 2026, Arriving October 20 - October 25"></a>"#
+            )
+        };
+        let listing = pages::listing(&(anchor(ITEM) + &anchor(ITEM))).unwrap();
+        assert!(listing.parcels.is_empty());
+        assert_eq!(listing.pending_items.len(), 1);
+        assert_eq!(listing.pending_items[0].order, "111-1234567-1234567");
+        assert_eq!(listing.pending_items[0].item, "ITEM_1");
+        assert_eq!(listing.deferred, 0);
+
+        for path in [
+            ITEM.replace("&itemId=ITEM_1", ""),
+            ITEM.replace("orderId=111-1234567-1234567&", ""),
+            format!("{ITEM}&shipmentId=SHIP1"),
+            format!("{ITEM}&packageId=1"),
+            format!("{ITEM}&packageIndex=0"),
+            format!("{ITEM}&trackingId=9400111122223333444455"),
+            format!("{ITEM}&itemId=ITEM_2"),
+            ITEM.replace("ITEM_1", ""),
+        ] {
+            let listing = pages::listing(&anchor(&path)).unwrap();
+            assert!(
+                listing.pending_items.is_empty(),
+                "unexpected pending identity: {path}"
+            );
+            assert!(listing.parcels.is_empty());
+            assert_eq!(listing.deferred, 1);
+        }
+    }
+
+    #[test]
+    fn pending_item_requires_matched_identities_and_explicit_unshipped_evidence() {
+        const ITEM: &str = "/progress-tracker/package?orderId=111-1234567-1234567&itemId=ITEM_1";
+        let item = pages::listing(&format!(r#"<a class="item-card__link" href="{ITEM}"></a>"#))
+            .unwrap()
+            .pending_items
+            .remove(0);
+        let valid = pending_item_page();
+        assert!(pages::unshipped_item(valid, ITEM, &item).is_ok());
+        for page in [
+            valid.replace("111-1234567-1234567", "222-1234567-1234567"),
+            valid.replace("ITEM_1", "ITEM_2"),
+            valid.replace(r#""itemId":"ITEM_1","#, ""),
+            valid.replace(r#""orderId":"111-1234567-1234567","#, ""),
+            valid.replace(
+                r#""trackingId":"""#,
+                r#""trackingId":"9400111122223333444455""#,
+            ),
+            valid.replace(
+                r#""trackingId":"""#,
+                r#""trackingId":"","carrierCode":"USPS""#,
+            ),
+            valid.replace(
+                r#""itemId":"ITEM_1""#,
+                r#""itemId":"ITEM_1","shipmentId":"SHIP1""#,
+            ),
+            valid.replace(
+                r#""itemId":"ITEM_1""#,
+                r#""itemId":"ITEM_1","packageId":"1""#,
+            ),
+            valid.replace("ORDER_PLACED", "IN_TRANSIT"),
+            valid.replace(
+                r#""lastReachedMilestone":"ORDERED""#,
+                r#""lastReachedMilestone":"SHIPPED""#,
+            ),
+            valid.replace(">Ordered</h1>", ">Shipped</h1>"),
+            valid.replace("Shipped: Incomplete", "Shipped: Complete"),
+            valid.replace("<h1 class=\"pt-status-main-status\">Ordered</h1>", ""),
+            format!("{valid}<h1 id=\"primaryStatus\">Ordered</h1>"),
+            format!("{valid}<h3>Shipped with Unknown carrier</h3>"),
+            format!("{valid}<span>Tracking ID: 9400111122223333444455</span>"),
+            format!("{valid}{valid}"),
+            format!("{valid}<form name=signIn><input type=password></form>"),
+            format!("{valid}<input id=captchacharacters>"),
+        ] {
+            assert!(pages::unshipped_item(&page, ITEM, &item).is_err());
+        }
+        for path in [
+            ITEM.replace("ITEM_1", "ITEM_2"),
+            ITEM.replace("111-1234567-1234567", "222-1234567-1234567"),
+            format!("{ITEM}&shipmentId=SHIP1"),
+        ] {
+            assert!(pages::unshipped_item(valid, &path, &item).is_err());
+            assert!(!pages::same_parcel_identity(ITEM, &path));
+            assert!(!pages::same_parcel_identity(&path, ITEM));
+        }
+        assert!(pages::same_parcel_identity(
+            ITEM,
+            &format!("{ITEM}&ref=ignored")
+        ));
+        assert!(
+            pages::tracking(valid, ITEM, None).is_err(),
+            "existing-record retrieval still requires a parcel"
         );
     }
 }

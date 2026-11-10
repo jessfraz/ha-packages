@@ -7,7 +7,7 @@ const { chromium, expect } = await import(
 const origin = process.env.PACKAGES_TEST_URL;
 const owner = process.env.PACKAGES_TEST_OWNER;
 const secondAdmin = process.env.PACKAGES_TEST_SECOND_ADMIN_TOKEN;
-const browser = await chromium.launch();
+const browser = await chromium.launch({ executablePath: process.env.PACKAGES_CHROMIUM_EXECUTABLE });
 try {
   const context = await browser.newContext({
     viewport: { width: 1440, height: 1000 },
