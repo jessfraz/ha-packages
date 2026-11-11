@@ -72,6 +72,7 @@ export function installPickups(
     "pickup-cancel-dialog",
   ].map(find);
   const siteForm = find("pickup-site-form");
+  const siteDialog = find("pickup-site-dialog");
   const form = find("pickup-schedule-form");
   let access = false;
   let generation = 0;
@@ -84,6 +85,7 @@ export function installPickups(
   let addressReview = null;
   let confirmedAddress = null;
   let siteFormRevision = 0;
+  let siteDialogEpoch = 0;
   let pendingTracking = null;
   let reviewed = null;
   let reviewedCarriers = [];
@@ -450,6 +452,7 @@ export function installPickups(
   find("pickup-reload").addEventListener("click", load);
   function editSite(site = null, makeDefault = false) {
     if (!access || busy) return;
+    siteDialogEpoch++;
     editingSite = site;
     selectingDefault = makeDefault;
     confirmedAddress = null;
@@ -547,7 +550,12 @@ export function installPickups(
     event.preventDefault();
     if (busy || !access) return;
     const version = generation;
+    const epoch = capabilityEpoch;
+    const dialog = siteDialogEpoch;
     const revision = siteFormRevision;
+    const site = editingSite;
+    const makeDefault = selectingDefault || !sites.length || Boolean(site?.is_default) || field(siteForm, "make_default").checked;
+    const currentDialog = () => current(version) && epoch === capabilityEpoch && dialog === siteDialogEpoch && siteDialog.open;
     setBusy(true);
     const value = (name) => field(siteForm, name).value.trim();
     const location = {
@@ -574,7 +582,7 @@ export function installPickups(
     try {
       const address = addressKey(location.address);
       if (address !== confirmedAddress &&
-          (!editingSite || address !== addressKey(editingSite.details.address))) {
+          (!site || address !== addressKey(site.details.address))) {
         if (addressReview) {
           find("pickup-address-review-title").focus();
           return;
@@ -583,7 +591,7 @@ export function installPickups(
           method: "POST",
           body: JSON.stringify(location.address),
         });
-        if (!current(version)) return;
+        if (!currentDialog()) return;
         if (revision !== siteFormRevision) {
           find("pickup-site-error").textContent = "The form changed during verification. Review it and save again.";
           return;
@@ -596,21 +604,21 @@ export function installPickups(
         confirmedAddress = address;
       }
       await request(
-        `v1/pickups/locations${editingSite ? `/${editingSite.id}` : ""}`,
+        `v1/pickups/locations${site ? `/${site.id}` : ""}`,
         {
-          method: editingSite ? "PUT" : "POST",
-          headers: editingSite
-            ? { "If-Match": `"${editingSite.revision}"` }
+          method: site ? "PUT" : "POST",
+          headers: site
+            ? { "If-Match": `"${site.revision}"` }
             : {},
           body: JSON.stringify({
             location,
-            make_default: selectingDefault || !sites.length || Boolean(editingSite?.is_default) || field(siteForm, "make_default").checked,
+            make_default: makeDefault,
           }),
         },
       );
-      if (current(version)) {
+      if (currentDialog()) {
         setBusy(false);
-        find("pickup-site-dialog").close();
+        siteDialog.close();
         if (pendingTracking !== null) {
           const tracking = pendingTracking;
           pendingTracking = null;
@@ -619,9 +627,9 @@ export function installPickups(
         else await load();
       }
     } catch (error) {
-      showError(error, "pickup-site-error", version);
+      if (currentDialog()) showError(error, "pickup-site-error", version);
     } finally {
-      if (current(version)) {
+      if (currentDialog()) {
         setBusy(false);
         fillSites();
       }
@@ -630,6 +638,8 @@ export function installPickups(
   async function changeDefault(site) {
     if (!access || busy || site.is_default) return;
     const version = generation;
+    const epoch = capabilityEpoch;
+    const currentChange = () => current(version) && epoch === capabilityEpoch;
     setBusy(true);
     find("pickup-error").textContent = "";
     try {
@@ -638,16 +648,16 @@ export function installPickups(
         headers: { "If-Match": `"${site.revision}"` },
         body: JSON.stringify({ location: site.details, make_default: true }),
       });
-      if (!current(version)) return;
+      if (!currentChange()) return;
       await load();
-      if (current(version)) {
+      if (currentChange()) {
         find("pickup-message").textContent = `${site.details.name} is the default pickup address.`;
         find("pickup-settings").querySelector("summary").focus();
       }
     } catch (error) {
-      showError(error, "pickup-error", version);
+      if (currentChange()) showError(error, "pickup-error", version);
     } finally {
-      if (current(version)) setBusy(false);
+      if (currentChange()) setBusy(false);
     }
   }
   function editPlan() {

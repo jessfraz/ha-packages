@@ -247,6 +247,7 @@ try {
   // First-run setup uses the installation timezone even in a remote browser.
   const setupContext = await browser.newContext({ timezoneId: "UTC" });
   const setupPage = await setupContext.newPage();
+  await setupPage.clock.install();
   setupPage.setDefaultTimeout(8000);
   setupPage.on("pageerror", (error) => errors.push(error.message));
   await setupPage.route("**/v1/system", async (route) => {
@@ -321,6 +322,40 @@ try {
   await setupPage.locator('#pickup-schedule-form select[name="site_id"]').selectOption(await home.getAttribute("value"));
   await expect(setupPage.locator('#pickup-schedule-form select[name="site_id"] option:checked')).toContainText("Home");
   await setupPage.locator("#pickup-schedule-close").click();
+
+  // A provider response from the previous address dialog cannot save over the new one.
+  await setupPage.unroute("**/v1/pickups/verify-address");
+  let startVerification;
+  const verificationStarted = new Promise((resolve) => { startVerification = resolve; });
+  let releaseVerification;
+  const heldVerification = new Promise((resolve) => { releaseVerification = resolve; });
+  await setupPage.route("**/v1/pickups/verify-address", async (route) => {
+    startVerification();
+    await heldVerification;
+    await route.fulfill({ json: { status: "verified", normalized: null } });
+  });
+  await setupPage.getByRole("button", { name: "Edit pickup address: Home", exact: true }).click();
+  await setupPage.getByLabel("Street address", { exact: true }).fill("99 Old Example Road");
+  await setupPage.getByRole("button", { name: "Save address", exact: true }).click();
+  await verificationStarted;
+  await setupPage.route("**/v1/pickups/carriers", async (route) => {
+    const response = await route.fetch();
+    const carriers = await response.json();
+    await route.fulfill({ response, json: carriers.map((carrier) => carrier.configured
+      ? { ...carrier, configuration_id: "00000000-0000-4000-8000-000000000001" } : carrier) });
+  });
+  await setupPage.clock.fastForward(31_000);
+  await expect(setupPage.locator("#pickup-site-dialog")).toBeHidden();
+  await setupPage.getByRole("button", { name: "Edit pickup address: Office", exact: true }).click();
+  const response = setupPage.waitForResponse("**/v1/pickups/verify-address");
+  releaseVerification();
+  await response;
+  await expect(setupPage.getByLabel("Street address", { exact: true })).toHaveValue("42 EXAMPLE AVE");
+  await setupPage.getByLabel("Address label", { exact: false }).fill("Example Office");
+  await setupPage.getByRole("button", { name: "Save address", exact: true }).click();
+  await expect(setupPage.locator("#pickup-addresses")).toContainText("Example Office");
+  await expect(setupPage.locator("#pickup-addresses")).not.toContainText("99 Old Example Road");
+  await setupPage.unroute("**/v1/pickups/carriers");
   await setupPage.getByRole("button", { name: "Outbound", exact: true }).click();
 
   // Losing optional carrier credentials removes every scheduling entry point.
