@@ -1,3 +1,7 @@
+## 0.8.4
+
+- Match the sidebar icon in Settings Apps and Marketplace.
+
 ## 0.8.3
 
 - Fix app and integration version mismatches from Home Assistant Repairs.

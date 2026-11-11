@@ -5,13 +5,36 @@ import argparse
 import json
 import subprocess
 import sys
+import tempfile
 import zipfile
 from pathlib import Path
+
+
+def check_brand(producer: Path, app: Path, integration: Path, root: Path) -> None:
+    subprocess.run(
+        [
+            sys.executable,
+            str(producer.with_name("brand.py")),
+            "--check",
+            "--app",
+            str(app),
+            "--integration",
+            str(integration),
+        ],
+        cwd=root,
+        check=True,
+    )
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, help="Write the integration ZIP here")
+    parser.add_argument(
+        "--check-brand",
+        type=Path,
+        metavar="APP",
+        help="Check the native icons for this App",
+    )
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[1]
     (manifest,) = (root / "custom_components").glob("*/manifest.json")
@@ -26,6 +49,9 @@ def main() -> None:
     if kit["source"] != ui["source"]:
         raise SystemExit("HA App Kit crates must share one locked source")
     producer = Path(kit["manifest_path"]).parent / "bundle.py"
+    app = args.check_brand
+    if app is not None:
+        check_brand(producer, app, integration, root)
     receipt = json.loads(
         subprocess.check_output(
             [sys.executable, str(producer), "--integration", str(integration)], cwd=root
@@ -51,12 +77,22 @@ def main() -> None:
     ):
         raise SystemExit("Invalid integration archive contents")
     args.output.mkdir(parents=True, exist_ok=True)
-    with zipfile.ZipFile(args.output / f"{integration.name}.zip", "w") as archive:
-        for name, path in sorted(entries):
-            info = zipfile.ZipInfo(name, date_time=(2020, 1, 1, 0, 0, 0))
-            info.external_attr = 0o100644 << 16
-            info.compress_type = zipfile.ZIP_DEFLATED
-            archive.writestr(info, path.read_bytes())
+    filename = f"{integration.name}.zip"
+    with tempfile.TemporaryDirectory(dir=args.output) as temp:
+        staging = Path(temp)
+        zip_path = staging / filename
+        with zipfile.ZipFile(zip_path, "w") as archive:
+            for name, path in sorted(entries):
+                info = zipfile.ZipInfo(name, date_time=(2020, 1, 1, 0, 0, 0))
+                info.external_attr = 0o100644 << 16
+                info.compress_type = zipfile.ZIP_DEFLATED
+                archive.writestr(info, path.read_bytes())
+        if app is not None:
+            extracted = staging / "installed"
+            with zipfile.ZipFile(zip_path) as archive:
+                archive.extractall(extracted)
+            check_brand(producer, app, extracted, root)
+        zip_path.replace(args.output / filename)
 
 
 if __name__ == "__main__":
