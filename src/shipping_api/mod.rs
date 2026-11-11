@@ -1,6 +1,7 @@
 //! Tracking backends. The worker owns persistence; implementations own wire
 //! formats, credentials, pacing and safe registration recovery.
 
+pub mod address;
 pub mod aftership;
 pub mod doordash;
 pub mod easypost;
@@ -9,6 +10,8 @@ pub mod types;
 
 use std::sync::Arc;
 
+use crate::pickup::models::Address;
+use crate::shipping_api::address::AddressVerificationFuture;
 use crate::shipping_api::types::{ApiFuture, ProviderId, Registration, Tracker};
 
 /// Keeps a provider account identity stable through the worker's short commit.
@@ -35,6 +38,14 @@ pub trait ShippingApi: Send + Sync {
     /// Scope correlation fields while retaining the same shared pacing state.
     fn for_request(&self, request_id: &str, shipment_id: Option<&str>) -> Arc<dyn ShippingApi>;
     fn check_connection(&self) -> ApiFuture<'_, ()>;
+
+    /// Optional postal verification for an explicitly entered pickup address.
+    fn verify_pickup_address<'a>(
+        &'a self,
+        _address: &'a Address,
+    ) -> Option<AddressVerificationFuture<'a>> {
+        None
+    }
 
     /// Read-only carrier discovery for an otherwise unrecognized number.
     /// None means this adapter found no supported match. Unavailable or

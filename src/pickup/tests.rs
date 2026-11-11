@@ -125,7 +125,7 @@ pub(crate) fn site_input() -> SiteInput {
             street: "123 Example Street".into(),
             secondary: None,
             city: "Example City".into(),
-            state: "CA".into(),
+            state: PostalState::CA,
             postal_code: "90210".into(),
             country: "US".into(),
         },

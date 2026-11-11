@@ -1,4 +1,4 @@
-function civilDay(instant, timeZone) {
+export function civilDay(instant, timeZone) {
   const formatter = new Intl.DateTimeFormat("en-CA", {
     year: "numeric", month: "2-digit", day: "2-digit", ...(timeZone ? { timeZone } : {}),
   });

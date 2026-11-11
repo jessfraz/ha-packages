@@ -194,7 +194,7 @@ fn address(plan: &ResolvedPlan) -> Address<'_> {
     Address {
         street_lines: lines,
         city: &a.city,
-        state_or_province_code: &a.state,
+        state_or_province_code: a.state.as_str(),
         postal_code: &a.postal_code,
         country_code: &a.country,
         residential: plan.site.details.residential,

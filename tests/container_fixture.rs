@@ -101,7 +101,7 @@ async fn export_container_fixture() {
                     street: "123 Example Street".into(),
                     secondary: None,
                     city: "Example City".into(),
-                    state: "CA".into(),
+                    state: packages::pickup::models::PostalState::CA,
                     postal_code: "90210".into(),
                     country: "US".into(),
                 },

@@ -11,8 +11,10 @@ use uuid::Uuid;
 use crate::{
     carrier::Carrier,
     models::{CarrierEvent, CarrierTracking, ProviderValue, Status, provider_optional},
+    pickup::models::Address,
     shipping_api::{
         PreparedRegistration, ShippingApi,
+        address::{AddressVerification, AddressVerificationFuture, postal_state},
         error::{Error as SyncError, ErrorKind, Rejection},
         types::{ApiFuture, ProviderId, Registration, Tracker},
     },
@@ -79,6 +81,98 @@ struct TrackerError {
 #[derive(Deserialize)]
 struct TrackerErrorCode {
     code: TrackerRejection,
+}
+
+#[derive(Serialize)]
+struct VerifyAddressRequest<'a> {
+    address: PostalAddressRequest<'a>,
+    verify: bool,
+}
+
+#[derive(Serialize)]
+struct PostalAddressRequest<'a> {
+    street1: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    street2: Option<&'a str>,
+    city: &'a str,
+    state: &'a str,
+    zip: &'a str,
+    country: &'a str,
+}
+
+#[derive(Deserialize)]
+struct VerifiedAddressResponse {
+    #[serde(rename = "object")]
+    _object: AddressObject,
+    street1: Option<String>,
+    street2: Option<String>,
+    city: Option<String>,
+    state: Option<String>,
+    zip: Option<String>,
+    country: Option<String>,
+    verifications: Verifications,
+}
+
+#[derive(Deserialize)]
+enum AddressObject {
+    Address,
+}
+
+#[derive(Deserialize)]
+struct Verifications {
+    delivery: DeliveryVerification,
+}
+
+#[derive(Deserialize)]
+struct DeliveryVerification {
+    success: bool,
+    #[serde(default)]
+    errors: Vec<DeliveryError>,
+}
+
+#[derive(Deserialize)]
+struct DeliveryError {
+    code: AddressErrorCode,
+}
+
+#[derive(Deserialize)]
+enum AddressErrorCode {
+    #[serde(rename = "E.ADDRESS.NOT_FOUND")]
+    NotFound,
+    #[serde(rename = "E.ADDRESS.DELIVERY.INVALID")]
+    InvalidDelivery,
+    #[serde(other)]
+    Other,
+}
+
+impl VerifiedAddressResponse {
+    fn verification(self, original: &Address) -> Option<AddressVerification> {
+        let delivery = self.verifications.delivery;
+        if !delivery.success {
+            let no_match = !delivery.errors.is_empty()
+                && delivery.errors.iter().all(|error| {
+                    matches!(
+                        error.code,
+                        AddressErrorCode::NotFound | AddressErrorCode::InvalidDelivery
+                    )
+                });
+            return Some(if no_match {
+                AddressVerification::NoMatch
+            } else {
+                AddressVerification::Unavailable
+            });
+        }
+        let candidate = Address {
+            street: self.street1?,
+            secondary: self.street2.filter(|value| !value.trim().is_empty()),
+            city: self.city?,
+            state: postal_state(self.state.as_deref()?)?,
+            postal_code: self.zip?,
+            country: self.country?,
+        };
+        candidate.validate().ok()?;
+        Some(AddressVerification::verified(original, candidate))
+    }
 }
 
 #[derive(Clone)]
@@ -798,6 +892,46 @@ fn shift_calendar_months(timestamp: i64, months: i32) -> Result<i64, SyncError> 
 }
 
 impl ShippingApi for EasyPostClient {
+    fn verify_pickup_address<'a>(
+        &'a self,
+        address: &'a Address,
+    ) -> Option<AddressVerificationFuture<'a>> {
+        Some(Box::pin(async move {
+            if address.validate().is_err() {
+                return AddressVerification::Unavailable;
+            }
+            self.observe("verify_pickup_address", async {
+                let url = self
+                    .base
+                    .join("addresses")
+                    .map_err(|_| provider_error(ErrorKind::Configuration))?;
+                let request = self
+                    .client
+                    .post(url)
+                    .basic_auth(&self.api_key, Some(""))
+                    .json(&VerifyAddressRequest {
+                        address: PostalAddressRequest {
+                            street1: &address.street,
+                            street2: address.secondary.as_deref(),
+                            city: &address.city,
+                            state: address.state.as_str(),
+                            zip: &address.postal_code,
+                            country: &address.country,
+                        },
+                        verify: true,
+                    });
+                let body = self.send(request).await?;
+                let response: VerifiedAddressResponse = serde_json::from_slice(&body)
+                    .map_err(|_| provider_error(ErrorKind::InvalidResponse))?;
+                response
+                    .verification(address)
+                    .ok_or_else(|| provider_error(ErrorKind::InvalidResponse))
+            })
+            .await
+            .unwrap_or(AddressVerification::Unavailable)
+        }))
+    }
+
     fn detect_carrier<'a>(
         &'a self,
         _tracking: &'a crate::models::InputTracking,

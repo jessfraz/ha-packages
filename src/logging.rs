@@ -490,6 +490,7 @@ fn route_template(uri: &str) -> &'static str {
         "/v1/pickups" => "/v1/pickups",
         "/v1/pickups/status" => "/v1/pickups/status",
         "/v1/pickups/carriers" => "/v1/pickups/carriers",
+        "/v1/pickups/verify-address" => "/v1/pickups/verify-address",
         "/v1/pickups/locations" => "/v1/pickups/locations",
         "/v1/pickups/resolve" => "/v1/pickups/resolve",
         "/v1/pickups/availability" => "/v1/pickups/availability",

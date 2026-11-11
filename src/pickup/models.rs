@@ -175,13 +175,54 @@ impl PickupService {
     }
 }
 
+macro_rules! postal_states {
+    ($($code:ident => $name:literal),+ $(,)?) => {
+        #[derive(Clone, Copy, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+        #[serde(rename_all = "UPPERCASE")]
+        pub enum PostalState { $($code),+ }
+
+        impl PostalState {
+            pub const ALL: &'static [Self] = &[$(Self::$code),+];
+
+            pub const fn as_str(self) -> &'static str {
+                match self { $(Self::$code => stringify!($code)),+ }
+            }
+
+            pub const fn name(self) -> &'static str {
+                match self { $(Self::$code => $name),+ }
+            }
+        }
+    };
+}
+
+// USPS Publication 28, Appendix B. The same codes drive JSON and the form.
+postal_states! {
+    AL => "Alabama", AK => "Alaska", AZ => "Arizona", AR => "Arkansas",
+    CA => "California", CO => "Colorado", CT => "Connecticut", DE => "Delaware",
+    DC => "District of Columbia", FL => "Florida", GA => "Georgia", HI => "Hawaii",
+    ID => "Idaho", IL => "Illinois", IN => "Indiana", IA => "Iowa", KS => "Kansas",
+    KY => "Kentucky", LA => "Louisiana", ME => "Maine", MD => "Maryland",
+    MA => "Massachusetts", MI => "Michigan", MN => "Minnesota", MS => "Mississippi",
+    MO => "Missouri", MT => "Montana", NE => "Nebraska", NV => "Nevada",
+    NH => "New Hampshire", NJ => "New Jersey", NM => "New Mexico", NY => "New York",
+    NC => "North Carolina", ND => "North Dakota", OH => "Ohio", OK => "Oklahoma",
+    OR => "Oregon", PA => "Pennsylvania", RI => "Rhode Island", SC => "South Carolina",
+    SD => "South Dakota", TN => "Tennessee", TX => "Texas", UT => "Utah",
+    VT => "Vermont", VA => "Virginia", WA => "Washington", WV => "West Virginia",
+    WI => "Wisconsin", WY => "Wyoming",
+    AS => "American Samoa", FM => "Federated States of Micronesia", GU => "Guam",
+    MH => "Marshall Islands", MP => "Northern Mariana Islands", PW => "Palau",
+    PR => "Puerto Rico", VI => "U.S. Virgin Islands",
+    AA => "Armed Forces Americas", AE => "Armed Forces Europe", AP => "Armed Forces Pacific",
+}
+
 #[derive(Clone, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct Address {
     pub street: String,
     pub secondary: Option<String>,
     pub city: String,
-    pub state: String,
+    pub state: PostalState,
     pub postal_code: String,
     pub country: String,
 }
@@ -240,8 +281,6 @@ impl SiteInput {
             (&self.name, 80),
             (&self.contact_name, 70),
             (&self.phone, 30),
-            (&self.address.street, 70),
-            (&self.address.city, 50),
             (&self.pickup_point, 40),
         ] {
             text(value, max)?;
@@ -249,20 +288,13 @@ impl SiteInput {
         for (value, max) in [
             (&self.company, 70),
             (&self.email, 200),
-            (&self.address.secondary, 50),
             (&self.instructions, 255),
         ] {
             if let Some(value) = value {
                 text(value, max)?;
             }
         }
-        if self.address.country != "US"
-            || self.address.state.len() != 2
-            || !self.address.state.bytes().all(|c| c.is_ascii_uppercase())
-            || !valid_zip(&self.address.postal_code)
-        {
-            return Err(invalid());
-        }
+        self.address.validate()?;
         if self.phone.bytes().filter(u8::is_ascii_digit).count() < 10 {
             return Err(invalid());
         }
@@ -273,6 +305,20 @@ impl SiteInput {
             return Err(invalid());
         }
         validate_window(&self.ready_time, &self.close_time)
+    }
+}
+
+impl Address {
+    pub fn validate(&self) -> Result<()> {
+        text(&self.street, 70)?;
+        text(&self.city, 50)?;
+        if let Some(secondary) = &self.secondary {
+            text(secondary, 50)?;
+        }
+        if self.country != "US" || !valid_zip(&self.postal_code) {
+            return Err(invalid());
+        }
+        Ok(())
     }
 }
 

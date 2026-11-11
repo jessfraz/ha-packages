@@ -17,6 +17,8 @@ use packages::{
         CreateShipment, Direction, InputTracking, Patch, RegistrationState, Shipment, Status,
         UpdateShipment,
     },
+    pickup::models::{Address, PostalState},
+    shipping_api::{ShippingApi, address::AddressVerification},
     store::Store,
     sync::SyncWorker,
 };
@@ -260,6 +262,95 @@ fn read_request(mut stream: TcpStream) -> Option<(TcpStream, String, String, Vec
 }
 fn spawn(worker: SyncWorker) -> tokio::task::JoinHandle<Result<bool, packages::error::Error>> {
     tokio::spawn(async move { worker.tick().await })
+}
+
+#[tokio::test]
+async fn easypost_pickup_address_verification_is_one_post_with_postal_fields_only() {
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct PostalRequest {
+        street1: String,
+        street2: String,
+        city: String,
+        state: String,
+        zip: String,
+        country: String,
+    }
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Request {
+        address: PostalRequest,
+        verify: bool,
+    }
+
+    for (status, body, expected) in [
+        (
+            200,
+            r#"{"object":"Address","street1":"12 EXAMPLE ST","street2":"UNIT 3","city":"SAMPLE","state":"CA","zip":"90001-1234","country":"US","verifications":{"delivery":{"success":true,"errors":[]}}}"#,
+            AddressVerification::Verified {
+                normalized: Some(Address {
+                    street: "12 EXAMPLE ST".into(),
+                    secondary: Some("UNIT 3".into()),
+                    city: "SAMPLE".into(),
+                    state: PostalState::CA,
+                    postal_code: "90001-1234".into(),
+                    country: "US".into(),
+                }),
+            },
+        ),
+        (
+            200,
+            r#"{"object":"Address","verifications":{"delivery":{"success":false,"errors":[{"code":"E.ADDRESS.NOT_FOUND"}]}}}"#,
+            AddressVerification::NoMatch,
+        ),
+        (
+            200,
+            r#"{"object":"Address","verifications":{"delivery":{"success":false,"errors":[{"code":"E.ENGINE.UNAVAILABLE"}]}}}"#,
+            AddressVerification::Unavailable,
+        ),
+        (
+            200,
+            r#"{"object":"Address","verifications":{"delivery":{"success":false,"errors":[{"code":"E.ADDRESS.NOT_FOUND"},{"code":"E.ENGINE.UNAVAILABLE"}]}}}"#,
+            AddressVerification::Unavailable,
+        ),
+        (
+            200,
+            r#"{"object":"Address","verifications":{"zip4":{"success":true}}}"#,
+            AddressVerification::Unavailable,
+        ),
+        (
+            402,
+            r#"{"error":{"code":"PAYMENT_REQUIRED","message":"synthetic provider detail"}}"#,
+            AddressVerification::Unavailable,
+        ),
+    ] {
+        let mut provider = Provider::new();
+        let client = EasyPostClient::for_loopback("fixture-key", &provider.base).unwrap();
+        let address = Address {
+            street: "12 Example Street".into(),
+            secondary: Some("Unit 3".into()),
+            city: "Sample".into(),
+            state: PostalState::CA,
+            postal_code: "90001".into(),
+            country: "US".into(),
+        };
+        let verification =
+            tokio::spawn(async move { client.verify_pickup_address(&address).unwrap().await });
+        let request = provider.request().await;
+        assert_eq!(request.method, "POST");
+        assert_eq!(request.target, "/v2/addresses");
+        let wire: Request = serde_json::from_slice(&request.body).unwrap();
+        assert!(wire.verify);
+        assert_eq!(wire.address.street1, "12 Example Street");
+        assert_eq!(wire.address.street2, "Unit 3");
+        assert_eq!(wire.address.city, "Sample");
+        assert_eq!(wire.address.state, "CA");
+        assert_eq!(wire.address.zip, "90001");
+        assert_eq!(wire.address.country, "US");
+        request.respond(status, body.into());
+        assert!(verification.await.unwrap() == expected);
+        provider.no_request();
+    }
 }
 
 #[tokio::test]

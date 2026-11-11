@@ -1,5 +1,7 @@
 // Physical operations have their own explicit review and durable receipts.
 // No tracking-agent credential is sufficient to open this admin-only view.
+import { calendarDate, civilDay } from "./dates.js";
+
 const carrierNames = { usps: "USPS", ups: "UPS", fedex: "FedEx" };
 const states = {
   pending: "Checking eligibility",
@@ -20,10 +22,15 @@ function node(tag, text, className) {
   return element;
 }
 function addressText(site) {
-  const a = site.details.address;
+  return postalText(site.details.address);
+}
+function postalText(a) {
   return [a.street, a.secondary, `${a.city}, ${a.state} ${a.postal_code}`]
     .filter(Boolean)
     .join(", ");
+}
+function addressKey(a) {
+  return JSON.stringify([a.street, a.secondary || null, a.city, a.state, a.postal_code, a.country]);
 }
 function windowText(plan) {
   return plan.carrier === "usps"
@@ -64,8 +71,14 @@ export function installPickups(
   let access = false;
   let generation = 0;
   let sites = [];
+  let addressSettingsKey = "";
   let carriers = [];
   let editingSite = null;
+  let selectingDefault = false;
+  let dateEdited = false;
+  let addressReview = null;
+  let confirmedAddress = null;
+  let siteFormRevision = 0;
   let pendingTracking = null;
   let reviewed = null;
   let reviewedCarriers = [];
@@ -120,6 +133,8 @@ export function installPickups(
     for (const dialog of dialogs)
       for (const button of dialog.querySelectorAll("button"))
         button.disabled = value;
+    for (const dialog of dialogs)
+      if (dialog.open) dialog.setAttribute("aria-busy", String(value));
     const configured = carriers.some((carrier) => carrier.configured);
     const ready = configured && sites.some((site) => site.is_default);
     find("pickup-plan-fields").disabled = value || reviewed !== null || !ready;
@@ -136,10 +151,9 @@ export function installPickups(
     const selected = select.value;
     select.replaceChildren(
       ...sites.map((site) => {
-        const option = node(
-          "option",
-          `${site.details.name}${site.is_default ? " (default)" : ""} · ${site.details.address.street}`,
-        );
+        const { name, address } = site.details;
+        const description = name === address.street ? name : `${name} · ${address.street}`;
+        const option = node("option", `${description}${site.is_default ? " (default)" : ""}`);
         option.value = site.id;
         option.selected = sites.some((s) => s.id === selected)
           ? site.id === selected
@@ -149,17 +163,52 @@ export function installPickups(
     );
     const site = sites.find((s) => s.is_default);
     find("pickup-site-summary").textContent = site
-      ? `${site.details.name} · ${addressText(site)} · ${site.details.timezone}`
-      : "Set a default pickup address to get started.";
-    find("pickup-edit-site").textContent = site
-      ? "Edit pickup address"
-      : "Add pickup address";
-    find("pickup-edit-site").classList.toggle("quiet", Boolean(site));
+      ? `Default: ${addressText(site)}`
+      : "Save a pickup address once. It will be selected for future pickups.";
+    find("pickup-setup-site").hidden = Boolean(site);
+    find("pickup-settings").hidden = !sites.length;
+    const key = sites.map((site) => `${site.id}:${site.revision}`).join(";");
+    if (key !== addressSettingsKey) {
+      addressSettingsKey = key;
+      find("pickup-addresses").replaceChildren(...sites.map(siteRow));
+    }
+  }
+  function defaultDate() {
+    if (dateEdited) return;
+    const site = sites.find((site) => site.id === field(form, "site_id").value);
+    if (site) field(form, "date").value = civilDay(new Date(), site.details.timezone);
+  }
+  field(form, "site_id").addEventListener("change", defaultDate);
+  field(form, "date").addEventListener("input", () => { dateEdited = true; });
+  function siteRow(site) {
+    const row = node("div", undefined, "pickup-address-row");
+    const details = node("div");
+    details.append(node("strong", site.details.name));
+    if (site.is_default) details.append(node("span", "Default", "pickup-carrier-badge"));
+    details.append(node("p", addressText(site), "muted"));
+    const actions = node("div", undefined, "actions");
+    const edit = node("button", "Edit", "quiet");
+    edit.type = "button";
+    edit.setAttribute("aria-label", `Edit pickup address: ${site.details.name}`);
+    edit.addEventListener("click", () => editSite(site));
+    actions.append(edit);
+    if (!site.is_default) {
+      const makeDefault = node("button", "Make default", "quiet");
+      makeDefault.type = "button";
+      makeDefault.setAttribute("aria-label", `Make ${site.details.name} the default pickup address`);
+      makeDefault.addEventListener("click", () => changeDefault(site));
+      actions.append(makeDefault);
+    }
+    row.append(details, actions);
+    return row;
   }
   function fillCarriers() {
     const carrierSelect = field(form, "carrier");
     const selectedCarrier = carrierSelect.value;
     const enabled = carriers.filter((carrier) => carrier.configured === true);
+    find("pickup-carrier-badges").replaceChildren(...enabled.map((carrier) =>
+      node("li", carrierNames[carrier.carrier], "pickup-carrier-badge"),
+    ));
     carrierSelect.replaceChildren(node("option", "Detect from tracking"));
     carrierSelect.firstElementChild.value = "";
     for (const carrier of enabled) {
@@ -394,9 +443,21 @@ export function installPickups(
   }
   opener.addEventListener("click", () => open([]));
   find("pickup-reload").addEventListener("click", load);
-  function editSite() {
-    editingSite = sites.find((s) => s.is_default) || null;
+  function editSite(site = null, makeDefault = false) {
+    if (!access || busy) return;
+    editingSite = site;
+    selectingDefault = makeDefault;
+    confirmedAddress = null;
+    clearAddressReview();
+    const first = !sites.length;
     siteForm.reset();
+    find("pickup-site-title").textContent = first || makeDefault ? "Set up pickup address" : site ? "Edit pickup address" : "Add pickup address";
+    find("pickup-site-intro").textContent = first
+      ? "Save your usual pickup address once. You can change it or add another in Pickup settings."
+      : "Carriers collect here when you choose this address for a pickup.";
+    find("pickup-site-label").hidden = first;
+    find("pickup-site-default").hidden = first || makeDefault || Boolean(site?.is_default);
+    find("pickup-site-save").textContent = first || makeDefault ? "Save default address" : "Save address";
     const value = editingSite?.details;
     if (value)
       for (const name of [
@@ -432,22 +493,60 @@ export function installPickups(
     find("pickup-site-error").textContent = "";
     find("pickup-site-dialog").showModal();
   }
-  find("pickup-edit-site").addEventListener("click", () => {
+  find("pickup-setup-site").addEventListener("click", () => {
     pendingTracking = null;
-    editSite();
+    editSite(sites[0] ?? null, true);
   });
+  find("pickup-add-site").addEventListener("click", () => editSite());
   find("pickup-site-close").addEventListener("click", () => {
     pendingTracking = null;
     find("pickup-site-dialog").close();
+  });
+  function clearAddressReview() {
+    addressReview = null;
+    find("pickup-address-review").hidden = true;
+    find("pickup-address-review-message").textContent = "";
+  }
+  function showAddressReview(entered, result) {
+    const suggested = result.status === "verified" ? result.normalized : result.suggestions?.[0];
+    addressReview = { entered, suggested };
+    find("pickup-address-review-message").textContent = suggested
+      ? `Suggested: ${postalText(suggested)}`
+      : result.status === "no_match"
+        ? "The address verifier couldn’t find a match. Check it or keep the address you entered."
+        : "Address verification wasn’t available. Check it or keep the address you entered.";
+    find("pickup-use-suggested-address").hidden = !suggested;
+    find("pickup-address-review").hidden = false;
+    find("pickup-address-review-title").focus();
+  }
+  function confirmAddress(useSuggestion) {
+    if (!addressReview || busy) return;
+    const selected = useSuggestion ? addressReview.suggested : addressReview.entered;
+    if (!selected) return;
+    for (const name of ["street", "secondary", "city", "state", "postal_code"])
+      field(siteForm, name).value = selected[name] ?? "";
+    confirmedAddress = addressKey(selected);
+    clearAddressReview();
+    siteForm.requestSubmit();
+  }
+  find("pickup-use-suggested-address").addEventListener("click", () => confirmAddress(true));
+  find("pickup-keep-entered-address").addEventListener("click", () => confirmAddress(false));
+  siteForm.addEventListener("input", (event) => {
+    siteFormRevision++;
+    if (["street", "secondary", "city", "state", "postal_code"].includes(event.target.name)) {
+      confirmedAddress = null;
+      clearAddressReview();
+    }
   });
   siteForm.addEventListener("submit", async (event) => {
     event.preventDefault();
     if (busy || !access) return;
     const version = generation;
+    const revision = siteFormRevision;
     setBusy(true);
     const value = (name) => field(siteForm, name).value.trim();
     const location = {
-      name: value("name"),
+      name: value("name") || (!sites.length ? "Home" : value("street")),
       contact_name: value("contact_name"),
       company: null,
       phone: value("phone"),
@@ -468,6 +567,29 @@ export function installPickups(
       residential: field(siteForm, "residential").checked,
     };
     try {
+      const address = addressKey(location.address);
+      if (address !== confirmedAddress &&
+          (!editingSite || address !== addressKey(editingSite.details.address))) {
+        if (addressReview) {
+          find("pickup-address-review-title").focus();
+          return;
+        }
+        const result = await request("v1/pickups/verify-address", {
+          method: "POST",
+          body: JSON.stringify(location.address),
+        });
+        if (!current(version)) return;
+        if (revision !== siteFormRevision) {
+          find("pickup-site-error").textContent = "The form changed during verification. Review it and save again.";
+          return;
+        }
+        if (result && (result.status !== "verified" || result.normalized &&
+            addressKey(result.normalized) !== address)) {
+          showAddressReview(location.address, result);
+          return;
+        }
+        confirmedAddress = address;
+      }
       await request(
         `v1/pickups/locations${editingSite ? `/${editingSite.id}` : ""}`,
         {
@@ -475,7 +597,10 @@ export function installPickups(
           headers: editingSite
             ? { "If-Match": `"${editingSite.revision}"` }
             : {},
-          body: JSON.stringify({ location, make_default: true }),
+          body: JSON.stringify({
+            location,
+            make_default: selectingDefault || !sites.length || Boolean(editingSite?.is_default) || field(siteForm, "make_default").checked,
+          }),
         },
       );
       if (current(version)) {
@@ -497,6 +622,29 @@ export function installPickups(
       }
     }
   });
+  async function changeDefault(site) {
+    if (!access || busy || site.is_default) return;
+    const version = generation;
+    setBusy(true);
+    find("pickup-error").textContent = "";
+    try {
+      await request(`v1/pickups/locations/${site.id}`, {
+        method: "PUT",
+        headers: { "If-Match": `"${site.revision}"` },
+        body: JSON.stringify({ location: site.details, make_default: true }),
+      });
+      if (!current(version)) return;
+      await load();
+      if (current(version)) {
+        find("pickup-message").textContent = `${site.details.name} is the default pickup address.`;
+        find("pickup-settings").querySelector("summary").focus();
+      }
+    } catch (error) {
+      showError(error, "pickup-error", version);
+    } finally {
+      if (current(version)) setBusy(false);
+    }
+  }
   function editPlan() {
     reviewed = null;
     reviewedCarriers = [];
@@ -510,6 +658,7 @@ export function installPickups(
     find("pickup-review-details").replaceChildren();
     find("pickup-review-edit").hidden = true;
     find("pickup-review-button").textContent = "Review pickup";
+    find("pickup-configuration").hidden = false;
     field(form, "accept_fee").checked = false;
     setBusy(busy);
   }
@@ -585,37 +734,21 @@ export function installPickups(
           const p = preview.plan;
           const site = p.site.details;
           const count = p.parcels.reduce((n, piece) => n + piece.count, 0);
-          details.append(
-            node("h4", `${carrierNames[p.carrier]} · ${preview.offer.date}`),
-            node(
-              "p",
-              `Scheduling requests a ${carrierNames[p.carrier]} driver to collect ${count} prepaid parcel${count === 1 ? "" : "s"} at the address below.`,
-            ),
-            node("p", `${site.name} · ${addressText(p.site)}`),
-            node(
-              "p",
-              `${site.contact_name} · ${site.phone}${site.email ? ` · ${site.email}` : ""}`,
-            ),
-            node(
-              "p",
-              p.carrier === "usps"
-                ? "Have parcels ready before normal mail delivery. A pickup time cannot be selected."
-                : `${preview.offer.ready_time}–${preview.offer.close_time} · ${site.timezone}`,
-            ),
-            node(
-              "p",
-              `Collection point: ${site.pickup_point.replaceAll("_", " ").toLowerCase()}${site.residential ? " · residential" : " · commercial"}`,
-            ),
-          );
-          if (site.instructions) details.append(node("p", site.instructions));
-          details.append(
-            node("p", p.tracking.join(" · ")),
-            node(
-              "p",
-              `${p.parcels.map((piece) => `${piece.count} × ${serviceLabel(piece.service)}`).join(", ")} · ${(p.total_weight_hundredths / 100).toFixed(2)} lb total`,
-            ),
-            node("p", feeText(preview.offer.fee, p.carrier)),
-          );
+          const facts = node("dl", undefined, "pickup-review-facts");
+          const point = [...field(siteForm, "pickup_point").options]
+            .find((option) => option.value === site.pickup_point)?.textContent ?? site.pickup_point;
+          for (const [label, text] of [
+            ["Date", calendarDate(preview.offer.date, new Date(), site.timezone)],
+            ["Address", addressText(p.site)],
+            ["Contact", [site.contact_name, site.phone, site.email].filter(Boolean).join(" · ")],
+            ["Window", p.carrier === "usps" ? "During normal mail delivery"
+              : `${preview.offer.ready_time}–${preview.offer.close_time} (${site.timezone})`],
+            ["Collection point", [point, site.instructions].filter(Boolean).join(" · ")],
+            ["Labels", p.tracking.join(", ")],
+            ["Parcels", `${p.parcels.map((piece) => `${piece.count} × ${serviceLabel(piece.service)}`).join(", ")} · ${(p.total_weight_hundredths / 100).toFixed(2)} lb total`],
+            ["Fee", feeText(preview.offer.fee, p.carrier)],
+          ]) facts.append(node("dt", label), node("dd", text));
+          details.append(node("h4", `${carrierNames[p.carrier]} · ${count} ${count === 1 ? "parcel" : "parcels"}`), facts);
         }
         const paid = previews.some(
           (p) => p.offer.fee.kind !== "free" || p.plan.carrier !== "usps",
@@ -623,13 +756,14 @@ export function installPickups(
         find("pickup-fee-label").hidden = !paid;
         field(form, "accept_fee").required = paid;
         find("pickup-plan-fields").hidden = true;
+        find("pickup-configuration").hidden = true;
         find("pickup-review").hidden = false;
         find("pickup-review-edit").hidden = false;
         find("pickup-review-button").hidden = true;
         find("pickup-schedule-commit").hidden = false;
         find("pickup-schedule-commit").textContent =
           previews.length > 1 ? "Schedule pickups" : "Schedule pickup";
-        find("pickup-review").focus({ preventScroll: true });
+        find("pickup-review-title").focus();
         find("pickup-review").scrollIntoView({ block: "nearest" });
       }
     } catch (error) {
@@ -725,10 +859,11 @@ export function installPickups(
     const version = generation;
     const epoch = capabilityEpoch;
     form.reset();
+    field(form, "site_id").value = "";
+    dateEdited = false;
     editPlan();
     field(form, "tracking").value = tracking.join("\n");
     find("pickup-schedule-error").textContent = "";
-    find("pickup-schedule-dialog").showModal();
     setBusy(true);
     try {
       await loadSetup(version);
@@ -736,11 +871,14 @@ export function installPickups(
       setBusy(false);
       if (!sites.some((site) => site.is_default)) {
         pendingTracking = tracking;
-        find("pickup-schedule-dialog").close();
-        editSite();
-      } else field(form, "tracking").focus();
+        editSite(sites[0] ?? null, true);
+      } else {
+        defaultDate();
+        find("pickup-schedule-dialog").showModal();
+        field(form, "tracking").focus();
+      }
     } catch (error) {
-      showError(error, "pickup-schedule-error", version);
+      if (current(version)) options.onError?.(errorText(error));
     } finally {
       if (current(version)) setBusy(false);
     }
@@ -774,6 +912,10 @@ export function installPickups(
       capabilityEpoch++;
       editingSite = null;
       pendingTracking = null;
+      addressSettingsKey = "";
+      confirmedAddress = null;
+      clearAddressReview();
+      find("pickup-settings").open = false;
       cancelRecord = null;
       cancelKey = null;
       reviewed = null;
@@ -788,6 +930,8 @@ export function installPickups(
       }
       for (const id of [
         "pickup-site-summary",
+        "pickup-addresses",
+        "pickup-carrier-badges",
         "pickup-message",
         "pickup-configuration",
         "pickup-error",

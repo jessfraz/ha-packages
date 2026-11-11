@@ -150,9 +150,16 @@ an authorized shipping account, not a credit card entered in this app. USPS
 normal-route pickup is free for eligible prepaid parcels and happens during
 normal mail delivery, without a selectable time window.
 
-Save and confirm the deployment's pickup address under **Pickups → Pickup
-address**. The app never guesses a postal address from Home Assistant's GPS
-coordinates or a carrier's billing address. Add the direct developer credentials
+Set up the usual pickup address once. Change the default or add an office under
+**Pickups → Pickup settings**. New pickups start with the saved default address
+and today's date in its time zone. Home Assistant supplies a time zone but no
+postal address. The app does not guess an address from coordinates or carrier billing.
+
+The web form checks new or changed addresses with EasyPost when configured,
+or AfterShip if EasyPost isn't configured. AfterShip needs Address API access.
+Confirm a suggested correction before saving; no configured verifier means no
+external check. The request contains postal fields only and may count toward
+your provider's usage. Add the direct developer credentials
 in the app configuration. Native servers accept an owner-only JSON file through
 `PACKAGES_PICKUP_CONFIG`; the file has optional `usps`, `ups`, and `fedex`
 objects with `client_id`, `client_secret`, and `environment` (`sandbox` or

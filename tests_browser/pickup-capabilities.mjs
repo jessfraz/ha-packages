@@ -21,6 +21,7 @@ const login = async (page, origin, token = owner) => {
   await page.goto(origin);
   await page.locator("#login input").fill(token);
   await page.locator("#login button").click();
+  await page.getByRole("button", { name: "All", exact: true }).click();
   await expect(page.locator("#list")).toHaveAttribute("aria-busy", "false");
 };
 const entryPoints = async (page, available) => {
@@ -67,6 +68,7 @@ try {
   await entryPoints(page, true);
   await page.locator("#show-pickups").click();
   await expect(page.locator("#pickups-dashboard")).toBeVisible();
+  await expect(page.getByRole("list", { name: "Enabled pickup carriers" }).getByRole("listitem")).toHaveText(["UPS"]);
   await expect(page.locator("#pickup-records")).toContainText("No pickup requests yet.");
   statusOrigin = zero;
   await page.clock.fastForward(31_000);
@@ -81,6 +83,9 @@ try {
   await details(page, "USPS capability fixture");
   await expect(page.locator("#actions").getByRole("button", { name: "Schedule pickup", exact: true })).toBeHidden();
   await page.keyboard.press("Escape");
+  await details(page, "Incoming UPS label");
+  await expect(page.locator("#actions").getByRole("button", { name: "Schedule pickup", exact: true })).toBeHidden();
+  await page.keyboard.press("Escape");
   await details(page, "UPS capability fixture");
   await page.locator("#actions").getByRole("button", { name: "Schedule pickup", exact: true }).click();
   await expect(page.locator("#pickup-schedule-dialog")).toBeVisible();
@@ -91,7 +96,7 @@ try {
   expect(await page.locator('#pickup-schedule-form select[name="service"] option').evaluateAll((items) => items.every((item) => !item.value || item.value.startsWith("ups_")))).toBe(true);
   await page.getByRole("button", { name: "Review pickup", exact: true }).click();
   await expect(page.locator("#pickup-review")).toBeVisible();
-  await page.getByRole("checkbox", { name: "Accept whatever pickup fee" }).check();
+  await page.getByRole("checkbox", { name: "I accept any pickup fee" }).check();
   statusOrigin = zero;
   await page.locator("#pickup-schedule-commit").click();
   await expect(page.locator("#pickup-schedule-dialog")).toBeHidden();
@@ -125,7 +130,7 @@ try {
   await page.getByLabel("Prepaid tracking numbers").fill("TESTPICKUP123");
   await carrier.selectOption("ups");
   await page.getByRole("button", { name: "Review pickup", exact: true }).click();
-  await page.getByRole("checkbox", { name: "Accept whatever pickup fee" }).check();
+  await page.getByRole("checkbox", { name: "I accept any pickup fee" }).check();
   statusOrigin = rotated;
   await page.locator("#pickup-schedule-commit").click();
   await expect(page.locator("#pickup-schedule-dialog")).toBeHidden();

@@ -1580,15 +1580,27 @@ fn static_response(
 #[endpoint {method=GET,path="/",tags=["web"]}]
 async fn index(request: RequestContext<Arc<Context>>) -> Result<Response<Body>, HttpError> {
     ingress_access(&request)?;
+    let states: String = crate::pickup::models::PostalState::ALL
+        .iter()
+        .map(|state| {
+            format!(
+                "<option value=\"{}\">{}</option>",
+                state.as_str(),
+                state.name()
+            )
+        })
+        .collect();
     static_response(
-        include_str!("../web/index.html").replace(
-            "data-home-assistant=\"false\"",
-            if request.context().ingress_peer.is_some() {
-                "data-home-assistant=\"true\""
-            } else {
-                "data-home-assistant=\"false\""
-            },
-        ),
+        include_str!("../web/index.html")
+            .replace("<!-- POSTAL_STATES -->", &states)
+            .replace(
+                "data-home-assistant=\"false\"",
+                if request.context().ingress_peer.is_some() {
+                    "data-home-assistant=\"true\""
+                } else {
+                    "data-home-assistant=\"false\""
+                },
+            ),
         "text/html; charset=utf-8",
     )
 }

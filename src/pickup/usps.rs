@@ -114,7 +114,7 @@ fn wire_address(plan: &ResolvedPlan) -> WireAddress {
         street_address: address.street.clone(),
         secondary_address: address.secondary.clone(),
         city: address.city.clone(),
-        state: address.state.clone(),
+        state: address.state.as_str().into(),
         zip_code: zip.into(),
         zip_plus4: extension,
     }

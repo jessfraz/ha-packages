@@ -61,6 +61,7 @@ try {
   await expect(page.locator("#dashboard")).toBeVisible();
   await expect(page.locator("#list")).not.toBeEmpty();
   await expect(page.locator("#list")).toHaveAttribute("aria-busy", "false");
+  await snapshot("package-search");
   const readsBeforeRefresh = packageReads;
   await page.clock.fastForward(31_000);
   await expect.poll(() => packageReads).toBeGreaterThan(readsBeforeRefresh);
@@ -89,15 +90,16 @@ try {
     "123 Example Street",
   );
   await snapshot("list");
+  await page.getByText("Pickup settings", { exact: true }).click();
   await page
-    .getByRole("button", { name: "Edit pickup address", exact: true })
+    .getByRole("button", { name: "Edit pickup address: Example site", exact: true })
     .click();
   await expect(page.getByLabel("Street address", { exact: true })).toHaveValue(
     "123 Example Street",
   );
   await expect(page.locator('#pickup-site-form input[name="email"]')).not.toHaveAttribute("required");
   const saveAddress = page.getByRole("button", {
-    name: "Save default pickup address",
+    name: "Save address",
     exact: true,
   });
   await expect(saveAddress).toBeInViewport({ ratio: 1 });
@@ -110,11 +112,11 @@ try {
   await expect(saveAddress).toBeInViewport({ ratio: 1 });
   await snapshot("address-bottom");
   await page
-    .getByLabel("Location name", { exact: true })
+    .getByLabel("Address label", { exact: false })
     .fill("Example site verified");
   await saveAddress.click();
   await expect(page.locator("#pickup-site-dialog")).toBeHidden();
-  await expect(page.locator("#pickup-site-summary")).toContainText(
+  await expect(page.locator("#pickup-addresses")).toContainText(
     "Example site verified",
   );
   await page
@@ -163,13 +165,13 @@ try {
   await page.locator("#pickup-schedule-commit").click();
   await expect(
     page.getByRole("checkbox", {
-      name: "Accept whatever pickup fee",
+      name: "I accept any pickup fee",
       exact: false,
     }),
   ).toBeFocused();
   expect(schedules, "Unaccepted charges must not schedule").toBe(0);
   await page
-    .getByRole("checkbox", { name: "Accept whatever pickup fee", exact: false })
+    .getByRole("checkbox", { name: "I accept any pickup fee", exact: false })
     .check();
   await page.locator("#pickup-schedule-commit").click();
   await expect.poll(() => schedules).toBe(1);
@@ -262,25 +264,64 @@ try {
     initialSite = false;
     return route.continue();
   });
+  await setupPage.route("**/v1/pickups/verify-address", (route) => route.fulfill({ json: null }));
   await setupPage.goto(process.env.PACKAGES_TEST_URL);
   await setupPage.locator("#login input").fill(process.env.PACKAGES_TEST_OWNER);
   await setupPage.locator("#login button").click();
   await setupPage.getByRole("button", { name: "Pickups", exact: true }).click();
-  await expect(setupPage.getByRole("button", { name: "Add pickup address", exact: true })).not.toHaveClass(/quiet/);
+  await expect(setupPage.getByRole("button", { name: "Set up pickup address", exact: true })).toBeVisible();
   await setupPage.getByRole("button", { name: "Outbound", exact: true }).click();
   await setupPage.locator("#list .shipment").filter({ hasText: "TESTPICKUP123" }).click();
   await setupPage.locator("#actions").getByRole("button", { name: "Schedule pickup", exact: true }).click();
   await expect(setupPage.locator("#pickup-site-dialog")).toBeVisible();
+  await expect(setupPage.getByRole("heading", { name: "Set up pickup address", exact: true })).toBeVisible();
+  await expect(setupPage.locator('#pickup-site-form [name="name"]')).toBeHidden();
   await expect(setupPage.locator("#dashboard")).toBeVisible();
   await expect(setupPage.getByLabel("Time zone", { exact: true })).toHaveValue("Pacific/Honolulu");
-  for (const [name, value] of Object.entries({ name: "Example collection", contact_name: "Example Contact", phone: "2025550123", street: "123 Example Street", city: "Example City", state: "CA", postal_code: "90000" }))
+  for (const [name, value] of Object.entries({ contact_name: "Example Contact", phone: "2025550123", street: "123 Example Street", city: "Example City", postal_code: "90000" }))
     await setupPage.locator(`#pickup-site-form [name="${name}"]`).fill(value);
-  await setupPage.getByRole("button", { name: "Save default pickup address", exact: true }).click();
+  await setupPage.locator('#pickup-site-form select[name="state"]').selectOption({ label: "California" });
+  await setupPage.getByRole("button", { name: "Save default address", exact: true }).click();
   await expect(setupPage.locator("#pickup-site-dialog")).toBeHidden();
   await expect(setupPage.locator("#pickup-schedule-dialog")).toBeVisible();
   await expect(setupPage.getByLabel("Prepaid tracking numbers")).toHaveValue("TESTPICKUP123");
+  await expect(setupPage.locator('#pickup-schedule-form input[name="date"]')).toHaveValue(
+    new Intl.DateTimeFormat("sv-SE", { timeZone: "Pacific/Honolulu" }).format(new Date()),
+  );
   await expect(setupPage.locator("#dashboard")).toBeVisible();
   await setupPage.locator("#pickup-schedule-close").click();
+
+  await setupPage.getByRole("button", { name: "Pickups", exact: true }).click();
+  await expect(setupPage.getByRole("button", { name: "Set up pickup address", exact: true })).toBeHidden();
+  await setupPage.getByText("Pickup settings", { exact: true }).click();
+  await setupPage.getByRole("button", { name: "Add another address", exact: true }).click();
+  await setupPage.unroute("**/v1/pickups/verify-address");
+  let validations = 0;
+  await setupPage.route("**/v1/pickups/verify-address", (route) => {
+    validations++;
+    const address = route.request().postDataJSON();
+    expect(Object.keys(address).sort()).toEqual(["city", "country", "postal_code", "secondary", "state", "street"]);
+    return route.fulfill({ json: { status: "verified", normalized: { ...address, street: "42 EXAMPLE AVE" } } });
+  });
+  for (const [name, value] of Object.entries({ name: "Office", contact_name: "Example Contact", phone: "2025550123", street: "42 Example Avenue", city: "Example City", postal_code: "90000" }))
+    await setupPage.locator(`#pickup-site-form [name="${name}"]`).fill(value);
+  await setupPage.locator('#pickup-site-form select[name="state"]').selectOption("CA");
+  await setupPage.getByRole("button", { name: "Save address", exact: true }).click();
+  await expect(setupPage.locator("#pickup-address-review")).toContainText("42 EXAMPLE AVE");
+  await expect(setupPage.locator("#pickup-addresses")).not.toContainText("Office");
+  await setupPage.getByRole("button", { name: "Use suggested address", exact: true }).click();
+  await expect(setupPage.locator("#pickup-site-dialog")).toBeHidden();
+  await expect(setupPage.locator("#pickup-site-summary")).not.toContainText("42 EXAMPLE AVE");
+  expect(validations).toBe(1);
+  await setupPage.getByRole("button", { name: "Make Office the default pickup address", exact: true }).click();
+  await expect(setupPage.locator("#pickup-site-summary")).toContainText("42 EXAMPLE AVE");
+  await setupPage.getByRole("button", { name: "Schedule pickup", exact: true }).click();
+  await expect(setupPage.locator('#pickup-schedule-form select[name="site_id"] option:checked')).toContainText("Office");
+  const home = setupPage.locator('#pickup-schedule-form select[name="site_id"] option').filter({ hasText: "Home" });
+  await setupPage.locator('#pickup-schedule-form select[name="site_id"]').selectOption(await home.getAttribute("value"));
+  await expect(setupPage.locator('#pickup-schedule-form select[name="site_id"] option:checked')).toContainText("Home");
+  await setupPage.locator("#pickup-schedule-close").click();
+  await setupPage.getByRole("button", { name: "Outbound", exact: true }).click();
 
   // Losing optional carrier credentials removes every scheduling entry point.
   await setupPage.route("**/v1/pickups/carriers", async (route) => {
@@ -292,7 +333,7 @@ try {
   setupPage.on("request", (request) => {
     if (new URL(request.url()).pathname === "/v1/pickups/preview") unusablePreviews++;
   });
-  await setupPage.getByRole("button", { name: "Schedule pickup", exact: true }).click();
+  await setupPage.getByRole("button", { name: "Refresh package list", exact: true }).click();
   await expect(setupPage.locator("#pickup-schedule-dialog")).toBeHidden();
   await expect(setupPage.locator("#schedule-pickup")).toBeHidden();
   await expect(setupPage.locator("#show-pickups")).toBeHidden();
@@ -301,9 +342,9 @@ try {
   await setupPage.getByRole("button", { name: "Refresh package list", exact: true }).click();
   await expect(setupPage.locator("#schedule-pickup")).toBeVisible();
 
-  // A permission change closes body-level dialogs and removes both entry points.
+  // A permission change removes both entry points even if a refresh races it.
   await setupPage.route("**/v1/pickups/carriers", (route) => route.fulfill({ status: 403, json: { message: "Owner access required" } }));
-  await setupPage.getByRole("button", { name: "Schedule pickup", exact: true }).click();
+  await setupPage.getByRole("button", { name: "Refresh package list", exact: true }).click();
   await expect(setupPage.locator("#pickup-schedule-dialog")).toBeHidden();
   await expect(setupPage.locator("#pickup-site-dialog")).toBeHidden();
   await expect(setupPage.locator("#show-pickups")).toBeHidden();

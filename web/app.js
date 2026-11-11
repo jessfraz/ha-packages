@@ -61,6 +61,7 @@ let agentTokenGeneration = 0;
 let issuedAgentId = null;
 const pickups = installPickups(byId("pickups-dashboard"), byId("schedule-pickup"), byId("dashboard"), api, () => setOwnerAccess(false), {
   getTimeZone: () => deliveryTimeZone,
+  onError: (message) => notice(message, true),
   onCapabilitiesChanged: (available) => {
     byId("show-pickups").hidden = !available;
     for (const action of byId("actions").querySelectorAll("[data-pickup-carrier]"))
@@ -1227,8 +1228,8 @@ async function show(id, preserveView = false, section = route().get("section")) 
   if (!shipment.archived && shipment.direction === "inbound" &&
       shipment.tracking?.carrier === "AmazonMcf" && shipment.sync.provider === "aftership")
     button("Use Amazon Account tracking", () => mutate("amazon", "POST"), true);
-  if (!shipment.archived && shipment.sync.registration_state === "registered" &&
-      shipment.tracking) {
+  if (!shipment.archived && shipment.direction === "outbound" && shipment.tracking &&
+      shipment.status === "pre_transit") {
     const action = button("Schedule pickup", () => {
       const tracking = shipment.tracking.number;
       closeDetail();
@@ -1367,6 +1368,12 @@ byId("search").addEventListener(
     return load();
   }),
 );
+byId("query").addEventListener("input", guarded(() => {
+  if (byId("query").value.trim() || !appliedSearch) return;
+  appliedSearch = "";
+  saveListRoute();
+  return load();
+}));
 byId("view").addEventListener(
   "change",
   guarded(() => { saveListRoute(); return load(); }),

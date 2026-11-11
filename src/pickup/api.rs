@@ -12,6 +12,7 @@ use uuid::Uuid;
 use crate::{
     api::{Context, pickup_authorize, pickup_prepare_watches},
     pickup::{Error, ErrorCode, models::*, service::CarrierStatus},
+    shipping_api::{address::AddressVerification, types::ProviderId},
 };
 
 #[derive(Serialize, JsonSchema)]
@@ -100,6 +101,29 @@ async fn carriers(
 ) -> Result<Private<Vec<CarrierStatus>>, HttpError> {
     pickup_authorize(&request).await?;
     Ok(private(request.context().pickups.carriers(), None))
+}
+
+/// Check only the postal address using the first configured verification provider.
+#[endpoint{method=POST,path="/v1/pickups/verify-address",tags=["pickups"],request_body_max_bytes=2048}]
+async fn verify_address(
+    request: RequestContext<Arc<Context>>,
+    body: TypedBody<Address>,
+) -> Result<Private<Option<AddressVerification>>, HttpError> {
+    pickup_authorize(&request).await?;
+    let address = body.into_inner();
+    address.validate()?;
+    for preferred in [ProviderId::EasyPost, ProviderId::AfterShip] {
+        if let Some(verification) = request
+            .context()
+            .providers()
+            .iter()
+            .find(|provider| provider.id() == preferred)
+            .and_then(|provider| provider.verify_pickup_address(&address))
+        {
+            return Ok(private(Some(verification.await), None));
+        }
+    }
+    Ok(private(None, None))
 }
 
 /// Saved pickup sites for this deployment. Billing addresses are not inferred.
@@ -390,8 +414,9 @@ async fn reconcile(
 }
 
 pub(crate) fn register(api: &mut ApiDescription<Arc<Context>>) -> anyhow::Result<()> {
-    let endpoints: [dropshot::ApiEndpoint<Arc<Context>>; 17] = [
+    let endpoints: [dropshot::ApiEndpoint<Arc<Context>>; 18] = [
         carriers.into(),
+        verify_address.into(),
         status.into(),
         reconcile.into(),
         locations.into(),
