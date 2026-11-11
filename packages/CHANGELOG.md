@@ -1,6 +1,7 @@
 ## 0.8.6
 
 - Keep version Repairs actionable when native update checks need a retry.
+- Include the street address when checking UPS pickup rates.
 
 ## 0.8.5
 

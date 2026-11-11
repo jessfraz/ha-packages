@@ -69,6 +69,7 @@ struct DateInfo {
 #[derive(Serialize)]
 #[serde(rename_all = "PascalCase")]
 struct RateAddress<'a> {
+    address_line: &'a str,
     city: &'a str,
     state_province: &'a str,
     postal_code: &'a str,
@@ -310,6 +311,7 @@ impl Pickup for Ups {
                             account_country_code: "US",
                         },
                         pickup_address: RateAddress {
+                            address_line: &address.street,
                             city: &address.city,
                             state_province: address.state.as_str(),
                             postal_code: &address.postal_code,

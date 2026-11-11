@@ -250,6 +250,22 @@ async fn usps_uses_normal_route_contract_and_conditional_cancellation() {
 async fn ups_quotes_and_bills_shipping_account_then_uses_header_based_status_and_cancel() {
     #[derive(Deserialize)]
     #[serde(rename_all = "PascalCase")]
+    struct RateEnvelope {
+        pickup_rate_request: Rate,
+    }
+    #[derive(Deserialize)]
+    #[serde(rename_all = "PascalCase")]
+    struct Rate {
+        pickup_address: RateAddress,
+        alternate_address_indicator: String,
+    }
+    #[derive(Deserialize)]
+    #[serde(rename_all = "PascalCase")]
+    struct RateAddress {
+        address_line: String,
+    }
+    #[derive(Deserialize)]
+    #[serde(rename_all = "PascalCase")]
     struct Envelope {
         pickup_creation_request: Create,
     }
@@ -260,6 +276,12 @@ async fn ups_quotes_and_bills_shipping_account_then_uses_header_based_status_and
         shipper: Shipper,
         pickup_piece: Vec<Piece>,
         reference_number: String,
+        pickup_address: CreateAddress,
+    }
+    #[derive(Deserialize)]
+    #[serde(rename_all = "PascalCase")]
+    struct CreateAddress {
+        address_line: Vec<String>,
     }
     #[derive(Deserialize)]
     #[serde(rename_all = "PascalCase")]
@@ -277,13 +299,16 @@ async fn ups_quotes_and_bills_shipping_account_then_uses_header_based_status_and
         service_code: String,
         quantity: String,
     }
-    let reference = plan(PickupService::UpsGround);
+    let mut reference = plan(PickupService::UpsGround);
+    reference.site.details.address.secondary = Some("Suite 4".into());
     let expected = reference.reference.simple().to_string();
     let record_reference = expected.clone();
     // UPS Pickup.yaml declares /api in both REST server URLs. OAuth is
     // independently host-level, so assert the actual paths received on wire.
     let paths = Arc::new(Mutex::new(Vec::new()));
     let observed = paths.clone();
+    let rate_body = Arc::new(Mutex::new(None));
+    let observed_rate_body = rate_body.clone();
     let fixture = Fixture::new(move |r| {
         observed.lock().unwrap().push(r.path.clone());
         if let Some(reply) = token(&r, "/security/v1/oauth/token") {
@@ -293,9 +318,12 @@ async fn ups_quotes_and_bills_shipping_account_then_uses_header_based_status_and
         }
         assert_eq!(r.headers["authorization"], "Bearer fixture-access");
         match (r.method.as_str(), r.path.as_str()) {
-            ("POST", "/api/shipments/v2409/pickup/oncall") => Some(Reply::ok(
-                r#"{"PickupRateResponse":{"Response":{"ResponseStatus":{"Code":"1"}},"RateResult":{"CurrencyCode":"USD","GrandTotalOfAllCharge":"8.50"}}}"#,
-            )),
+            ("POST", "/api/shipments/v2409/pickup/oncall") => {
+                *observed_rate_body.lock().unwrap() = Some(r.body);
+                Some(Reply::ok(
+                    r#"{"PickupRateResponse":{"Response":{"ResponseStatus":{"Code":"1"}},"RateResult":{"CurrencyCode":"USD","GrandTotalOfAllCharge":"8.50"}}}"#,
+                ))
+            }
             ("POST", "/api/pickupcreation/v2409/pickup") => {
                 let body: Envelope = serde_json::from_slice(&r.body).unwrap();
                 let body = body.pickup_creation_request;
@@ -304,6 +332,10 @@ async fn ups_quotes_and_bills_shipping_account_then_uses_header_based_status_and
                 assert_eq!(body.pickup_piece[0].service_code, "003");
                 assert_eq!(body.pickup_piece[0].quantity, "1");
                 assert_eq!(body.reference_number, record_reference);
+                assert_eq!(
+                    body.pickup_address.address_line,
+                    ["123 Example Street", "Suite 4"]
+                );
                 Some(Reply::ok(
                     r#"{"PickupCreationResponse":{"Response":{"ResponseStatus":{"Code":"1"}},"PRN":"UPS-FIXTURE"}}"#,
                 ))
@@ -332,6 +364,19 @@ async fn ups_quotes_and_bills_shipping_account_then_uses_header_based_status_and
         .unwrap()
         .with_origin(fixture.origin.clone());
     let preview = client.preview(&reference).await;
+    let rate: RateEnvelope = serde_json::from_slice(
+        rate_body
+            .lock()
+            .unwrap()
+            .as_ref()
+            .expect("UPS rate request"),
+    )
+    .expect("UPS rate request matches its wire contract");
+    assert_eq!(
+        rate.pickup_rate_request.pickup_address.address_line,
+        reference.site.details.address.street
+    );
+    assert_eq!(rate.pickup_rate_request.alternate_address_indicator, "Y");
     assert_eq!(
         &paths.lock().unwrap()[..],
         &[
