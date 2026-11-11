@@ -44,11 +44,16 @@ function feeText(fee, carrier) {
   return `Fee not quoted. ${carrierNames[carrier] || "The carrier"} may charge a pickup fee to your ${carrierNames[carrier] || "carrier"} shipping account. The amount is not known yet.`;
 }
 function serviceLabel(service) {
-  return service
-    .replaceAll("_", " ")
-    .replace(/^fedex /, "FedEx ")
-    .replace(/^usps /, "USPS ")
-    .replace(/^ups /, "UPS ");
+  const [carrier, ...words] = service.split("_");
+  return [carrierNames[carrier] ?? carrier, ...words.map((word) => word.charAt(0).toUpperCase() + word.slice(1))].join(" ");
+}
+function reviewDate(date, timeZone) {
+  const relative = calendarDate(date, new Date(), timeZone);
+  if (relative !== "today" && relative !== "tomorrow") return relative;
+  const absolute = new Date(`${date}T12:00:00Z`).toLocaleDateString([], {
+    timeZone: "UTC", weekday: "short", month: "short", day: "numeric",
+  });
+  return `${relative === "today" ? "Today" : "Tomorrow"} · ${absolute}`;
 }
 export function installPickups(
   root,
@@ -720,14 +725,6 @@ export function installPickups(
         }
         if (!configuration || previews.some((preview) => preview.configuration_id !== configuration))
           throw new Error("The carrier configuration changed. Review the pickup again.");
-        reviewed = {
-          ...input,
-          site_id: site.id,
-          reviewed_site: { id: site.id, revision: site.revision },
-          reviewed_configuration: configuration,
-        };
-        reviewedCarriers = previews.map((preview) => preview.plan.carrier);
-        operationKey = crypto.randomUUID();
         const details = find("pickup-review-details");
         details.replaceChildren();
         for (const preview of previews) {
@@ -738,7 +735,7 @@ export function installPickups(
           const point = [...field(siteForm, "pickup_point").options]
             .find((option) => option.value === site.pickup_point)?.textContent ?? site.pickup_point;
           for (const [label, text] of [
-            ["Date", calendarDate(preview.offer.date, new Date(), site.timezone)],
+            ["Date", reviewDate(preview.offer.date, site.timezone)],
             ["Address", addressText(p.site)],
             ["Contact", [site.contact_name, site.phone, site.email].filter(Boolean).join(" · ")],
             ["Window", p.carrier === "usps" ? "During normal mail delivery"
@@ -751,8 +748,16 @@ export function installPickups(
           details.append(node("h4", `${carrierNames[p.carrier]} · ${count} ${count === 1 ? "parcel" : "parcels"}`), facts);
         }
         const paid = previews.some(
-          (p) => p.offer.fee.kind !== "free" || p.plan.carrier !== "usps",
+          (p) => p.offer.fee?.kind !== "free" || p.plan.carrier !== "usps",
         );
+        operationKey = crypto.randomUUID();
+        reviewed = {
+          ...input,
+          site_id: site.id,
+          reviewed_site: { id: site.id, revision: site.revision },
+          reviewed_configuration: configuration,
+        };
+        reviewedCarriers = previews.map((preview) => preview.plan.carrier);
         find("pickup-fee-label").hidden = !paid;
         field(form, "accept_fee").required = paid;
         find("pickup-plan-fields").hidden = true;
