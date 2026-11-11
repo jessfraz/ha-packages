@@ -247,6 +247,168 @@ async fn usps_uses_normal_route_contract_and_conditional_cancellation() {
     assert_eq!(calls.lock().unwrap().len(), 5);
 }
 #[tokio::test]
+async fn ups_automatic_availability_skips_elapsed_local_day_and_carrier_rejections() {
+    #[derive(Deserialize)]
+    #[serde(rename_all = "PascalCase")]
+    struct RateEnvelope {
+        pickup_rate_request: Rate,
+    }
+    #[derive(Deserialize)]
+    #[serde(rename_all = "PascalCase")]
+    struct Rate {
+        pickup_date_info: DateInfo,
+    }
+    #[derive(Deserialize)]
+    #[serde(rename_all = "PascalCase")]
+    struct DateInfo {
+        pickup_date: String,
+    }
+    let (mut reference, today) = ups_elapsed_window();
+    reference.date = None;
+    reference.next_available = true;
+    let first = today.checked_add(jiff::Span::new().days(1)).unwrap();
+    let expected = today.checked_add(jiff::Span::new().days(2)).unwrap();
+    let first_wire = first.to_string().replace('-', "");
+    let dates = Arc::new(Mutex::new(Vec::new()));
+    let observed = dates.clone();
+    let fixture = Fixture::new(move |r| {
+        if let Some(reply) = token(&r, "/security/v1/oauth/token") {
+            return Some(reply);
+        }
+        let body: RateEnvelope = serde_json::from_slice(&r.body).unwrap();
+        let date = body.pickup_rate_request.pickup_date_info.pickup_date;
+        observed.lock().unwrap().push(date.clone());
+        Some(if date == first_wire {
+            Reply {
+                status: 400,
+                headers: String::new(),
+                body: r#"{"response":{"errors":[{"code":"fixture-unavailable"}]}}"#.into(),
+            }
+        } else {
+            Reply::ok(
+                r#"{"PickupRateResponse":{"Response":{"ResponseStatus":{"Code":"1"}},"RateResult":{"CurrencyCode":"USD","GrandTotalOfAllCharge":"8.50"}}}"#,
+            )
+        })
+    });
+    let client = ups::Ups::new(account("ABC123"))
+        .unwrap()
+        .with_origin(fixture.origin.clone());
+    let offer = client.preview(&reference).await.unwrap();
+    assert_eq!(offer.date, expected.to_string());
+    assert_eq!(
+        *dates.lock().unwrap(),
+        [
+            first.to_string().replace('-', ""),
+            expected.to_string().replace('-', "")
+        ]
+    );
+}
+
+// Two saved-site zones are two hours apart on the clock and a day apart on the
+// calendar. One is always away from midnight, regardless of the machine's zone.
+fn ups_elapsed_window() -> (ResolvedPlan, jiff::civil::Date) {
+    let now = jiff::Timestamp::now();
+    for name in ["Etc/GMT+12", "Pacific/Kiritimati"] {
+        let zone = jiff::tz::TimeZoneDatabase::bundled().get(name).unwrap();
+        let local = now.to_zoned(zone);
+        let minute = i32::from(local.hour()) * 60 + i32::from(local.minute());
+        if (2..1438).contains(&minute) {
+            let mut reference = plan(PickupService::UpsGround);
+            reference.site.details.timezone = name.into();
+            reference.ready_time = "00:00".into();
+            reference.close_time = "00:01".into();
+            reference.date = Some(local.date().to_string());
+            return (reference, local.date());
+        }
+    }
+    panic!("At least one saved-site zone is away from midnight");
+}
+
+#[tokio::test]
+async fn ups_automatic_availability_keeps_an_open_same_day_window() {
+    let (mut reference, today) = ups_elapsed_window();
+    reference.date = None;
+    reference.next_available = true;
+    reference.close_time = "23:59".into();
+    let fixture = Fixture::new(move |r| {
+        if let Some(reply) = token(&r, "/security/v1/oauth/token") {
+            return Some(reply);
+        }
+        Some(Reply::ok(
+            r#"{"PickupRateResponse":{"Response":{"ResponseStatus":{"Code":"1"}},"RateResult":{"CurrencyCode":"USD","GrandTotalOfAllCharge":"8.50"}}}"#,
+        ))
+    });
+    let client = ups::Ups::new(account("ABC123"))
+        .unwrap()
+        .with_origin(fixture.origin.clone());
+    assert_eq!(
+        client.preview(&reference).await.unwrap().date,
+        today.to_string()
+    );
+}
+
+#[tokio::test]
+async fn ups_explicit_elapsed_day_is_rejected_without_rolling_or_contacting_carrier() {
+    let (mut reference, today) = ups_elapsed_window();
+    let paths = Arc::new(Mutex::new(Vec::new()));
+    let observed = paths.clone();
+    let fixture = Fixture::new(move |r| {
+        observed.lock().unwrap().push(r.path.clone());
+        if let Some(reply) = token(&r, "/security/v1/oauth/token") {
+            return Some(reply);
+        }
+        Some(Reply::ok(
+            r#"{"PickupRateResponse":{"Response":{"ResponseStatus":{"Code":"1"}},"RateResult":{"CurrencyCode":"USD","GrandTotalOfAllCharge":"8.50"}}}"#,
+        ))
+    });
+    let client = ups::Ups::new(account("ABC123"))
+        .unwrap()
+        .with_origin(fixture.origin.clone());
+    for date in [today, today.checked_sub(jiff::Span::new().days(1)).unwrap()] {
+        reference.date = Some(date.to_string());
+        assert_eq!(
+            client
+                .preview(&reference)
+                .await
+                .err()
+                .map(|error| error.code),
+            Some(ErrorCode::Ineligible)
+        );
+        assert_eq!(reference.date, Some(date.to_string()));
+    }
+    assert!(paths.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn ups_schedule_rejects_an_elapsed_automatically_selected_offer_before_dispatch() {
+    let (mut reference, _) = ups_elapsed_window();
+    reference.next_available = true;
+    let paths = Arc::new(Mutex::new(Vec::new()));
+    let observed = paths.clone();
+    let fixture = Fixture::new(move |r| {
+        observed.lock().unwrap().push(r.path.clone());
+        if let Some(reply) = token(&r, "/security/v1/oauth/token") {
+            return Some(reply);
+        }
+        Some(Reply::ok(
+            r#"{"PickupCreationResponse":{"Response":{"ResponseStatus":{"Code":"1"}},"PRN":"UPS-FIXTURE"}}"#,
+        ))
+    });
+    let client = ups::Ups::new(account("ABC123"))
+        .unwrap()
+        .with_origin(fixture.origin.clone());
+    assert_eq!(
+        client
+            .schedule(&reference)
+            .await
+            .err()
+            .map(|error| error.code),
+        Some(ErrorCode::Ineligible)
+    );
+    assert!(paths.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn ups_quotes_and_bills_shipping_account_then_uses_header_based_status_and_cancel() {
     #[derive(Deserialize)]
     #[serde(rename_all = "PascalCase")]

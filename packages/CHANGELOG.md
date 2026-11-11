@@ -1,3 +1,8 @@
+## 0.8.7
+
+- Skip elapsed UPS pickup windows in the saved location’s timezone. Keep an
+  explicitly requested date fixed and reject elapsed offers before dispatch.
+
 ## 0.8.6
 
 - Keep version Repairs actionable when native update checks need a retry.

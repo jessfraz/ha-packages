@@ -246,6 +246,17 @@ fn date_info(plan: &ResolvedPlan, date: &str) -> DateInfo {
         close_time: plan.close_time.replace(':', ""),
     }
 }
+fn window_open(plan: &ResolvedPlan, date: jiff::civil::Date) -> Result<bool> {
+    let zone = jiff::tz::TimeZoneDatabase::bundled()
+        .get(&plan.site.details.timezone)
+        .map_err(|_| Error::new(ErrorCode::InvalidInput))?;
+    let now = jiff::Timestamp::now().to_zoned(zone);
+    let close = plan
+        .close_time
+        .parse::<jiff::civil::Time>()
+        .map_err(|_| Error::new(ErrorCode::InvalidInput))?;
+    Ok(date > now.date() || date == now.date() && now.time() < close)
+}
 fn service(service: PickupService) -> Result<&'static str> {
     match service {
         PickupService::UpsGround => Ok("003"),
@@ -299,10 +310,13 @@ impl Pickup for Ups {
             };
             let address = &plan.site.details.address;
             for days in 0..if plan.date.is_some() { 1 } else { 8 } {
-                let date = start
+                let pickup_date = start
                     .checked_add(jiff::Span::new().days(days))
-                    .map_err(|_| Error::new(ErrorCode::InvalidInput))?
-                    .to_string();
+                    .map_err(|_| Error::new(ErrorCode::InvalidInput))?;
+                if !window_open(plan, pickup_date)? {
+                    continue;
+                }
+                let date = pickup_date.to_string();
                 let body = RateEnvelope {
                     request: RateRequest {
                         request: Request {},
@@ -364,6 +378,11 @@ impl Pickup for Ups {
                 } else {
                     Fee::Unquoted
                 };
+                // A rate response can arrive after the local window ends.
+                // Automatic selection may advance; an explicit date never does.
+                if !window_open(plan, pickup_date)? {
+                    continue;
+                }
                 return Ok(Offer {
                     date,
                     ready_time: plan.ready_time.clone(),
@@ -444,6 +463,14 @@ impl Pickup for Ups {
                     shipping_labels_available: "Y",
                 },
             };
+            // The worker re-quotes before dispatch. Check again after its
+            // durable dispatch fence so an elapsed offer cannot be submitted.
+            let pickup_date = date
+                .parse::<jiff::civil::Date>()
+                .map_err(|_| Error::new(ErrorCode::InvalidInput))?;
+            if !window_open(plan, pickup_date)? {
+                return Err(Error::new(ErrorCode::Ineligible));
+            }
             let response = self
                 .http
                 .request(
