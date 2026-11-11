@@ -211,10 +211,6 @@
     "pickup_uncertain": {
       "title": "Pickup outcome needs confirmation",
       "description": "A carrier pickup or cancellation has an uncertain outcome. Open Packages → Pickups and check with the carrier before scheduling again. An interrupted request is never automatically rebooked."
-    },
-    "startup_version_mismatch": {
-      "title": "Packages app and integration versions differ",
-      "description": "The app is version {app_version}, and this integration is version {integration_version}. The integration could not finish setup. Update both Packages components to the same release and restart Home Assistant."
     }
   }
 }

@@ -66,9 +66,7 @@ async def async_get_config_entry_diagnostics(
             }
     registry = ir.async_get(hass)
     repair_ids = {
-        "version_mismatch": f"{entry.entry_id}_version_mismatch"
-        if loaded
-        else "version_mismatch",
+        "version_mismatch": f"{entry.entry_id}_version_mismatch",
         "event_stream_unavailable": "event_stream_unavailable",
         "event_history_reset": "event_history_reset",
         "amazon_discovery": amazon_discovery_issue_id(entry.entry_id),

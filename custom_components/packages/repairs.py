@@ -1,25 +1,32 @@
 """Native version repair for the Packages companion."""
 
-from typing import TYPE_CHECKING
-
 from homeassistant.components.repairs import RepairsFlow
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from ._app_kit.repairs import VersionRepairSpec, create_version_fix_flow
 from ._app_kit.version import LOADED_VERSION
 from ._app_kit.versions import ReleaseVersion
-from .const import CONF_ADDON_SLUG, DOMAIN
-
-if TYPE_CHECKING:
-    from .coordinator import PackagesCoordinator
+from .client import PackagesClient
+from .const import CONF_ADDON_SLUG, CONF_BACKEND_URL, CONF_TOKEN, DOMAIN
 
 
 async def _async_probe_version(
-    hass: HomeAssistant, entry: ConfigEntry[PackagesCoordinator]
+    hass: HomeAssistant, entry: ConfigEntry
 ) -> ReleaseVersion:
-    version, _ = await entry.runtime_data.async_read_system()
-    return version
+    client = PackagesClient(
+        async_get_clientsession(hass),
+        entry.data[CONF_BACKEND_URL],
+        entry.data[CONF_TOKEN],
+    )
+    response = await client.request("GET", "/v1/system")
+    if response.status != 200:
+        raise ValueError("Cannot verify the Packages version")
+    value = response.json()
+    if not isinstance(value, dict) or value.get("credential_role") != "integration":
+        raise ValueError("Cannot verify the Packages version")
+    return ReleaseVersion.parse(value.get("version"))
 
 
 def _app_slug(entry: ConfigEntry) -> str | None:

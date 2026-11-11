@@ -148,26 +148,6 @@ class PackagesCoordinator(DataUpdateCoordinator[dict[str, int]]):
         self._version_repairs.async_start()
 
     @callback
-    def async_report_startup_version_mismatch(self) -> None:
-        """Keep the diagnosis when an incompatible backend prevents setup."""
-        version = self.last_backend_version
-        if version is not None and version != self._version:
-            # The shared fix needs a loaded entry. Its first fresh observation
-            # replaces this startup diagnostic after the entry can load.
-            ir.async_create_issue(
-                self.hass,
-                DOMAIN,
-                "version_mismatch",
-                is_fixable=False,
-                severity=ir.IssueSeverity.WARNING,
-                translation_key="startup_version_mismatch",
-                translation_placeholders={
-                    "app_version": version,
-                    "integration_version": self._version,
-                },
-            )
-
-    @callback
     def async_start_amazon_repairs(self) -> None:
         """Keep source polling and freshness checks independent of enabled entities."""
         self._entry.async_on_unload(self.async_add_listener(self._async_amazon_update))

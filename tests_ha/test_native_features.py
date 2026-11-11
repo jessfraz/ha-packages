@@ -489,27 +489,6 @@ async def test_version_mismatch_repairs_clear_when_versions_match(
     assert not ir.async_get(hass).async_get_issue(DOMAIN, issue_id)
 
 
-async def test_old_backend_missing_new_endpoint_still_reports_version_mismatch(
-    hass: HomeAssistant, backend: Backend
-) -> None:
-    integration_version = backend.version
-    backend.version = "0.4.0"
-    backend.responses[("GET", "/v1/delivery-estimates")] = (404, b"{}", {})
-    entry = MockConfigEntry(
-        domain=DOMAIN,
-        data={CONF_BACKEND_URL: backend.url, CONF_TOKEN: "integration-token"},
-    )
-    entry.add_to_hass(hass)
-    assert not await hass.config_entries.async_setup(entry.entry_id)
-    issue = ir.async_get(hass).async_get_issue(DOMAIN, "version_mismatch")
-    assert issue is not None and not issue.is_fixable
-    assert issue.translation_key == "startup_version_mismatch"
-    assert issue.translation_placeholders == {
-        "app_version": "0.4.0",
-        "integration_version": integration_version,
-    }
-
-
 @pytest.mark.parametrize("app_sidebar_visible", [False, True])
 async def test_supervised_route_leaves_sidebar_to_app_and_preserves_user_access(
     hass: HomeAssistant,
