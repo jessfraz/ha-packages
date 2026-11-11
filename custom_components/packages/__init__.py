@@ -12,7 +12,9 @@ from homeassistant.exceptions import ConfigEntryNotReady
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.typing import ConfigType
 
+from ._app_kit.repairs import async_report_startup_version
 from ._app_kit.version import LOADED_VERSION
+from ._app_kit.versions import ReleaseVersion
 from .assist_sentences import async_register_sentences
 from .client import PackagesClient
 from .const import CONF_ADDON_SLUG, CONF_BACKEND_URL, CONF_TOKEN, DOMAIN
@@ -22,6 +24,7 @@ from .coordinator import (
     amazon_notification_id,
 )
 from .http import PackagesView
+from .repairs import VERSION_REPAIR
 from .services import async_register_services
 from .statistics_migration import async_register_statistics_migration
 
@@ -57,7 +60,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: PackagesConfigEntry) -> 
     try:
         await coordinator.async_config_entry_first_refresh()
     except ConfigEntryNotReady:
-        coordinator.async_report_startup_version_mismatch()
+        if coordinator.last_backend_version is not None:
+            async_report_startup_version(
+                hass,
+                entry,
+                VERSION_REPAIR,
+                ReleaseVersion.parse(coordinator.last_backend_version),
+            )
         raise
     entry.runtime_data = coordinator
     coordinator.async_start_version_repairs()

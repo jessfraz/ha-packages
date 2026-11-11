@@ -1023,13 +1023,13 @@ dependencies = [
 
 [[package]]
 name = "ha-app-kit-ha"
-version = "0.1.5"
-source = "git+https://github.com/jessfraz/ha-app-kit?tag=v0.1.5#d433f07eb52a037a9cbd582dc730b23f531c19eb"
+version = "0.1.6"
+source = "git+https://github.com/jessfraz/ha-app-kit?tag=v0.1.6#22f15dd0728c15c57d29820e46d237dbdf0de45c"
 
 [[package]]
 name = "ha-app-ui"
-version = "0.1.5"
-source = "git+https://github.com/jessfraz/ha-app-kit?tag=v0.1.5#d433f07eb52a037a9cbd582dc730b23f531c19eb"
+version = "0.1.6"
+source = "git+https://github.com/jessfraz/ha-app-kit?tag=v0.1.6#22f15dd0728c15c57d29820e46d237dbdf0de45c"
 
 [[package]]
 name = "hashbrown"
@@ -1713,7 +1713,7 @@ dependencies = [
 
 [[package]]
 name = "packages"
-version = "0.8.7"
+version = "0.8.8"
 dependencies = [
  "anyhow",
  "base64 0.23.1",

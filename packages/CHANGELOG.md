@@ -1,3 +1,8 @@
+## 0.8.8
+
+- Keep the one-click version repair usable when an older app prevents
+  the integration from starting.
+
 ## 0.8.7
 
 - Skip elapsed UPS pickup windows in the saved location’s timezone. Keep an
