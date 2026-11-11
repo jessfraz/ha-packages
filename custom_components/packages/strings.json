@@ -168,7 +168,19 @@
               "update_app": "Back up and update the app",
               "restart": "Back up and restart Home Assistant"
             }
+          },
+          "retry": {
+            "title": "Check the version repair again",
+            "description": "Refresh the app and integration update information to find a matching release.",
+            "submit": "Retry version check"
           }
+        },
+        "error": {
+          "app_update_unavailable": "Update the app through Supervisor when a matching release becomes available.",
+          "matching_release_unavailable": "The Marketplace does not offer a matching integration release yet.",
+          "managed_update_unavailable": "Home Assistant could not find the matching managed update entities. Check the app and Marketplace installations.",
+          "update_in_progress": "An update or another version repair is already running. Try again when it finishes.",
+          "verify_failed": "Home Assistant could not verify both installed versions. Check the current app and integration versions."
         }
       }
     },
