@@ -60,7 +60,7 @@ try {
   expect(update.status).toBe(200);
   expect((await update.json()).revision).toBe(site.revision + 1);
   await page
-    .getByRole("checkbox", { name: "Accept whatever pickup fee", exact: false })
+    .getByRole("checkbox", { name: "I accept any pickup fee", exact: false })
     .check();
   await page.locator("#pickup-schedule-commit").click();
   await expect(page.locator("#pickup-schedule-error")).toContainText("changed");

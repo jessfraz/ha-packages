@@ -40,7 +40,7 @@ _ROUTES = (
         True,
     ),
     (
-        re.compile(r"pickups/availability|pickups/preview"),
+        re.compile(r"pickups/availability|pickups/preview|pickups/verify-address"),
         frozenset({"POST"}),
         True,
     ),

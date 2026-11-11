@@ -1,6 +1,10 @@
 ## 0.8.4
 
 - Match the sidebar icon in Settings Apps and Marketplace.
+- Set up a default pickup address once, save alternates in Pickup settings, and
+  start new pickups on today's date at the selected address.
+- Offer pickup on outbound labels before they move. Show only configured carriers.
+- Use a state dropdown and check changed addresses with the configured verifier.
 
 ## 0.8.3
 

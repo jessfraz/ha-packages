@@ -311,7 +311,7 @@ impl Pickup for Ups {
                         },
                         pickup_address: RateAddress {
                             city: &address.city,
-                            state_province: &address.state,
+                            state_province: address.state.as_str(),
                             postal_code: &address.postal_code,
                             country_code: &address.country,
                             residential_indicator: if plan.site.details.residential {
@@ -416,7 +416,7 @@ impl Pickup for Ups {
                         contact_name: &site.contact_name,
                         address_line: lines,
                         city: &address.city,
-                        state_province: &address.state,
+                        state_province: address.state.as_str(),
                         postal_code: &address.postal_code,
                         country_code: &address.country,
                         residential_indicator: if plan.site.details.residential {

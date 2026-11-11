@@ -1586,6 +1586,9 @@ struct EmptyTrackerPage {
 }
 impl ProviderFixture {
     fn new() -> Self {
+        Self::with_status(Status::Unknown)
+    }
+    fn with_status(initial_status: Status) -> Self {
         use std::io::{Read, Write};
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
@@ -1658,7 +1661,7 @@ impl ProviderFixture {
                                 id: format!("trk_{}", request.tracker.tracking_code),
                                 tracking_code: request.tracker.tracking_code,
                                 carrier: request.tracker.carrier.unwrap_or_else(|| "UPS".into()),
-                                status: Status::Unknown,
+                                status: initial_status,
                                 public_url: "https://track.easypost.com/test-parcel".into(),
                             })
                             .unwrap(),
@@ -2567,7 +2570,7 @@ fn pickup_site() -> packages::pickup::models::SiteInput {
             street: "123 Example Street".into(),
             secondary: None,
             city: "Example City".into(),
-            state: "CA".into(),
+            state: packages::pickup::models::PostalState::CA,
             postal_code: "90210".into(),
             country: "US".into(),
         },
@@ -2580,7 +2583,7 @@ fn pickup_site() -> packages::pickup::models::SiteInput {
     }
 }
 async fn pickup_app(uncertain: bool) -> (App, Arc<std::sync::atomic::AtomicUsize>) {
-    let shipping = ProviderFixture::new();
+    let shipping = ProviderFixture::with_status(Status::PreTransit);
     let creates = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let mut app = App::with_providers(
         None,
@@ -2612,6 +2615,41 @@ async fn pickup_app(uncertain: bool) -> (App, Arc<std::sync::atomic::AtomicUsize
         .await
         .unwrap();
     (app, creates)
+}
+
+#[tokio::test]
+async fn pickup_address_verification_skips_without_provider_and_requires_a_postal_state() {
+    use packages::shipping_api::address::AddressVerification;
+
+    let app = App::with_provider(None, None).await;
+    let address = pickup_site().address;
+    let response = app
+        .request(Method::POST, "/v1/pickups/verify-address")
+        .json(&address)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(
+        response
+            .json::<Option<AddressVerification>>()
+            .await
+            .unwrap()
+            .is_none()
+    );
+
+    let invalid_state = serde_json::to_string(&address)
+        .unwrap()
+        .replace("\"CA\"", "\"ZZ\"");
+    let response = app
+        .request(Method::POST, "/v1/pickups/verify-address")
+        .header("Content-Type", "application/json")
+        .body(invalid_state)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    app.close().await;
 }
 async fn pickup_cli(app: &App, args: Vec<String>) -> std::process::Output {
     let url = app.url.clone();
@@ -3353,7 +3391,7 @@ async fn pickup_ui_uses_configured_carriers_and_invalidates_plans_on_configurati
     use packages::pickup::{Pickup, models::PickupCarrier};
     let (one, creates) = pickup_app(false).await;
     let zero = App::new(None).await;
-    let shipping = ProviderFixture::new();
+    let shipping = ProviderFixture::with_status(Status::PreTransit);
     let providers: Vec<Arc<dyn Pickup>> = PickupCarrier::ALL
         .into_iter()
         .map(|carrier| {
@@ -3375,7 +3413,7 @@ async fn pickup_ui_uses_configured_carriers_and_invalidates_plans_on_configurati
         .save_site(None, None, pickup_site(), true)
         .await
         .unwrap();
-    let rotated_shipping = ProviderFixture::new();
+    let rotated_shipping = ProviderFixture::with_status(Status::PreTransit);
     let mut rotated = App::with_providers(
         None,
         Some(rotated_shipping.client.clone()),
@@ -3390,11 +3428,28 @@ async fn pickup_ui_uses_configured_carriers_and_invalidates_plans_on_configurati
     .await;
     rotated.provider_fixture = Some(rotated_shipping);
     for app in [&one, &zero, &multiple, &rotated] {
-        for (title, carrier, tracking) in [
-            ("UPS capability fixture", "ups", "TESTPICKUP123"),
-            ("USPS capability fixture", "usps", "TESTCAPABILITYUSPS123"),
+        for (title, carrier, tracking, direction) in [
+            (
+                "UPS capability fixture",
+                "ups",
+                "TESTPICKUP123",
+                Direction::Outbound,
+            ),
+            (
+                "USPS capability fixture",
+                "usps",
+                "TESTCAPABILITYUSPS123",
+                Direction::Outbound,
+            ),
+            (
+                "Incoming UPS label",
+                "ups",
+                "TESTINBOUNDUPS123",
+                Direction::Inbound,
+            ),
         ] {
             let mut body = input(title);
+            body.direction = direction;
             body.tracking.carrier = Some(carrier.parse().unwrap());
             body.tracking.number = tracking.into();
             let response = app

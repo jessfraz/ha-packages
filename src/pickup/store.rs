@@ -167,17 +167,18 @@ impl Store {
     ) -> Result<Site> {
         input.validate()?;
         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
-        let id = if let Some(id) = id {
-            let current =
-                sqlx::query_scalar::<_, i64>("SELECT revision FROM pickup_sites WHERE id=?")
-                    .bind(id.to_string())
-                    .fetch_optional(&mut *tx)
-                    .await?
-                    .ok_or_else(|| Error::new(ErrorCode::NotFound))?;
+        let (id, keep_default) = if let Some(id) = id {
+            let (current, is_default) = sqlx::query_as::<_, (i64, bool)>(
+                "SELECT revision,is_default FROM pickup_sites WHERE id=?",
+            )
+            .bind(id.to_string())
+            .fetch_optional(&mut *tx)
+            .await?
+            .ok_or_else(|| Error::new(ErrorCode::NotFound))?;
             if revision != Some(current) {
                 return Err(conflict());
             }
-            id
+            (id, is_default)
         } else {
             let count: i64 = sqlx::query_scalar("SELECT count(*) FROM pickup_sites")
                 .fetch_one(&mut *tx)
@@ -185,8 +186,9 @@ impl Store {
             if count >= 32 {
                 return Err(conflict());
             }
-            Uuid::now_v7()
+            (Uuid::now_v7(), count == 0)
         };
+        let make_default = make_default || keep_default;
         if make_default {
             sqlx::query("UPDATE pickup_sites SET is_default=0,revision=revision+1 WHERE is_default=1 AND id<>?").bind(id.to_string()).execute(&mut *tx).await?;
         }

@@ -208,16 +208,34 @@ label {
   margin-bottom: 20px;
 }
 #search {
-  display: flex;
+  position: relative;
   flex: 1;
-  gap: 8px;
   max-width: 560px;
   min-width: min(100%, 280px);
 }
+#search input {
+  padding-inline-end: 52px;
+}
 #search button {
+  position: absolute;
+  inset-block: 1px;
+  inset-inline-end: 1px;
+  display: grid;
+  place-items: center;
+  inline-size: 44px;
+  min-height: 0;
+  padding: 0;
   background: transparent;
-  color: inherit;
-  border-color: var(--control-border);
+  color: var(--muted);
+  border: 0;
+}
+#search button:hover {
+  color: var(--ink);
+  background: var(--soft);
+}
+#search button svg {
+  inline-size: 20px;
+  block-size: 20px;
 }
 .view-filter {
   display: flex;
@@ -846,6 +864,62 @@ button.stat[aria-pressed="true"]:hover { opacity: 1; }
 .pickup-heading h2 {
   margin: 0.15rem 0;
   font-size: clamp(1.6rem, 4vw, 2rem);
+}
+.pickup-carrier-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.pickup-carrier-badge {
+  display: inline-block;
+  padding: 3px 9px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--soft);
+  color: var(--ink);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.5;
+}
+#pickup-settings { margin-top: 24px; }
+.pickup-addresses { margin-bottom: 12px; }
+.pickup-address-row {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px 16px;
+  padding: 12px 0;
+  border-top: 1px solid var(--line);
+}
+.pickup-address-row p { margin: 4px 0 0; }
+.pickup-address-row strong { margin-inline-end: 8px; }
+.address-check-note { margin-block: 16px 4px; font-size: 13px; }
+.pickup-address-review {
+  padding: 16px;
+  margin-top: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--soft);
+}
+.address-locality.columns { grid-template-columns: 2fr 1fr 1fr; }
+.pickup-review-facts {
+  display: grid;
+  grid-template-columns: minmax(76px, auto) minmax(0, 1fr);
+  gap: 6px 16px;
+  margin: 12px 0 20px;
+}
+.pickup-review-facts dt { color: var(--muted); }
+.pickup-review-facts dd { margin: 0; overflow-wrap: anywhere; }
+@media (max-width: 500px) {
+  .address-locality.columns { grid-template-columns: 1fr 1fr; }
+  .address-locality > :first-child { grid-column: 1 / -1; }
+  #search { flex-basis: 100%; max-width: none; }
+  .view-filter { flex: 1; min-width: 0; }
+  .view-filter select { flex: 1; min-width: 0; }
 }
 .eyebrow {
   margin: 0;

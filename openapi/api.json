@@ -30,7 +30,7 @@
             "type": "string"
           },
           "state": {
-            "type": "string"
+            "$ref": "#/components/schemas/PostalState"
           },
           "street": {
             "type": "string"
@@ -44,6 +44,81 @@
           "street"
         ],
         "type": "object"
+      },
+      "AddressVerification": {
+        "oneOf": [
+          {
+            "properties": {
+              "normalized": {
+                "allOf": [
+                  {
+                    "$ref": "#/components/schemas/Address"
+                  }
+                ],
+                "nullable": true
+              },
+              "status": {
+                "enum": [
+                  "verified"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "status"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "status": {
+                "enum": [
+                  "suggested"
+                ],
+                "type": "string"
+              },
+              "suggestions": {
+                "items": {
+                  "$ref": "#/components/schemas/Address"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "status",
+              "suggestions"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "status": {
+                "enum": [
+                  "no_match"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "status"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "status": {
+                "enum": [
+                  "unavailable"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "status"
+            ],
+            "type": "object"
+          }
+        ]
       },
       "AgentCredential": {
         "properties": {
@@ -1382,6 +1457,73 @@
           "timezone"
         ],
         "type": "object"
+      },
+      "PostalState": {
+        "enum": [
+          "AL",
+          "AK",
+          "AZ",
+          "AR",
+          "CA",
+          "CO",
+          "CT",
+          "DE",
+          "DC",
+          "FL",
+          "GA",
+          "HI",
+          "ID",
+          "IL",
+          "IN",
+          "IA",
+          "KS",
+          "KY",
+          "LA",
+          "ME",
+          "MD",
+          "MA",
+          "MI",
+          "MN",
+          "MS",
+          "MO",
+          "MT",
+          "NE",
+          "NV",
+          "NH",
+          "NJ",
+          "NM",
+          "NY",
+          "NC",
+          "ND",
+          "OH",
+          "OK",
+          "OR",
+          "PA",
+          "RI",
+          "SC",
+          "SD",
+          "TN",
+          "TX",
+          "UT",
+          "VT",
+          "VA",
+          "WA",
+          "WV",
+          "WI",
+          "WY",
+          "AS",
+          "FM",
+          "GU",
+          "MH",
+          "MP",
+          "PW",
+          "PR",
+          "VI",
+          "AA",
+          "AE",
+          "AP"
+        ],
+        "type": "string"
       },
       "Preview": {
         "properties": {
@@ -5143,6 +5285,64 @@
           }
         },
         "summary": "Minimal read-only Home Assistant counts and calendar windows, without private label/site data.",
+        "tags": [
+          "pickups"
+        ]
+      }
+    },
+    "/v1/pickups/verify-address": {
+      "post": {
+        "operationId": "verify_address",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Address"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/AddressVerification"
+                    }
+                  ],
+                  "nullable": true
+                }
+              }
+            },
+            "description": "successful operation",
+            "headers": {
+              "cache-control": {
+                "required": true,
+                "schema": {
+                  "type": "string"
+                },
+                "style": "simple"
+              },
+              "etag": {
+                "schema": {
+                  "nullable": true,
+                  "type": "string"
+                },
+                "style": "simple"
+              }
+            }
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Check only the postal address using the first configured verification provider.",
         "tags": [
           "pickups"
         ]

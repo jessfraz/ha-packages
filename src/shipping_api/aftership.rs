@@ -15,14 +15,19 @@ use crate::{
         CarrierEvent, CarrierTracking, EstimatedDeliveryWindow, InputTracking, ProviderValue,
         Status, TrackingLocation, provider_optional,
     },
+    pickup::models::Address,
     shipping_api::{
         PreparedRegistration, ShippingApi,
+        address::{AddressVerification, AddressVerificationFuture, postal_state},
         error::{Error as SyncError, ErrorKind, Rejection},
         types::{ApiFuture, ProviderId, Registration, Tracker},
     },
 };
 
 const BASE: &str = "https://api.aftership.com/tracking/2026-07/";
+const ADDRESS_PATH: &str = "/address/2024-07/addresses/validate";
+const MAX_ADDRESS_SUGGESTIONS: usize = 3;
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
 const MAX_BODY_BYTES: usize = 256 * 1024;
 const MAX_PAGES: usize = 20;
 const MAX_RETRY_SECONDS: i64 = 6 * 60 * 60;
@@ -128,6 +133,105 @@ struct Meta {
 #[derive(Deserialize)]
 struct ErrorEnvelope {
     meta: Meta,
+}
+
+#[derive(Serialize)]
+struct VerifyAddressRequest<'a> {
+    request_address: PostalAddressRequest<'a>,
+    max_address_response: usize,
+}
+
+#[derive(Serialize)]
+struct PostalAddressRequest<'a> {
+    street_1: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    street_2: Option<&'a str>,
+    postal_code: &'a str,
+    city: &'a str,
+    state: AddressCode<'a>,
+    country_region: AddressCode<'a>,
+}
+
+#[derive(Serialize)]
+struct AddressCode<'a> {
+    code: &'a str,
+}
+
+#[derive(Deserialize)]
+struct AddressValidation {
+    status: AddressStatus,
+    suggested_addresses: Vec<SuggestedAddress>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum AddressStatus {
+    Valid,
+    Invalid,
+}
+
+#[derive(Deserialize)]
+struct SuggestedAddress {
+    street_1: String,
+    street_2: Option<String>,
+    street_3: Option<String>,
+    postal_code: Option<String>,
+    city: Option<String>,
+    state: Option<ReturnedAddressCode>,
+    country_region: ReturnedAddressCode,
+}
+
+#[derive(Deserialize)]
+struct ReturnedAddressCode {
+    code: Option<String>,
+}
+
+impl SuggestedAddress {
+    fn into_address(self) -> Option<Address> {
+        if self.country_region.code.as_deref() != Some("USA")
+            || self.street_3.is_some_and(|value| !value.trim().is_empty())
+        {
+            return None;
+        }
+        let address = Address {
+            street: self.street_1,
+            secondary: self.street_2.filter(|value| !value.trim().is_empty()),
+            city: self.city?,
+            state: postal_state(self.state?.code.as_deref()?.strip_prefix("US-")?)?,
+            postal_code: self.postal_code?,
+            country: "US".into(),
+        };
+        address.validate().ok()?;
+        Some(address)
+    }
+}
+
+impl AddressValidation {
+    fn verification(self, original: &Address) -> Option<AddressVerification> {
+        if self.suggested_addresses.len() > MAX_ADDRESS_SUGGESTIONS {
+            return None;
+        }
+        let had_suggestions = !self.suggested_addresses.is_empty();
+        let mut suggestions = Vec::new();
+        for candidate in self.suggested_addresses {
+            if let Some(address) = candidate.into_address()
+                && !suggestions.contains(&address)
+            {
+                suggestions.push(address);
+            }
+        }
+        if had_suggestions && suggestions.is_empty() {
+            return None;
+        }
+        match (self.status, suggestions.as_slice()) {
+            (AddressStatus::Valid, []) => Some(AddressVerification::Verified { normalized: None }),
+            (AddressStatus::Valid, [candidate]) => {
+                Some(AddressVerification::verified(original, candidate.clone()))
+            }
+            (AddressStatus::Invalid, []) => Some(AddressVerification::NoMatch),
+            _ => Some(AddressVerification::Suggested { suggestions }),
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -437,7 +541,7 @@ impl AfterShipClient {
             .map_err(|_| provider_error(ErrorKind::Configuration))?;
         api_key.set_sensitive(true);
         let client = Client::builder()
-            .timeout(Duration::from_secs(20))
+            .timeout(REQUEST_TIMEOUT)
             .redirect(reqwest::redirect::Policy::none())
             .retry(reqwest::retry::never())
             .user_agent(concat!("packages/", env!("CARGO_PKG_VERSION")))
@@ -850,6 +954,48 @@ fn check_retention(started_at: i64) -> Result<(), SyncError> {
 }
 
 impl ShippingApi for AfterShipClient {
+    fn verify_pickup_address<'a>(
+        &'a self,
+        address: &'a Address,
+    ) -> Option<AddressVerificationFuture<'a>> {
+        Some(Box::pin(async move {
+            if address.validate().is_err() {
+                return AddressVerification::Unavailable;
+            }
+            let verify = self.observe("verify_pickup_address", async {
+                let state = format!("US-{}", address.state.as_str());
+                let request = self
+                    .authenticated(self.client.post(self.url(ADDRESS_PATH)?))
+                    .json(&VerifyAddressRequest {
+                        request_address: PostalAddressRequest {
+                            street_1: &address.street,
+                            street_2: address.secondary.as_deref(),
+                            postal_code: &address.postal_code,
+                            city: &address.city,
+                            state: AddressCode { code: &state },
+                            country_region: AddressCode { code: "USA" },
+                        },
+                        max_address_response: MAX_ADDRESS_SUGGESTIONS,
+                    });
+                let body = self.send(request).await?;
+                let response: Envelope<AddressValidation> = serde_json::from_slice(&body.bytes)
+                    .map_err(|_| body.attach(provider_error(ErrorKind::InvalidResponse)))?;
+                if response.meta.code != 200 {
+                    return Err(body.attach(provider_error(ErrorKind::InvalidResponse)));
+                }
+                response
+                    .data
+                    .verification(address)
+                    .ok_or_else(|| body.attach(provider_error(ErrorKind::InvalidResponse)))
+            });
+            tokio::time::timeout(REQUEST_TIMEOUT, verify)
+                .await
+                .ok()
+                .and_then(Result::ok)
+                .unwrap_or(AddressVerification::Unavailable)
+        }))
+    }
+
     fn id(&self) -> ProviderId {
         ProviderId::AfterShip
     }
@@ -2039,5 +2185,109 @@ mod tests {
         let error = task.await.unwrap().err().unwrap();
         assert_eq!(error.error_code(), "registration_expired");
         server.no_request();
+    }
+
+    #[tokio::test]
+    async fn aftership_pickup_address_verification_uses_the_separate_address_product() {
+        use crate::pickup::models::PostalState;
+
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct PostalRequest {
+            street_1: String,
+            street_2: String,
+            postal_code: String,
+            city: String,
+            state: ReturnedAddressCode,
+            country_region: ReturnedAddressCode,
+        }
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Request {
+            request_address: PostalRequest,
+            max_address_response: usize,
+        }
+
+        let suggestion = Address {
+            street: "12 EXAMPLE ST".into(),
+            secondary: Some("UNIT 3".into()),
+            city: "SAMPLE".into(),
+            state: PostalState::CA,
+            postal_code: "90001-1234".into(),
+            country: "US".into(),
+        };
+        let wire_suggestion = r#"{"street_1":"12 EXAMPLE ST","street_2":"UNIT 3","city":"SAMPLE","postal_code":"90001-1234","state":{"code":"US-CA"},"country_region":{"code":"USA"}}"#;
+        let incomplete_suggestion =
+            r#"{"street_1":"12 EXAMPLE ST","state":null,"country_region":{"code":"USA"}}"#;
+        for (status, body, expected) in [
+            (
+                200,
+                format!(
+                    r#"{{"meta":{{"code":200}},"data":{{"status":"valid","suggested_addresses":[{wire_suggestion}],"errors":[]}}}}"#
+                ),
+                AddressVerification::Verified {
+                    normalized: Some(suggestion.clone()),
+                },
+            ),
+            (
+                200,
+                format!(
+                    r#"{{"meta":{{"code":200}},"data":{{"status":"invalid","suggested_addresses":[{incomplete_suggestion},{wire_suggestion}],"errors":[]}}}}"#
+                ),
+                AddressVerification::Suggested {
+                    suggestions: vec![suggestion],
+                },
+            ),
+            (
+                200,
+                r#"{"meta":{"code":200},"data":{"status":"invalid","suggested_addresses":[]}}"#
+                    .into(),
+                AddressVerification::NoMatch,
+            ),
+            (
+                200,
+                r#"{"meta":{"code":4104},"data":{"status":"invalid","suggested_addresses":[]}}"#
+                    .into(),
+                AddressVerification::Unavailable,
+            ),
+            (
+                401,
+                r#"{"meta":{"code":401,"message":"synthetic provider detail"},"data":{}}"#.into(),
+                AddressVerification::Unavailable,
+            ),
+        ] {
+            let mut server = Server::new();
+            let client = server.client();
+            let address = Address {
+                street: "12 Example Street".into(),
+                secondary: Some("Unit 3".into()),
+                city: "Sample".into(),
+                state: PostalState::CA,
+                postal_code: "90001".into(),
+                country: "US".into(),
+            };
+            let verification =
+                tokio::spawn(async move { client.verify_pickup_address(&address).unwrap().await });
+            let request = tokio::time::timeout(Duration::from_secs(5), server.incoming.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(request.method, "POST");
+            assert_eq!(request.target, "/address/2024-07/addresses/validate");
+            let wire: Request = serde_json::from_slice(&request.body).unwrap();
+            assert_eq!(wire.max_address_response, 3);
+            assert_eq!(wire.request_address.street_1, "12 Example Street");
+            assert_eq!(wire.request_address.street_2, "Unit 3");
+            assert_eq!(wire.request_address.city, "Sample");
+            assert_eq!(wire.request_address.state.code.as_deref(), Some("US-CA"));
+            assert_eq!(wire.request_address.postal_code, "90001");
+            assert_eq!(
+                wire.request_address.country_region.code.as_deref(),
+                Some("USA")
+            );
+            request.respond(status, &body);
+            assert!(verification.await.unwrap() == expected);
+            server.no_request();
+        }
     }
 }

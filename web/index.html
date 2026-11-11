@@ -54,13 +54,18 @@
       <section id="dashboard" hidden>
         <div id="summary" class="summary" aria-label="Package summary"></div>
         <div class="toolbar">
-          <form id="search">
+          <form id="search" role="search" aria-label="Package search">
             <label class="sr-only" for="query">Search packages</label>
             <input
               id="query"
               type="search"
               placeholder="Search title, merchant, or order"
-            ><button>Search</button>
+            >
+            <button type="submit" aria-label="Search" title="Search">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true" focusable="false">
+                <circle cx="10.75" cy="10.75" r="5.75"/><path d="m15 15 4 4"/>
+              </svg>
+            </button>
           </form>
           <label class="view-filter" for="view"
             >View
@@ -153,20 +158,13 @@
       </section>
       <section id="pickups-dashboard" hidden aria-labelledby="pickups-title">
         <div class="pickup-heading">
-          <div>
-            <p class="eyebrow">Prepaid labels, one collection</p>
-            <h2 id="pickups-title">Pickups</h2>
-          </div>
+          <h2 id="pickups-title">Pickups</h2>
+          <ul id="pickup-carrier-badges" class="pickup-carrier-badges" aria-label="Enabled pickup carriers"></ul>
         </div>
-        <p class="muted">
-          USPS, UPS and FedEx collect at your saved pickup address. Scheduling does
-          not buy postage.
-        </p>
         <div class="pickup-heading">
           <p id="pickup-site-summary" class="muted"></p>
           <div class="header-actions">
-            <button id="pickup-edit-site" class="quiet" type="button">
-              Add pickup address</button>
+            <button id="pickup-setup-site" type="button">Set up pickup address</button>
           </div>
         </div>
         <p id="pickup-message" role="status" aria-live="polite"></p>
@@ -175,6 +173,12 @@
         <button id="pickup-reload" class="quiet" type="button">
           Refresh pickups
         </button>
+        <details id="pickup-settings" class="installation" hidden>
+          <summary>Pickup settings</summary>
+          <h3>Saved addresses</h3>
+          <div id="pickup-addresses" class="pickup-addresses"></div>
+          <button id="pickup-add-site" class="quiet" type="button">Add another address</button>
+        </details>
       </section>
     </main>
     <footer id="app-footer" class="app-footer"></footer>
@@ -185,7 +189,7 @@
         >
           <form id="pickup-site-form">
             <div class="dialog-heading">
-              <h2 id="pickup-site-title">Pickup address</h2>
+              <h2 id="pickup-site-title">Set up pickup address</h2>
               <button
                 id="pickup-site-close"
                 type="button"
@@ -196,17 +200,10 @@
               </button>
             </div>
             <div class="dialog-body">
-              <p class="muted">
-                Confirm where parcels will be ready. This is independent of your
-                carrier billing address.
-              </p>
-              <label
-                >Location name<input
-                  name="name"
-                  required
-                  maxlength="80"
-                  autocomplete="off"
-              /></label>
+              <p id="pickup-site-intro" class="muted"></p>
+              <label id="pickup-site-label" hidden>Address label <span class="optional-label">Optional</span>
+                <input name="name" maxlength="80" autocomplete="off" placeholder="Office" />
+              </label>
               <div class="columns">
                 <label
                   >Contact name<input
@@ -237,27 +234,22 @@
                   autocomplete="address-line1"
               /></label>
               <label
-                >Apartment or suite<input
+                >Apartment or suite <span class="optional-label">Optional</span><input
                   name="secondary"
                   maxlength="35"
                   autocomplete="address-line2"
               /></label>
-              <div class="columns">
+              <div class="columns address-locality">
                 <label
                   >City<input
                     name="city"
                     required
                     maxlength="28"
                     autocomplete="address-level2" /></label
-                ><label
-                  >State<input
-                    name="state"
-                    required
-                    minlength="2"
-                    maxlength="2"
-                    pattern="[A-Z]{2}"
-                    autocomplete="address-level1" /></label
-                ><label
+                ><label>State<select name="state" required autocomplete="address-level1">
+                    <option value="" disabled selected>Select state</option>
+                    <!-- POSTAL_STATES -->
+                  </select></label><label
                   >ZIP code<input
                     name="postal_code"
                     required
@@ -305,11 +297,23 @@
                 ><input name="residential" type="checkbox" checked />
                 Residential address</label
               >
+              <label id="pickup-site-default" class="checkbox-label" hidden>
+                <input name="make_default" type="checkbox" /> Make this the default pickup address
+              </label>
+              <p class="muted address-check-note">A configured address verifier checks the street address when you save. Your contact details stay in Packages.</p>
+              <section id="pickup-address-review" class="pickup-address-review" aria-labelledby="pickup-address-review-title" hidden>
+                <h3 id="pickup-address-review-title" tabindex="-1">Review address</h3>
+                <p id="pickup-address-review-message" role="status"></p>
+                <div class="actions">
+                  <button id="pickup-use-suggested-address" type="button">Use suggested address</button>
+                  <button id="pickup-keep-entered-address" type="button" class="quiet">Keep entered address</button>
+                </div>
+              </section>
             </div>
             <div class="dialog-footer">
               <p id="pickup-site-error" role="alert"></p>
               <div class="actions">
-                <button type="submit">Save default pickup address</button>
+                <button id="pickup-site-save" type="submit">Save default address</button>
               </div>
             </div>
           </form>
@@ -352,19 +356,18 @@
                   ><label
                     >Pickup date<input name="date" type="date" /><span
                       class="muted"
-                      >Leave empty for the next available date.</span
+                      >Starts with today at the pickup address. Clear for the next available date.</span
                     ></label
                   >
                 </div>
                 <label
                   >Pickup address<select name="site_id" required></select
                 ></label>
-                <details>
+                <details id="pickup-label-details">
                   <summary>Label details and time window</summary>
                   <p class="muted">
                     Saved details are used automatically. New labels need their
-                    actual service and weight. For different services or
-                    weights, save each label’s details with the CLI first.
+                    actual service and weight. Schedule labels with different services separately.
                   </p>
                   <div class="columns">
                     <label
@@ -391,25 +394,19 @@
               <section
                 id="pickup-review"
                 hidden
-                aria-label="Review pickup"
-                tabindex="-1"
+                aria-labelledby="pickup-review-title"
               >
-                <h3>Review pickup</h3>
+                <h3 id="pickup-review-title" tabindex="-1">Review pickup</h3>
                 <div id="pickup-review-details"></div>
                 <p class="muted">
-                  Missing tracking watchers will be added and verified first.
-                  Existing watchers are reused. Scheduling is not confirmation
-                  that parcels were collected.
+                  Packages starts tracking any new labels before booking. A booking does not confirm collection.
                 </p>
+                <label id="pickup-fee-label" class="checkbox-label" hidden
+                  ><input name="accept_fee" type="checkbox" /> I accept any pickup fee charged to the configured carrier account.</label>
               </section>
             </div>
             <div id="pickup-actions" class="dialog-footer">
               <p id="pickup-schedule-error" role="alert"></p>
-              <label id="pickup-fee-label" class="checkbox-label" hidden
-                ><input name="accept_fee" type="checkbox" /> Accept whatever
-                pickup fee each carrier charges to its configured shipping
-                account.</label
-              >
               <div class="header-actions">
                 <button
                   id="pickup-review-edit"
