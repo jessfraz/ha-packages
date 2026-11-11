@@ -327,6 +327,7 @@ fn provider_response(provider: ProviderId, method: &str, path: &str, body: &[u8]
                 match request.slug[0].as_str() {
                     "speedx" => Some("speedx"),
                     "amazon" => Some("amazon"),
+                    "sf-express" => Some("sf-express"),
                     other => panic!("Unexpected AfterShip courier: {other}"),
                 }
             } else {
@@ -489,6 +490,147 @@ async fn duplicate(response: Response, existing: Uuid) {
     let failure: Failure = response.json().await.unwrap();
     assert_eq!(failure.error_code.as_deref(), Some("tracking_duplicate"));
     assert!(failure.message.contains(&existing.to_string()));
+}
+
+#[tokio::test]
+async fn sf_express_uses_aftership_and_replays_without_duplicate_registration() {
+    let app = App::new(false).await;
+    let input = input(
+        "SF0000000000001",
+        Some(Carrier::SfExpress),
+        Direction::Inbound,
+    );
+    let response = app.create(&input, "sf-express").send().await.unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let shipment: Shipment = response.json().await.unwrap();
+    assert_eq!(shipment.sync.provider, ProviderId::AfterShip);
+    assert_eq!(shipment.tracking.carrier, Carrier::SfExpress);
+    assert_eq!(shipment.status, Status::PreTransit);
+    assert_eq!(app.easypost.calls(), 0);
+    assert_eq!(app.aftership.registrations(), 1);
+
+    let calls = app.calls();
+    let replay = app.create(&input, "sf-express").send().await.unwrap();
+    assert!(replay.status().is_success());
+    let replay: Shipment = replay.json().await.unwrap();
+    assert_eq!(replay.id, shipment.id);
+    assert_eq!(app.calls(), calls);
+    let saved = app.store.get(shipment.id).await.unwrap();
+    assert_eq!(saved.sync.provider, ProviderId::AfterShip);
+    assert_eq!(saved.sync.tracker_id, shipment.sync.tracker_id);
+    app.close().await;
+}
+
+#[tokio::test]
+async fn resubmitting_sf_express_tracking_moves_the_existing_record_to_aftership() {
+    use packages::{
+        models::{CarrierTracking, Source},
+        shipping_api::types::Tracker,
+    };
+
+    let app = App::new(false).await;
+    let mut input = input(
+        "SF0000000000002",
+        Some(Carrier::SfExpress),
+        Direction::Inbound,
+    );
+    input.signature_required = Some(true);
+    input.source = Some(Source {
+        namespace: "test".into(),
+        key: "existing-sf-source".into(),
+    });
+    let original = app
+        .store
+        .create(
+            input.clone(),
+            "owner",
+            "old-sf",
+            Some(&Tracker {
+                provider: ProviderId::EasyPost,
+                id: "trk_legacy_sf".into(),
+                tracking_code: input.tracking.number.clone(),
+                carrier: Carrier::SfExpress,
+                status: Status::Unknown,
+                public_url: None,
+                carrier_tracking: CarrierTracking::default(),
+            }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(original.sync.provider, ProviderId::EasyPost);
+
+    let response = app
+        .client
+        .patch(format!("{}/v1/packages/{}", app.url, original.id))
+        .bearer_auth(OWNER)
+        .header("If-Match", format!("\"{}\"", original.revision))
+        .json(&UpdateShipment {
+            tracking: Patch {
+                value: Some(Some(input.tracking)),
+            },
+            ..Default::default()
+        })
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let updated: Shipment = response.json().await.unwrap();
+    assert_eq!(updated.id, original.id);
+    assert_eq!(updated.tracking, original.tracking);
+    assert_eq!(updated.title, original.title);
+    assert_eq!(updated.signature_required, original.signature_required);
+    assert_eq!(updated.sources, original.sources);
+    assert_eq!(updated.sync.provider, ProviderId::AfterShip);
+    assert_eq!(
+        updated.sync.tracker_id.as_deref(),
+        Some("as_SF0000000000002")
+    );
+    assert_eq!(app.easypost.calls(), 0);
+    assert_eq!(app.aftership.registrations(), 1);
+    assert_eq!(app.count().await, 1);
+    app.close().await;
+}
+
+#[tokio::test]
+async fn unchanged_tracking_edits_preserve_amazon_owned_carrier_parcels() {
+    use packages::{models::CarrierTracking, shipping_api::types::Tracker};
+
+    for carrier in [Carrier::Usps, Carrier::Ups] {
+        let app = App::new(false).await;
+        let input = input("AMAZONNATIVE0001", Some(carrier), Direction::Inbound);
+        let original = app
+            .store
+            .create(
+                input,
+                "owner",
+                "amazon-owned",
+                Some(&Tracker {
+                    provider: ProviderId::AmazonAccount,
+                    id: "amazon_native_parcel".into(),
+                    tracking_code: "AMAZONNATIVE0001".into(),
+                    carrier,
+                    status: Status::InTransit,
+                    public_url: None,
+                    carrier_tracking: CarrierTracking::default(),
+                }),
+            )
+            .await
+            .unwrap();
+        let response = app
+            .patch(&original, original.tracking.clone().into())
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let updated: Shipment = response.json().await.unwrap();
+        assert_eq!(updated.title, "Updated parcel");
+        assert_eq!(updated.sync.provider, ProviderId::AmazonAccount);
+        assert_eq!(updated.sync.tracker_id, original.sync.tracker_id);
+        assert_eq!(updated.tracking, original.tracking);
+        assert_eq!(updated.status, original.status);
+        assert_eq!(app.calls(), (0, 0));
+        app.close().await;
+    }
 }
 
 #[tokio::test]

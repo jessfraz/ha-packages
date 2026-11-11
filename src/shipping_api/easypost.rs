@@ -892,6 +892,11 @@ fn shift_calendar_months(timestamp: i64, months: i32) -> Result<i64, SyncError> 
 }
 
 impl ShippingApi for EasyPostClient {
+    fn supports_carrier(&self, carrier: Carrier) -> bool {
+        // Previously registered SF Express trackers keep their EasyPost owner.
+        carrier == Carrier::SfExpress || ProviderId::for_carrier(Some(carrier)) == self.id()
+    }
+
     fn verify_pickup_address<'a>(
         &'a self,
         address: &'a Address,

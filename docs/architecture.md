@@ -28,7 +28,8 @@ clients. Never try a different provider automatically after an uncertain
 registration outcome.
 
 `aftership.rs` owns AfterShip authentication, carrier slugs and tracker
-reconciliation for SpeedX, Sway, and Veho. `doordash.rs` implements read-only
+reconciliation for SF Express, SpeedX, Sway, and Veho. `doordash.rs` implements
+read-only
 recipient tracking, with a fixed URL allowlist, response and transport bounds,
 typed observations and no JavaScript execution. Its HTML hydration parser is
 a website adapter, not a stable public API contract; changed or ambiguous data

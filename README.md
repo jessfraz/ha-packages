@@ -50,7 +50,7 @@ tracked before its first scan.
 | --- | --- |
 | EasyPost | Most carriers, including automatic carrier detection. |
 | Amazon account | Verified parcels from your connected Amazon.com account. |
-| AfterShip | Amazon MCF, SpeedX, Sway / Returnmates, and Veho. |
+| AfterShip | Amazon MCF, SF Express, SpeedX, Sway / Returnmates, and Veho. |
 | DoorDash | Parcels with an original DoorDash Drive recipient tracking link. No API key required. |
 
 ### Amazon account imports

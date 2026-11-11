@@ -52,6 +52,8 @@ enum Courier {
     Sway,
     #[serde(rename = "veho")]
     Veho,
+    #[serde(rename = "sf-express")]
+    SfExpress,
 }
 
 impl Courier {
@@ -61,6 +63,7 @@ impl Courier {
             Some(Carrier::SpeedX) => Ok(Self::SpeedX),
             Some(Carrier::Sway) => Ok(Self::Sway),
             Some(Carrier::Veho) => Ok(Self::Veho),
+            Some(Carrier::SfExpress) => Ok(Self::SfExpress),
             _ => Err(provider_error(ErrorKind::Rejected(
                 Rejection::NoCarrierForCode,
             ))),
@@ -73,6 +76,7 @@ impl Courier {
             Self::SpeedX => "speedx",
             Self::Sway => "sway-webhook",
             Self::Veho => "veho",
+            Self::SfExpress => "sf-express",
         }
     }
 
@@ -82,6 +86,7 @@ impl Courier {
             Self::SpeedX => Carrier::SpeedX,
             Self::Sway => Carrier::Sway,
             Self::Veho => Carrier::Veho,
+            Self::SfExpress => Carrier::SfExpress,
         }
     }
 }
@@ -1529,6 +1534,7 @@ mod tests {
             ("speedx", Carrier::SpeedX),
             ("sway-webhook", Carrier::Sway),
             ("veho", Carrier::Veho),
+            ("sf-express", Carrier::SfExpress),
         ] {
             let mut server = Server::new();
             let client = server.client();
@@ -1543,7 +1549,10 @@ mod tests {
             let request = server.request("POST", "couriers/detect").await;
             let input: RequestedDetection = serde_json::from_slice(&request.body).unwrap();
             assert_eq!(input.tracking_number, NUMBER);
-            assert_eq!(input.slug, ["amazon", "speedx", "sway-webhook", "veho"]);
+            assert_eq!(
+                input.slug,
+                ["amazon", "sf-express", "speedx", "sway-webhook", "veho"]
+            );
             request.respond(200, &format!(r#"{{"meta":{{"code":200}},"data":{{"total":1,"couriers":[{{"slug":"{slug}"}}]}}}}"#));
             assert_eq!(task.await.unwrap().unwrap(), Some(carrier));
             server.no_request();
