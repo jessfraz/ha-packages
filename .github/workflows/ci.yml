@@ -46,7 +46,7 @@ jobs:
       - run: uv sync --frozen
       - name: Install the Marketplace bundle for native tests
         run: |
-          uv run --frozen python scripts/build-integration --output "$RUNNER_TEMP/integration"
+          uv run --frozen python scripts/build-integration --check-brand packages --output "$RUNNER_TEMP/integration"
           mv custom_components/packages "$RUNNER_TEMP/integration-source"
           uv run --frozen python -m zipfile -e "$RUNNER_TEMP/integration/packages.zip" custom_components/packages
       - run: uv run --frozen ruff check custom_components tests_ha
