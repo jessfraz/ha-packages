@@ -1,3 +1,7 @@
+## 0.8.6
+
+- Keep version Repairs actionable when native update checks need a retry.
+
 ## 0.8.5
 
 - Track SF Express through AfterShip. Resubmit tracking on an existing package to

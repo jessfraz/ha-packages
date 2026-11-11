@@ -1,5 +1,5 @@
 name: Packages
-version: "0.8.5"
+version: "0.8.6"
 slug: packages
 description: A local shipment registry with a Home Assistant dashboard
 url: https://github.com/jessfraz/ha-packages
