@@ -36,9 +36,13 @@ impl ProviderId {
         match carrier {
             Some(Carrier::AmazonAccount) => Self::AmazonAccount,
             Some(Carrier::DoorDash) => Self::DoorDash,
-            Some(Carrier::AmazonMcf | Carrier::SpeedX | Carrier::Sway | Carrier::Veho) => {
-                Self::AfterShip
-            }
+            Some(
+                Carrier::AmazonMcf
+                | Carrier::SpeedX
+                | Carrier::Sway
+                | Carrier::Veho
+                | Carrier::SfExpress,
+            ) => Self::AfterShip,
             _ => Self::EasyPost,
         }
     }

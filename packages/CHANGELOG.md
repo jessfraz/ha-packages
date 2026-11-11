@@ -1,3 +1,8 @@
+## 0.8.5
+
+- Track SF Express through AfterShip. Resubmit tracking on an existing package to
+  switch providers while retaining its identity and source references.
+
 ## 0.8.4
 
 - Match the sidebar icon in Settings Apps and Marketplace.

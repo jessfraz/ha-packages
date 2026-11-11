@@ -388,6 +388,66 @@ async fn first_attempt_adopts_existing_tracker_without_a_saved_registration_inte
 }
 
 #[tokio::test]
+async fn existing_easypost_sf_express_tracker_keeps_its_provider_and_refreshes() {
+    use packages::{
+        carrier::Carrier,
+        models::CarrierTracking,
+        shipping_api::types::{ProviderId, Tracker},
+    };
+
+    let fixture = Fixture::new().await;
+    let shipment = fixture
+        .store
+        .create(
+            CreateShipment {
+                title: "Existing SF Express parcel".into(),
+                direction: Direction::Inbound,
+                merchant: None,
+                order_reference: None,
+                signature_required: None,
+                tracking: InputTracking {
+                    carrier: Some(Carrier::SfExpress),
+                    number: NUMBER.into(),
+                    recipient_url: None,
+                },
+                source: None,
+            },
+            "test",
+            "legacy-sf-express",
+            Some(&Tracker {
+                provider: ProviderId::EasyPost,
+                id: "trk_existing_sf".into(),
+                tracking_code: NUMBER.into(),
+                carrier: Carrier::SfExpress,
+                status: Status::Unknown,
+                public_url: None,
+                carrier_tracking: CarrierTracking::default(),
+            }),
+        )
+        .await
+        .unwrap();
+    fixture.due(shipment.id).await;
+    let mut provider = Provider::new();
+    let task = spawn(provider.worker(&fixture.store));
+    let request = provider.request().await;
+    assert_eq!(request.method, "GET");
+    assert_eq!(request.target, "/v2/trackers/trk_existing_sf");
+    let mut observation = tracker(NUMBER);
+    observation.id = "trk_existing_sf".into();
+    observation.carrier = "SFExpress".into();
+    observation.status = Status::InTransit;
+    request.respond(200, serde_json::to_string(&observation).unwrap());
+    assert!(task.await.unwrap().unwrap());
+    let saved = fixture.store.get(shipment.id).await.unwrap();
+    assert_eq!(saved.status, Status::InTransit);
+    assert_eq!(saved.sync.provider, ProviderId::EasyPost);
+    assert_eq!(saved.sync.tracker_id.as_deref(), Some("trk_existing_sf"));
+    assert!(saved.sync.last_error.is_none());
+    provider.no_request();
+    fixture.store.close().await.unwrap();
+}
+
+#[tokio::test]
 async fn complete_empty_first_lookup_registers_once_with_the_requested_identity() {
     let fixture = Fixture::new().await;
     let shipment = fixture.shipment().await;

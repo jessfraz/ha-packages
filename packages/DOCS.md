@@ -335,7 +335,7 @@ rename an entity in Home Assistant.
 | Option | Purpose |
 | --- | --- |
 | `easypost_api_key` | Enables tracking verification before saving and background tracking updates. |
-| `aftership_api_key` | Enables Amazon MCF, SpeedX, Sway / Returnmates, and Veho tracking through AfterShip. |
+| `aftership_api_key` | Enables Amazon MCF, SF Express, SpeedX, Sway / Returnmates, and Veho tracking through AfterShip. |
 
 DoorDash requires its original recipient tracking link rather than an API key.
 Other carriers and automatic carrier detection use EasyPost. Provider keys

@@ -935,11 +935,13 @@ impl Store {
                     .ok_or(Error::CarrierRequired)?,
             };
             changed_tracking = tracking != shipment.tracking;
+            if changed_tracking {
+                shipment.signature_required = None;
+            }
             shipment.tracking = tracking;
         }
-        if changed_tracking {
-            shipment.signature_required = None;
-        }
+        changed_tracking |=
+            verified.is_some_and(|tracker| tracker.provider != shipment.sync.provider);
         if let Some(value) = input.signature_required.value {
             shipment.signature_required = value;
         }
