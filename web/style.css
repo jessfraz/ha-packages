@@ -204,9 +204,9 @@ label {
   display: flex;
   gap: 12px;
   align-items: center;
-  justify-content: space-between;
   margin-bottom: 20px;
 }
+.toolbar > #refresh { margin-inline-start: auto; }
 #search {
   position: relative;
   flex: 1;
@@ -865,6 +865,7 @@ button.stat[aria-pressed="true"]:hover { opacity: 1; }
   margin: 0.15rem 0;
   font-size: clamp(1.6rem, 4vw, 2rem);
 }
+.pickup-title-row { justify-content: flex-start; }
 .pickup-carrier-badges {
   display: flex;
   flex-wrap: wrap;
@@ -906,6 +907,8 @@ button.stat[aria-pressed="true"]:hover { opacity: 1; }
   background: var(--soft);
 }
 .address-locality.columns { grid-template-columns: 2fr 1fr 1fr; }
+#pickup-site-dialog .columns { gap: 12px; margin-block: 16px; }
+#pickup-site-dialog .columns > label { margin: 0; }
 .pickup-review-facts {
   display: grid;
   grid-template-columns: minmax(76px, auto) minmax(0, 1fr);
@@ -956,11 +959,6 @@ button.stat[aria-pressed="true"]:hover { opacity: 1; }
 .pickup-state.unknown {
   color: var(--danger, #be3535);
 }
-#pickup-review {
-  border-top: 1px solid var(--line);
-  margin-top: 1rem;
-  padding-top: 0.5rem;
-}
 #pickup-plan-fields {
   border: 0;
   padding: 0;
@@ -1004,9 +1002,7 @@ button.stat[aria-pressed="true"]:hover { opacity: 1; }
 }
 #pickup-review {
   scroll-margin-top: 1rem;
-  outline: none;
-  border-top: 0;
-  margin-top: 0;
+  padding-top: 16px;
 }
 #pickup-review h3 {
   margin-top: 0;
