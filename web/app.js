@@ -65,7 +65,7 @@ const pickups = installPickups(byId("pickups-dashboard"), byId("schedule-pickup"
   onCapabilitiesChanged: (available) => {
     byId("show-pickups").hidden = !available;
     for (const action of byId("actions").querySelectorAll("[data-pickup-carrier]"))
-      action.hidden = !pickups.canSchedule(action.dataset.pickupCarrier);
+      updatePickupAction(action);
     if (!available && activePage === "pickups") {
       writeRoute({ page: null }, true);
       selectPage("packages");
@@ -91,6 +91,24 @@ function element(tag, text, className) {
   if (text !== undefined) node.textContent = text;
   if (className) node.className = className;
   return node;
+}
+
+function updatePickupAction(action) {
+  const carrier = pickups.carrierStatus(action.dataset.pickupCarrier);
+  const setup = byId("pickup-setup");
+  action.hidden = !carrier;
+  if (!carrier || carrier.configured) {
+    action.textContent = "Schedule pickup";
+    action.removeAttribute("aria-controls");
+    action.removeAttribute("aria-expanded");
+    setup.hidden = true;
+    setup.textContent = "";
+    return;
+  }
+  action.textContent = `Set up ${carrier.name} pickup`;
+  action.setAttribute("aria-controls", "pickup-setup");
+  action.setAttribute("aria-expanded", String(!setup.hidden));
+  setup.textContent = `${carrier.name} pickups are supported. Add ${carrier.name} developer credentials in the app configuration, then return here to schedule this label. Pickup access uses separate credentials from tracking.`;
 }
 
 function statusBadge(status) {
@@ -429,7 +447,9 @@ function setOwnerAccess(owner, reset = false) {
   }
   byId("correction").hidden = !owner;
   for (const button of byId("actions").querySelectorAll("[data-owner-only]"))
-    button.hidden = !owner || (button.dataset.pickupCarrier && !pickups.canSchedule(button.dataset.pickupCarrier));
+    button.hidden = !owner;
+  for (const action of byId("actions").querySelectorAll("[data-pickup-carrier]"))
+    updatePickupAction(action);
 }
 
 async function refreshInstallation(generation, signal) {
@@ -1104,6 +1124,7 @@ async function show(id, preserveView = false, section = route().get("section")) 
   const view = preserveView && selected?.id === id ? {
     scroll: byId("detail").scrollTop,
     status: byId("override-form").elements.namedItem("status").value,
+    pickupSetup: !byId("pickup-setup").hidden,
     disclosures: [...byId("detail").querySelectorAll("details[id]")].map(node => [node.id, node.open]),
   } : null;
   selected = shipment;
@@ -1214,6 +1235,9 @@ async function show(id, preserveView = false, section = route().get("section")) 
 
   const actions = byId("actions");
   actions.replaceChildren();
+  const pickupSetup = byId("pickup-setup");
+  pickupSetup.hidden = true;
+  pickupSetup.textContent = "";
   const button = (label, action, ownerOnly = false) => {
     const node = element("button", label, "quiet");
     if (ownerOnly) node.dataset.ownerOnly = "true";
@@ -1231,12 +1255,21 @@ async function show(id, preserveView = false, section = route().get("section")) 
   if (!shipment.archived && shipment.direction === "outbound" && shipment.tracking &&
       shipment.status === "pre_transit") {
     const action = button("Schedule pickup", () => {
+      const carrier = pickups.carrierStatus(shipment.tracking.carrier);
+      if (!carrier) return;
+      if (!carrier.configured) {
+        pickupSetup.hidden = !pickupSetup.hidden;
+        action.setAttribute("aria-expanded", String(!pickupSetup.hidden));
+        if (!pickupSetup.hidden) pickupSetup.scrollIntoView({ block: "nearest" });
+        return;
+      }
       const tracking = shipment.tracking.number;
       closeDetail();
       return pickups.open([tracking]);
     }, true);
     action.dataset.pickupCarrier = shipment.tracking.carrier;
-    action.hidden = !pickups.canSchedule(shipment.tracking.carrier);
+    pickupSetup.hidden = !view?.pickupSetup;
+    updatePickupAction(action);
   }
   if (shipment.status_override)
     button("Clear correction", () => mutate("status-override", "DELETE"), true);

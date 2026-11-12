@@ -242,7 +242,7 @@ export function installPickups(
   }
   field(form, "carrier").addEventListener("change", fillCarriers);
   function updateCapabilities(status) {
-    const next = status.filter((carrier) => Object.hasOwn(carrierNames, carrier.carrier) && carrier.configured === true);
+    const next = status.filter((carrier) => Object.hasOwn(carrierNames, carrier.carrier));
     const changed = JSON.stringify(carriers) !== JSON.stringify(next);
     carriers = next;
     if (capabilitiesKnown && changed) {
@@ -900,7 +900,11 @@ export function installPickups(
   }
   return {
     available,
-    canSchedule(carrier) { return configured(trackingCarriers[carrier]); },
+    carrierStatus(carrier) {
+      if (!access) return null;
+      const status = carriers.find((status) => status.carrier === trackingCarriers[carrier]);
+      return status ? { name: carrierNames[status.carrier], configured: status.configured === true } : null;
+    },
     refreshCapabilities,
     open,
     show() {
