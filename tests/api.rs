@@ -3390,7 +3390,9 @@ async fn pickup_review_two_admin_address_race_requires_a_new_review_before_any_a
 async fn pickup_ui_uses_configured_carriers_and_invalidates_plans_on_configuration_loss() {
     use packages::pickup::{Pickup, models::PickupCarrier};
     let (one, creates) = pickup_app(false).await;
-    let zero = App::new(None).await;
+    let zero_shipping = ProviderFixture::with_status(Status::PreTransit);
+    let mut zero = App::with_provider(None, Some(zero_shipping.client.clone())).await;
+    zero.provider_fixture = Some(zero_shipping);
     let shipping = ProviderFixture::with_status(Status::PreTransit);
     let providers: Vec<Arc<dyn Pickup>> = PickupCarrier::ALL
         .into_iter()
@@ -3447,6 +3449,12 @@ async fn pickup_ui_uses_configured_carriers_and_invalidates_plans_on_configurati
                 "TESTINBOUNDUPS123",
                 Direction::Inbound,
             ),
+            (
+                "Unsupported pickup label",
+                "DHLExpressDefault",
+                "TESTUNSUPPORTEDPICKUP123",
+                Direction::Outbound,
+            ),
         ] {
             let mut body = input(title);
             body.direction = direction;
@@ -3465,6 +3473,7 @@ async fn pickup_ui_uses_configured_carriers_and_invalidates_plans_on_configurati
                 package.sync.registration_state,
                 RegistrationState::Registered
             );
+            assert_eq!(package.status, Status::PreTransit);
         }
     }
     let url = one.url.clone();

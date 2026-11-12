@@ -12,9 +12,9 @@ const agent = process.env.PACKAGES_TEST_AGENT;
 const browser = await chromium.launch({ executablePath: process.env.PACKAGES_CHROMIUM_EXECUTABLE });
 const screenshots = process.env.PACKAGES_SCREENSHOT_DIR;
 if (screenshots) await mkdir(screenshots, { recursive: true });
-const snapshot = async (page, name) => {
+const snapshot = async (page, name, fullPage = true) => {
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
-  if (screenshots) await page.screenshot({ path: `${screenshots}/${name}.png`, fullPage: true });
+  if (screenshots) await page.screenshot({ path: `${screenshots}/${name}.png`, fullPage });
 };
 const login = async (page, origin, token = owner) => {
   page.setDefaultTimeout(10000);
@@ -36,11 +36,37 @@ const details = async (page, name) => {
 const options = (page) => page.locator('#pickup-schedule-form select[name="carrier"] option').evaluateAll((items) => items.map((item) => item.value));
 try {
   const zeroPage = await browser.newPage();
+  let zeroAdmissions = 0;
+  zeroPage.on("request", (request) => {
+    if (request.method() === "POST" && new URL(request.url()).pathname === "/v1/pickups") zeroAdmissions++;
+  });
   await login(zeroPage, zero);
   await entryPoints(zeroPage, false);
   await snapshot(zeroPage, "zero-configured-carriers");
   await details(zeroPage, "USPS capability fixture");
   await expect(zeroPage.locator("#actions").getByRole("button", { name: "Schedule pickup", exact: true })).toBeHidden();
+  const setup = zeroPage.locator("#actions").getByRole("button", { name: "Set up USPS pickup", exact: true });
+  await setup.click();
+  await expect(setup).toHaveAttribute("aria-expanded", "true");
+  await expect(zeroPage.locator("#pickup-setup")).toContainText("USPS pickups are supported");
+  await expect(zeroPage.locator("#pickup-setup")).toContainText("developer credentials in the app configuration");
+  await expect(zeroPage.locator("#pickup-setup")).toBeInViewport({ ratio: 1 });
+  await expect(zeroPage.locator("#pickup-schedule-dialog")).toBeHidden();
+  for (const colorScheme of ["light", "dark"]) {
+    await zeroPage.emulateMedia({ colorScheme });
+    for (const [name, width, height] of [
+      ["iphone-portrait", 390, 844], ["iphone-landscape", 844, 390],
+      ["ipad-portrait", 820, 1180], ["ipad-landscape", 1180, 820],
+      ["desktop-portrait", 1000, 1440], ["desktop-landscape", 1440, 1000],
+    ]) {
+      await zeroPage.setViewportSize({ width, height });
+      await zeroPage.locator("#pickup-setup").scrollIntoViewIfNeeded();
+      await expect(setup).toBeInViewport();
+      await expect(zeroPage.locator("#pickup-setup")).toBeInViewport({ ratio: 1 });
+      await snapshot(zeroPage, `unconfigured-usps-${name}-${colorScheme}`, false);
+    }
+  }
+  expect(zeroAdmissions).toBe(0);
   await zeroPage.goto(`${zero}/#page=pickups`);
   await zeroPage.reload();
   await zeroPage.locator("#login input").fill(owner);
@@ -82,13 +108,22 @@ try {
   await expect(page.locator("#list")).toHaveAttribute("aria-busy", "false");
   await details(page, "USPS capability fixture");
   await expect(page.locator("#actions").getByRole("button", { name: "Schedule pickup", exact: true })).toBeHidden();
+  await page.locator("#actions").getByRole("button", { name: "Set up USPS pickup", exact: true }).click();
+  await expect(page.locator("#pickup-setup")).toContainText("USPS pickups are supported");
+  expect(admissions).toBe(0);
   await page.keyboard.press("Escape");
   await details(page, "Incoming UPS label");
-  await expect(page.locator("#actions").getByRole("button", { name: "Schedule pickup", exact: true })).toBeHidden();
+  await expect(page.locator("#actions [data-pickup-carrier]")).toHaveCount(0);
+  await expect(page.locator("#pickup-setup")).toBeHidden();
+  await page.keyboard.press("Escape");
+  await details(page, "Unsupported pickup label");
+  await expect(page.locator("#actions [data-pickup-carrier]")).toBeHidden();
+  await expect(page.locator("#pickup-setup")).toBeHidden();
   await page.keyboard.press("Escape");
   await details(page, "UPS capability fixture");
   await page.locator("#actions").getByRole("button", { name: "Schedule pickup", exact: true }).click();
   await expect(page.locator("#pickup-schedule-dialog")).toBeVisible();
+  await expect(page.getByLabel("Prepaid tracking numbers")).toHaveValue("TESTPICKUP123");
   expect(await options(page)).toEqual(["", "ups"]);
   const carrier = page.locator('#pickup-schedule-form select[name="carrier"]');
   await carrier.selectOption("ups");
@@ -166,6 +201,12 @@ try {
   });
   await login(agentPage, one, agent);
   await entryPoints(agentPage, false);
+  for (const title of ["USPS capability fixture", "UPS capability fixture"]) {
+    await details(agentPage, title);
+    await expect(agentPage.locator("#actions [data-pickup-carrier]")).toBeHidden();
+    await expect(agentPage.locator("#pickup-setup")).toBeHidden();
+    await agentPage.keyboard.press("Escape");
+  }
   expect(privilegedRequests).toEqual([]);
   await agentPage.close();
 } finally {
