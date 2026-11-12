@@ -230,9 +230,11 @@ label {
   color: var(--muted);
   border: 0;
 }
-#search button:hover {
-  color: var(--ink);
-  background: var(--soft);
+@media (hover: hover) and (pointer: fine) {
+  #search button:not(:disabled):hover {
+    color: var(--ink);
+    background: var(--soft);
+  }
 }
 #search button svg {
   inline-size: 20px;
@@ -267,9 +269,8 @@ label {
   width: 100%;
   font-weight: 400;
 }
-button.shipment:hover {
-  background: var(--soft);
-  opacity: 1;
+@media (hover: hover) and (pointer: fine) {
+  button.shipment:not(:disabled):hover { background: var(--soft); }
 }
 .shipment h2 {
   font-size: 16px;
@@ -589,11 +590,9 @@ dialog {
   border-color: var(--status-line);
   filter: none;
 }
-button.stat:not([aria-pressed="true"]):hover {
-  background: var(--soft);
-  opacity: 1;
+@media (hover: hover) and (pointer: fine) {
+  button.stat:not(:disabled):not([aria-pressed="true"]):hover { background: var(--soft); }
 }
-button.stat[aria-pressed="true"]:hover { opacity: 1; }
 .stat[aria-pressed="true"] {
   box-shadow: 0 0 0 1px var(--status-line);
 }
@@ -788,7 +787,9 @@ button.stat[aria-pressed="true"]:hover { opacity: 1; }
 
 .direction-tabs { display: flex; flex-wrap: wrap; gap: 4px; margin: 0 0 20px; }
 .direction-tabs button { border-color: transparent; padding: 7px 12px; background: transparent; color: var(--muted); }
-.direction-tabs button:hover { opacity: 1; color: inherit; }
+@media (hover: hover) and (pointer: fine) {
+  .direction-tabs button:not(:disabled):not([aria-current="page"]):hover { background: var(--soft); color: inherit; }
+}
 .direction-tabs button[aria-current="page"] { border-color: var(--line); background: var(--paper); color: inherit; }
 .direction-inbound { background: #d5eee9; color: #155d50; }
 .direction-outbound { background: #f5dce9; color: #852b58; }
