@@ -2,7 +2,7 @@
   max-width: 600px;
   padding: 24px;
   border: 1px solid var(--line);
-  border-radius: 16px;
+  border-radius: var(--surface-radius);
   background: var(--paper);
 }
 .connection h2 {
@@ -13,8 +13,8 @@
 }
 .installation {
   border: 1px solid var(--line);
-  border-radius: 8px;
-  padding: 18px;
+  border-radius: var(--surface-radius);
+  padding: 20px;
   margin-bottom: 24px;
 }
 .installation summary {
@@ -53,9 +53,9 @@
 }
 #agent-secret {
   background: var(--soft);
-  border-radius: 8px;
-  padding: 18px;
-  margin: 18px 0;
+  border-radius: var(--surface-radius);
+  padding: 20px;
+  margin: 20px 0;
 }
 #agent-secret h3 {
   margin-top: 0;
@@ -79,7 +79,7 @@
   justify-content: space-between;
   gap: 16px;
   border-top: 1px solid var(--line);
-  padding: 14px 0;
+  padding: 16px 0;
 }
 .agent-credential strong {
   font-size: 14px;
@@ -168,7 +168,7 @@ label {
   display: grid;
   grid-template-columns: repeat(5, minmax(0, 1fr));
   gap: 12px;
-  margin: 8px 0 30px;
+  margin: 8px 0 var(--space-6);
 }
 .stat {
   display: flex;
@@ -177,8 +177,8 @@ label {
   justify-content: flex-start;
   background: var(--paper);
   border: 1px solid var(--line);
-  border-radius: 8px;
-  padding: 16px 18px;
+  border-radius: var(--surface-radius);
+  padding: 16px 20px;
 }
 .stat strong {
   display: block;
@@ -202,6 +202,7 @@ label {
 }
 .toolbar {
   display: flex;
+  flex-wrap: wrap;
   gap: 12px;
   align-items: center;
   margin-bottom: 20px;
@@ -218,12 +219,12 @@ label {
 }
 #search button {
   position: absolute;
-  inset-block: 1px;
-  inset-inline-end: 1px;
+  inset-block: 0;
+  inset-inline-end: 0;
   display: grid;
   place-items: center;
   inline-size: 44px;
-  min-height: 0;
+  min-height: 44px;
   padding: 0;
   background: transparent;
   color: var(--muted);
@@ -260,7 +261,7 @@ label {
   background: var(--paper);
   color: inherit;
   border: 1px solid var(--line);
-  border-radius: 8px;
+  border-radius: var(--surface-radius);
   text-align: left;
   padding: 18px 20px;
   width: 100%;
@@ -333,7 +334,7 @@ button.shipment:hover {
   padding: 56px 24px;
   text-align: center;
   border: 1px dashed var(--line);
-  border-radius: 8px;
+  border-radius: var(--surface-radius);
 }
 .empty h2 {
   font-size: 18px;
@@ -356,7 +357,7 @@ dialog {
   background: var(--paper);
   color: inherit;
   border: 1px solid var(--line);
-  border-radius: 10px;
+  border-radius: var(--surface-radius);
   padding: 28px;
   max-width: 620px;
   width: calc(100% - 32px);
@@ -383,7 +384,7 @@ dialog {
 }
 .columns {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 16px;
 }
 #shipment-fields {
@@ -465,7 +466,7 @@ dialog {
 }
 @media (max-width: 650px) {
   .summary {
-    grid-template-columns: 1fr 1fr;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
     gap: 10px;
   }
   .stat {
@@ -488,14 +489,14 @@ dialog {
     align-items: stretch;
   }
   .shipment {
-    padding: 17px;
+    padding: 16px;
   }
   .columns {
     grid-template-columns: 1fr;
     gap: 0;
   }
   dialog {
-    padding: 22px;
+    padding: 20px;
   }
 }
 @media (prefers-color-scheme: dark) {
@@ -655,7 +656,7 @@ button.stat[aria-pressed="true"]:hover { opacity: 1; }
 .detail-fact {
   padding: 16px;
   border: 1px solid var(--line);
-  border-radius: 8px;
+  border-radius: var(--surface-radius);
 }
 .detail-fact > span {
   display: block;
@@ -740,11 +741,11 @@ button.stat[aria-pressed="true"]:hover { opacity: 1; }
 .event-description { margin: 5px 0; font-size: 13px; line-height: 1.6; }
 .event-meta { margin: 5px 0; font-size: 12px; color: var(--muted); line-height: 1.6; }
 @media (max-width: 650px) {
-  #detail { padding: 22px; }
+  #detail { padding: 20px; }
   .shipment { align-items: flex-start; flex-direction: column; gap: 12px; }
   .shipment-badges { justify-content: flex-start; }
   .detail-overview { grid-template-columns: 1fr 1fr; }
-  .detail-fact { padding: 14px; }
+  .detail-fact { padding: 16px; }
   .carrier-timeline { padding-left: 6px; }
 }
 @media (max-width: 560px) {
@@ -799,7 +800,7 @@ button.stat[aria-pressed="true"]:hover { opacity: 1; }
   border-left: 3px solid var(--red-line);
   background: var(--red-fill);
   color: var(--red-ink);
-  padding: 16px 18px;
+  padding: 16px 20px;
   border-radius: 6px;
   margin-top: 18px;
 }
@@ -878,7 +879,7 @@ button.stat[aria-pressed="true"]:hover { opacity: 1; }
   display: inline-block;
   padding: 3px 9px;
   border: 1px solid var(--line);
-  border-radius: 999px;
+  border-radius: 4px;
   background: var(--soft);
   color: var(--ink);
   font-size: 12px;
@@ -903,7 +904,7 @@ button.stat[aria-pressed="true"]:hover { opacity: 1; }
   padding: 16px;
   margin-top: 12px;
   border: 1px solid var(--line);
-  border-radius: 8px;
+  border-radius: var(--surface-radius);
   background: var(--soft);
 }
 .address-locality.columns { grid-template-columns: 2fr 1fr 1fr; }
@@ -935,7 +936,7 @@ button.stat[aria-pressed="true"]:hover { opacity: 1; }
 .pickup-card {
   padding: 1.25rem;
   border: 1px solid var(--line);
-  border-radius: 0.75rem;
+  border-radius: var(--surface-radius);
   background: var(--paper);
 }
 .pickup-card h3 {
@@ -948,10 +949,10 @@ button.stat[aria-pressed="true"]:hover { opacity: 1; }
   justify-content: flex-start;
 }
 .pickup-state {
-  font-size: 0.8rem;
+  font-size: 12px;
   border: 1px solid var(--line);
-  border-radius: 2rem;
-  padding: 0.25rem 0.6rem;
+  border-radius: 4px;
+  padding: 4px 8px;
 }
 .pickup-state.scheduled {
   color: var(--success, #237a57);
@@ -991,8 +992,8 @@ button.stat[aria-pressed="true"]:hover { opacity: 1; }
   color: inherit;
   background: var(--paper);
   border: 1px solid var(--line);
-  border-radius: 0.4rem;
-  padding: 0.65rem;
+  border-radius: var(--control-radius);
+  padding: 12px;
 }
 #pickup-schedule-form details {
   margin-block: 1rem;
