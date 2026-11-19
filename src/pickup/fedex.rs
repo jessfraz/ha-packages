@@ -272,7 +272,7 @@ impl Pickup for FedEx {
             let zone = jiff::tz::TimeZoneDatabase::bundled()
                 .get(&plan.site.details.timezone)
                 .map_err(|_| Error::new(ErrorCode::InvalidInput))?;
-            let now = jiff::Timestamp::now().to_zoned(zone);
+            let now = jiff::Timestamp::now().to_zoned_datetime(zone);
             let today = now.date().to_string();
             let date = plan.date.as_deref().unwrap_or(&today);
             validate_date(date)?;

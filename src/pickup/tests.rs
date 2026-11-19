@@ -310,7 +310,7 @@ fn ups_elapsed_window() -> (ResolvedPlan, jiff::civil::Date) {
     let now = jiff::Timestamp::now();
     for name in ["Etc/GMT+12", "Pacific/Kiritimati"] {
         let zone = jiff::tz::TimeZoneDatabase::bundled().get(name).unwrap();
-        let local = now.to_zoned(zone);
+        let local = now.to_zoned_datetime(zone);
         let minute = i32::from(local.hour()) * 60 + i32::from(local.minute());
         if (2..1438).contains(&minute) {
             let mut reference = plan(PickupService::UpsGround);
