@@ -208,7 +208,7 @@ fn candidate_date(plan: &ResolvedPlan) -> Result<String> {
     let zone = jiff::tz::TimeZoneDatabase::bundled()
         .get("America/Chicago")
         .map_err(|_| Error::new(ErrorCode::Unavailable))?;
-    let now = jiff::Timestamp::now().to_zoned(zone);
+    let now = jiff::Timestamp::now().to_zoned_datetime(zone);
     let mut date = now.date();
     if now.hour() >= 2 {
         date = date

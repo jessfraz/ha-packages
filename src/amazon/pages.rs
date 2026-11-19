@@ -1505,7 +1505,7 @@ fn provider_delivery_date(
     let zone = jiff::tz::TimeZoneDatabase::bundled().get(timezone).ok()?;
     let local = jiff::Timestamp::from_second(observed_at.unix_timestamp())
         .ok()?
-        .to_zoned(zone)
+        .to_zoned_datetime(zone)
         .date();
     let today = time::Date::from_calendar_date(
         i32::from(local.year()),

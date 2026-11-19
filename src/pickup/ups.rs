@@ -250,7 +250,7 @@ fn window_open(plan: &ResolvedPlan, date: jiff::civil::Date) -> Result<bool> {
     let zone = jiff::tz::TimeZoneDatabase::bundled()
         .get(&plan.site.details.timezone)
         .map_err(|_| Error::new(ErrorCode::InvalidInput))?;
-    let now = jiff::Timestamp::now().to_zoned(zone);
+    let now = jiff::Timestamp::now().to_zoned_datetime(zone);
     let close = plan
         .close_time
         .parse::<jiff::civil::Time>()
@@ -300,7 +300,7 @@ impl Pickup for Ups {
             let zone = jiff::tz::TimeZoneDatabase::bundled()
                 .get(&plan.site.details.timezone)
                 .map_err(|_| Error::new(ErrorCode::InvalidInput))?;
-            let today = jiff::Timestamp::now().to_zoned(zone).date();
+            let today = jiff::Timestamp::now().to_zoned_datetime(zone).date();
             let start = if let Some(date) = &plan.date {
                 validate_date(date)?;
                 date.parse::<jiff::civil::Date>()
