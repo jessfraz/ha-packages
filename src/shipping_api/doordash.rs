@@ -558,6 +558,8 @@ enum OrderStatus {
         alias = "arrived_at_pickup"
     )]
     BeforePickup,
+    #[serde(rename = "arrived_at_mid_mile_provider_order")]
+    MidMile,
     #[serde(
         rename = "picked_up",
         alias = "enroute_to_dropoff",
@@ -575,6 +577,7 @@ impl OrderStatus {
             // A return still travelling must remain eligible for refresh.
             Self::Returning => Status::Failure,
             Self::Created | Self::BeforePickup => Status::PreTransit,
+            Self::MidMile => Status::InTransit,
             Self::OutForDelivery => Status::OutForDelivery,
         }
     }
@@ -1142,6 +1145,34 @@ mod tests {
             self.stop.store(true, Ordering::Relaxed);
             self.thread.take().unwrap().join().unwrap();
         }
+    }
+
+    #[tokio::test]
+    async fn mid_mile_parcel_can_register_and_refresh_without_a_delivery_scan() {
+        let fixture = Fixture::start(vec![
+            Reply::html(page("arrived_at_mid_mile_provider_order", NUMBER, None)),
+            Reply::html(page("arrived_at_mid_mile_provider_order", NUMBER, None)),
+        ]);
+        let client = fixture.client();
+        let tracker = ShippingApi::prepare_registration(&client, registration())
+            .await
+            .unwrap()
+            .register()
+            .await
+            .unwrap();
+        assert_eq!(tracker.status, Status::InTransit);
+        assert_eq!(tracker.tracking_code, NUMBER);
+        assert!(tracker.carrier_tracking.delivered_at.is_none());
+        assert_eq!(
+            tracker.carrier_tracking.estimated_delivery_at.as_deref(),
+            Some("2026-10-15T22:00:00Z")
+        );
+        let refreshed = ShippingApi::retrieve(&client, &tracker.id, NUMBER)
+            .await
+            .unwrap();
+        assert_eq!(refreshed.status, Status::InTransit);
+        assert!(refreshed.carrier_tracking.delivered_at.is_none());
+        assert_eq!(fixture.requests.try_iter().count(), 2);
     }
 
     #[tokio::test]

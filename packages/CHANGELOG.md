@@ -1,3 +1,8 @@
+## 0.8.12
+
+- Recognize DoorDash parcels at a mid-mile facility so verified tracking can be
+  saved and refreshed before last-mile delivery.
+
 ## 0.8.8
 
 - Keep the one-click version repair usable when an older app prevents
