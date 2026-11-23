@@ -39,13 +39,15 @@ test("TBA-prefixed Amazon MCF keeps its public delivery link and AfterShip owner
   }
 });
 
-test("carrier labels distinguish Amazon Account from genuine MCF in all presentation contexts", async () => {
+test("carrier labels distinguish account and provider choices", async () => {
   const { carrierLabel, carrierOptionLabel, providerNames } = await import("../web/parcel-links.js");
   assert.equal(carrierLabel("AmazonAccount"), "Amazon Account");
   assert.equal(carrierOptionLabel("AmazonAccount"), "Amazon Account");
   assert.equal(providerNames.amazon_account, "Amazon Account");
   assert.equal(carrierLabel("AmazonMcf"), "Amazon MCF");
   assert.equal(carrierOptionLabel("AmazonMcf"), "Amazon MCF (AfterShip)");
+  assert.equal(carrierOptionLabel("SwiftX"), "SwiftX (AfterShip)");
+  assert.equal(carrierOptionLabel("SpeedX"), "SpeedX (AfterShip)");
   assert.equal(carrierLabel(null), "Carrier not identified");
   assert.equal(carrierLabel(null, "Auto-detect carrier"), "Auto-detect carrier");
   assert.equal(carrierLabel("FutureCarrier"), "FutureCarrier");

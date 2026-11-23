@@ -1,3 +1,8 @@
+## 0.8.13
+
+- Track SwiftX parcels through AfterShip.
+- Update `url` to fix RUSTSEC-2026-0592.
+
 ## 0.8.12
 
 - Recognize DoorDash parcels at a mid-mile facility so verified tracking can be
