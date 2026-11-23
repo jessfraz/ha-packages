@@ -19,6 +19,7 @@ const carrierOptionNotes = {
   DHLExpressDefault: "EasyPost account",
   AmazonMcf: "AfterShip",
   SpeedX: "AfterShip",
+  SwiftX: "AfterShip",
   Sway: "AfterShip",
   Veho: "AfterShip",
   DoorDash: "original tracking link",

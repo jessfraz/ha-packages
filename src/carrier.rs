@@ -111,6 +111,7 @@ carriers! {
     SpeedX => "SpeedX",
     SpeeDee => "SpeeDee",
     Sway => "Sway",
+    SwiftX => "SwiftX",
     Swyft => "Swyft",
     Tcc => "Tcc",
     TforceConcise => "TforceConcise",

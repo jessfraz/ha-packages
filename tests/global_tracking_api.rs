@@ -326,6 +326,7 @@ fn provider_response(provider: ProviderId, method: &str, path: &str, body: &[u8]
             let slug = if request.slug.len() == 1 {
                 match request.slug[0].as_str() {
                     "speedx" => Some("speedx"),
+                    "swiftx" => Some("swiftx"),
                     "amazon" => Some("amazon"),
                     "sf-express" => Some("sf-express"),
                     other => panic!("Unexpected AfterShip courier: {other}"),
@@ -516,6 +517,38 @@ async fn sf_express_uses_aftership_and_replays_without_duplicate_registration() 
     assert_eq!(replay.id, shipment.id);
     assert_eq!(app.calls(), calls);
     let saved = app.store.get(shipment.id).await.unwrap();
+    assert_eq!(saved.sync.provider, ProviderId::AfterShip);
+    assert_eq!(saved.sync.tracker_id, shipment.sync.tracker_id);
+    app.close().await;
+}
+
+#[tokio::test]
+async fn swiftx_uses_aftership_and_preserves_identity_on_replay() {
+    let app = App::new(false).await;
+    let carrier: Carrier = "SwiftX"
+        .parse()
+        .expect("SwiftX must be a supported carrier");
+    assert_ne!(carrier, Carrier::SpeedX);
+    let input = input("SWXTEST00000001", Some(carrier), Direction::Inbound);
+    let response = app.create(&input, "swiftx").send().await.unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let shipment: Shipment = response.json().await.unwrap();
+    assert_eq!(shipment.sync.provider, ProviderId::AfterShip);
+    assert_eq!(shipment.tracking.carrier, carrier);
+    assert_eq!(shipment.tracking.carrier.as_str(), "SwiftX");
+    assert_eq!(shipment.tracking.number, input.tracking.number);
+    assert_eq!(shipment.status, Status::PreTransit);
+    assert_eq!(app.easypost.calls(), 0);
+    assert_eq!(app.aftership.registrations(), 1);
+
+    let calls = app.calls();
+    let replay = app.create(&input, "swiftx").send().await.unwrap();
+    assert!(replay.status().is_success());
+    let replay: Shipment = replay.json().await.unwrap();
+    assert_eq!(replay.id, shipment.id);
+    assert_eq!(app.calls(), calls);
+    let saved = app.store.get(shipment.id).await.unwrap();
+    assert_eq!(saved.tracking.carrier, carrier);
     assert_eq!(saved.sync.provider, ProviderId::AfterShip);
     assert_eq!(saved.sync.tracker_id, shipment.sync.tracker_id);
     app.close().await;

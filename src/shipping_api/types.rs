@@ -39,6 +39,7 @@ impl ProviderId {
             Some(
                 Carrier::AmazonMcf
                 | Carrier::SpeedX
+                | Carrier::SwiftX
                 | Carrier::Sway
                 | Carrier::Veho
                 | Carrier::SfExpress,

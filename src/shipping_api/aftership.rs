@@ -46,8 +46,14 @@ enum Courier {
     // Detection must still confirm this exact slug before registration.
     #[serde(rename = "amazon")]
     AmazonMcf,
+    // AfterShip lists SpeedX and SwiftX as distinct couriers:
+    // https://www.aftership.com/docs/tracking/2026-07/others/supported-couriers
     #[serde(rename = "speedx")]
     SpeedX,
+    #[serde(rename = "swiftx")]
+    SwiftX,
+    // Sway's webhook route requires a connected courier account. Detection or
+    // an accepted tracker alone does not establish that its feed is usable.
     #[serde(rename = "sway-webhook")]
     Sway,
     #[serde(rename = "veho")]
@@ -61,6 +67,7 @@ impl Courier {
         match carrier {
             Some(Carrier::AmazonMcf) => Ok(Self::AmazonMcf),
             Some(Carrier::SpeedX) => Ok(Self::SpeedX),
+            Some(Carrier::SwiftX) => Ok(Self::SwiftX),
             Some(Carrier::Sway) => Ok(Self::Sway),
             Some(Carrier::Veho) => Ok(Self::Veho),
             Some(Carrier::SfExpress) => Ok(Self::SfExpress),
@@ -74,6 +81,7 @@ impl Courier {
         match self {
             Self::AmazonMcf => "amazon",
             Self::SpeedX => "speedx",
+            Self::SwiftX => "swiftx",
             Self::Sway => "sway-webhook",
             Self::Veho => "veho",
             Self::SfExpress => "sf-express",
@@ -84,6 +92,7 @@ impl Courier {
         match self {
             Self::AmazonMcf => Carrier::AmazonMcf,
             Self::SpeedX => Carrier::SpeedX,
+            Self::SwiftX => Carrier::SwiftX,
             Self::Sway => Carrier::Sway,
             Self::Veho => Carrier::Veho,
             Self::SfExpress => Carrier::SfExpress,
@@ -381,6 +390,9 @@ impl ProviderTracker {
         }
         match self.subtag.as_str() {
             "Pending_002" => {
+                // An accepted tracker can still lack the shipper connection
+                // needed for updates, as with Sway. Keep this a credentials
+                // failure rather than admitting an ordinary unscanned label.
                 return Err(provider_error(ErrorKind::ProviderStateRejected {
                     rejection: Rejection::CarrierCredentialsMissing,
                     code: "Pending_002",
@@ -1320,6 +1332,15 @@ mod tests {
         tracking_number: String,
         slug: Vec<String>,
     }
+    #[derive(Serialize)]
+    struct FixtureCouriers<'a> {
+        total: usize,
+        couriers: Vec<FixtureCourier<'a>>,
+    }
+    #[derive(Serialize)]
+    struct FixtureCourier<'a> {
+        slug: &'a str,
+    }
     #[derive(Deserialize)]
     struct RequestedTracking {
         tracking_number: String,
@@ -1481,7 +1502,13 @@ mod tests {
             let body: RequestedDetection = serde_json::from_slice(&request.body).unwrap();
             assert_eq!(body.tracking_number, NUMBER);
             assert_eq!(body.slug, [slug]);
-            request.respond(200, &format!(r#"{{"meta":{{"code":200}},"data":{{"total":1,"couriers":[{{"slug":"{slug}"}}]}}}}"#));
+            request.json(
+                200,
+                FixtureCouriers {
+                    total: 1,
+                    couriers: vec![FixtureCourier { slug }],
+                },
+            );
         }
     }
     impl Drop for Server {
@@ -1532,6 +1559,7 @@ mod tests {
         for (slug, carrier) in [
             ("amazon", Carrier::AmazonMcf),
             ("speedx", Carrier::SpeedX),
+            ("swiftx", Carrier::SwiftX),
             ("sway-webhook", Carrier::Sway),
             ("veho", Carrier::Veho),
             ("sf-express", Carrier::SfExpress),
@@ -1551,7 +1579,14 @@ mod tests {
             assert_eq!(input.tracking_number, NUMBER);
             assert_eq!(
                 input.slug,
-                ["amazon", "sf-express", "speedx", "sway-webhook", "veho"]
+                [
+                    "amazon",
+                    "sf-express",
+                    "speedx",
+                    "sway-webhook",
+                    "swiftx",
+                    "veho"
+                ]
             );
             request.respond(200, &format!(r#"{{"meta":{{"code":200}},"data":{{"total":1,"couriers":[{{"slug":"{slug}"}}]}}}}"#));
             assert_eq!(task.await.unwrap().unwrap(), Some(carrier));
@@ -1763,6 +1798,32 @@ mod tests {
         assert_eq!(tracker.status, Status::Unknown);
         assert!(tracker.carrier_tracking.events.is_empty());
         assert_eq!(tracker.carrier_tracking.delivered_at, None);
+        server.no_request();
+    }
+
+    #[tokio::test]
+    async fn swiftx_registration_rejects_speedx_detection_without_registering() {
+        let mut server = Server::new();
+        let client = server.client();
+        let mut input = registration(Carrier::SwiftX);
+        input.tracking_number = "SWXTEST00000002".into();
+        let task = tokio::spawn(async move { client.prepare_registration(input).await });
+        server.empty_lookup().await;
+        let request = server.request("POST", "couriers/detect").await;
+        let body: RequestedDetection = serde_json::from_slice(&request.body).unwrap();
+        assert_eq!(body.tracking_number, "SWXTEST00000002");
+        assert_eq!(body.slug, ["swiftx"]);
+        request.json(
+            200,
+            FixtureCouriers {
+                total: 1,
+                couriers: vec![FixtureCourier { slug: "speedx" }],
+            },
+        );
+        assert_eq!(
+            task.await.unwrap().err().unwrap().error_code(),
+            "provider_invalid_response"
+        );
         server.no_request();
     }
 
