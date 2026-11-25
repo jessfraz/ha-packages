@@ -335,7 +335,7 @@ rename an entity in Home Assistant.
 | Option | Purpose |
 | --- | --- |
 | `easypost_api_key` | Enables tracking verification before saving and background tracking updates. |
-| `aftership_api_key` | Enables Amazon MCF, SF Express, SpeedX, SwiftX, Sway / Returnmates, and Veho tracking through AfterShip. |
+| `aftership_api_key` | Enables Amazon MCF, Better Trucks, SF Express, SpeedX, SwiftX, Sway / Returnmates, and Veho tracking through AfterShip. |
 
 DoorDash requires its original recipient tracking link rather than an API key.
 Other carriers and automatic carrier detection use EasyPost. Provider keys
@@ -349,11 +349,11 @@ Existing records migrate to inbound. The default list shows active inbound
 packages. Select **All** or **Outbound** to change the direction filter.
 Leave **Carrier** on **Auto-detect**, or
 choose its canonical EasyPost carrier when detection is ambiguous.
-Select **Amazon MCF**, **SF Express**, **SpeedX**, **SwiftX**,
+Select **Amazon MCF**, **Better Trucks**, **SF Express**, **SpeedX**, **SwiftX**,
 **Sway / Returnmates**, or **Veho** explicitly to use AfterShip.
 SwiftX and SpeedX are separate carriers; choose the name on the shipping label.
-For an SF Express parcel previously saved through EasyPost, save its tracking
-again to switch the existing record to AfterShip.
+For a Better Trucks or SF Express parcel previously saved through EasyPost,
+save its tracking again to switch the existing record to AfterShip.
 Use **Amazon MCF** only when the original merchant evidence identifies
 Multi-Channel Fulfillment or supplies a matching Swiship parcel link. It uses
 AfterShip `amazon`, not `amazon-mcf`, `amazon-order`, or the UK Swiship product.

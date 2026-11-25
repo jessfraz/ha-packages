@@ -1,3 +1,8 @@
+## 0.8.14
+
+- Track Better Trucks parcels through AfterShip without a Better Trucks shipper
+  account. Save tracking again to switch an existing EasyPost parcel.
+
 ## 0.8.13
 
 - Track SwiftX parcels through AfterShip.

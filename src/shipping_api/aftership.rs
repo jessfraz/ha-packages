@@ -46,6 +46,8 @@ enum Courier {
     // Detection must still confirm this exact slug before registration.
     #[serde(rename = "amazon")]
     AmazonMcf,
+    #[serde(rename = "bettertrucks")]
+    BetterTrucks,
     // AfterShip lists SpeedX and SwiftX as distinct couriers:
     // https://www.aftership.com/docs/tracking/2026-07/others/supported-couriers
     #[serde(rename = "speedx")]
@@ -66,6 +68,7 @@ impl Courier {
     fn for_carrier(carrier: Option<Carrier>) -> Result<Self, SyncError> {
         match carrier {
             Some(Carrier::AmazonMcf) => Ok(Self::AmazonMcf),
+            Some(Carrier::BetterTrucks) => Ok(Self::BetterTrucks),
             Some(Carrier::SpeedX) => Ok(Self::SpeedX),
             Some(Carrier::SwiftX) => Ok(Self::SwiftX),
             Some(Carrier::Sway) => Ok(Self::Sway),
@@ -80,6 +83,7 @@ impl Courier {
     fn slug(self) -> &'static str {
         match self {
             Self::AmazonMcf => "amazon",
+            Self::BetterTrucks => "bettertrucks",
             Self::SpeedX => "speedx",
             Self::SwiftX => "swiftx",
             Self::Sway => "sway-webhook",
@@ -91,6 +95,7 @@ impl Courier {
     fn carrier(self) -> Carrier {
         match self {
             Self::AmazonMcf => Carrier::AmazonMcf,
+            Self::BetterTrucks => Carrier::BetterTrucks,
             Self::SpeedX => Carrier::SpeedX,
             Self::SwiftX => Carrier::SwiftX,
             Self::Sway => Carrier::Sway,
@@ -1558,6 +1563,7 @@ mod tests {
     async fn carrier_discovery_identifies_each_supported_courier_without_registering() {
         for (slug, carrier) in [
             ("amazon", Carrier::AmazonMcf),
+            ("bettertrucks", Carrier::BetterTrucks),
             ("speedx", Carrier::SpeedX),
             ("swiftx", Carrier::SwiftX),
             ("sway-webhook", Carrier::Sway),
@@ -1581,6 +1587,7 @@ mod tests {
                 input.slug,
                 [
                     "amazon",
+                    "bettertrucks",
                     "sf-express",
                     "speedx",
                     "sway-webhook",

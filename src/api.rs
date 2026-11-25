@@ -712,8 +712,10 @@ async fn shipment_update(
         tracking.number != current.tracking.number
             || tracking.carrier != Some(current.tracking.carrier)
             || tracking.recipient_url != current.tracking.recipient_url
-            || (tracking.carrier == Some(crate::carrier::Carrier::SfExpress)
-                && current.sync.provider == ProviderId::EasyPost)
+            || (matches!(
+                tracking.carrier,
+                Some(crate::carrier::Carrier::SfExpress | crate::carrier::Carrier::BetterTrucks)
+            ) && current.sync.provider == ProviderId::EasyPost)
     } else {
         false
     };

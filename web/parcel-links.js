@@ -5,6 +5,7 @@ const carrierLabels = {
   AmazonMcf: "Amazon MCF",
   AmazonMws: "Amazon MWS",
   AmazonShipping: "Amazon Shipping",
+  BetterTrucks: "Better Trucks",
   FedExAccount: "FedEx",
   FedExDefault: "FedEx Default",
   DHLExpress: "DHL Express",
@@ -18,6 +19,7 @@ const carrierOptionNotes = {
   DHLExpress: "your carrier account",
   DHLExpressDefault: "EasyPost account",
   AmazonMcf: "AfterShip",
+  BetterTrucks: "AfterShip",
   SpeedX: "AfterShip",
   SwiftX: "AfterShip",
   Sway: "AfterShip",
@@ -46,6 +48,7 @@ const carrierRoutes = [
   [["amazonshipping", "amazonaccount"], "https://track.amazon.com/tracking/", null],
   [["ontrac", "ontracv3", "lasershipv2"], "https://www.ontrac.com/tracking", "number"],
   [["sway"], "https://www.returnmates.com/tracking/", null],
+  [["bettertrucks"], "https://tracking.bettertrucks.com/tracking", "trackingNumber"],
   [["speedx"], "https://tracking.speedx.io/", null],
   [["veho"], "https://track.shipveho.com/", "#"],
 ];
