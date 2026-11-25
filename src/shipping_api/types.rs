@@ -38,6 +38,7 @@ impl ProviderId {
             Some(Carrier::DoorDash) => Self::DoorDash,
             Some(
                 Carrier::AmazonMcf
+                | Carrier::BetterTrucks
                 | Carrier::SpeedX
                 | Carrier::SwiftX
                 | Carrier::Sway

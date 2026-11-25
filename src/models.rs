@@ -224,6 +224,9 @@ impl<'de, T: Deserialize<'de>> Deserialize<'de> for Patch<T> {
 #[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct UpdateShipment {
+    /// Switch a legacy Better Trucks record to its existing AfterShip tracker without replacing its label.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub adopt_existing_aftership: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
     #[serde(default, skip_serializing_if = "Patch::is_missing")]

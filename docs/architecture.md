@@ -28,7 +28,8 @@ clients. Never try a different provider automatically after an uncertain
 registration outcome.
 
 `aftership.rs` owns AfterShip authentication, carrier slugs and tracker
-reconciliation for SF Express, SpeedX, SwiftX, Sway, and Veho.
+reconciliation for Amazon MCF, Better Trucks, SF Express, SpeedX, SwiftX,
+Sway, and Veho.
 `doordash.rs` implements read-only
 recipient tracking, with a fixed URL allowlist, response and transport bounds,
 typed observations and no JavaScript execution. Its HTML hydration parser is

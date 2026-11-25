@@ -25,6 +25,7 @@ use uuid::Uuid;
 
 const OWNER: &str = "global-tracking-disposable-owner-credential";
 const NUMBER: &str = "GLOBAL123456";
+const EXISTING_BETTER_TRUCKS: &str = "BTTEST000000001";
 
 #[derive(Default)]
 struct Calls {
@@ -108,7 +109,7 @@ impl Provider {
                     200
                 };
                 let body = if status == 200 {
-                    provider_response(id, &method, path, &body)
+                    provider_response(id, &method, &target, &body)
                 } else {
                     // Real EasyPost error envelope, including a misleading
                     // rejection code on 503 to exercise uncertain outcomes.
@@ -296,7 +297,8 @@ fn aftership<T: Serialize>(data: T) -> String {
     .unwrap()
 }
 
-fn provider_response(provider: ProviderId, method: &str, path: &str, body: &[u8]) -> String {
+fn provider_response(provider: ProviderId, method: &str, target: &str, body: &[u8]) -> String {
+    let path = target.split('?').next().unwrap();
     match (provider, method, path) {
         (ProviderId::EasyPost, "GET", "/trackers") => serde_json::to_string(&EasyPostPage {
             trackers: Vec::new(),
@@ -313,20 +315,39 @@ fn provider_response(provider: ProviderId, method: &str, path: &str, body: &[u8]
             })
             .unwrap()
         }
-        (ProviderId::AfterShip, "GET", "/trackings") => aftership(AfterShipPage {
-            pagination: AfterShipPagination {
-                total: 0,
-                next_cursor: None,
-                has_next_page: false,
-            },
-            trackings: Vec::new(),
-        }),
+        (ProviderId::AfterShip, "GET", "/trackings") => {
+            let url = reqwest::Url::parse(&format!("http://localhost/{target}")).unwrap();
+            let fields: std::collections::HashMap<_, _> = url.query_pairs().collect();
+            let trackings = if fields.get("tracking_numbers").map(|value| value.as_ref())
+                == Some(EXISTING_BETTER_TRUCKS)
+            {
+                assert_eq!(fields["slug"], "bettertrucks");
+                vec![AfterShipReply {
+                    id: "as_existing_better_trucks".into(),
+                    tracking_number: EXISTING_BETTER_TRUCKS.into(),
+                    slug: "bettertrucks".into(),
+                    tag: "InfoReceived",
+                    subtag: "InfoReceived_001",
+                }]
+            } else {
+                Vec::new()
+            };
+            aftership(AfterShipPage {
+                pagination: AfterShipPagination {
+                    total: trackings.len(),
+                    next_cursor: None,
+                    has_next_page: false,
+                },
+                trackings,
+            })
+        }
         (ProviderId::AfterShip, "POST", "/couriers/detect") => {
             let request: AfterShipDetection = serde_json::from_slice(body).unwrap();
             let slug = if request.slug.len() == 1 {
                 match request.slug[0].as_str() {
                     "speedx" => Some("speedx"),
                     "swiftx" => Some("swiftx"),
+                    "bettertrucks" => Some("bettertrucks"),
                     "amazon" => Some("amazon"),
                     "sf-express" => Some("sf-express"),
                     other => panic!("Unexpected AfterShip courier: {other}"),
@@ -494,6 +515,25 @@ async fn duplicate(response: Response, existing: Uuid) {
 }
 
 #[tokio::test]
+async fn explicitly_selected_better_trucks_uses_aftership_for_new_parcels() {
+    let app = App::new(false).await;
+    let input = input(
+        "BTTEST000000002",
+        Some(Carrier::BetterTrucks),
+        Direction::Inbound,
+    );
+    let response = app.create(&input, "better-trucks").send().await.unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let shipment: Shipment = response.json().await.unwrap();
+    assert_eq!(shipment.tracking.carrier, Carrier::BetterTrucks);
+    assert_eq!(shipment.sync.provider, ProviderId::AfterShip);
+    assert_eq!(shipment.status, Status::PreTransit);
+    assert_eq!(app.easypost.calls(), 0);
+    assert_eq!(app.aftership.registrations(), 1);
+    app.close().await;
+}
+
+#[tokio::test]
 async fn sf_express_uses_aftership_and_replays_without_duplicate_registration() {
     let app = App::new(false).await;
     let input = input(
@@ -555,73 +595,127 @@ async fn swiftx_uses_aftership_and_preserves_identity_on_replay() {
 }
 
 #[tokio::test]
-async fn resubmitting_sf_express_tracking_moves_the_existing_record_to_aftership() {
+async fn resubmitting_tracking_moves_existing_easypost_parcels_to_aftership() {
     use packages::{
         models::{CarrierTracking, Source},
         shipping_api::types::Tracker,
     };
 
-    let app = App::new(false).await;
-    let mut input = input(
-        "SF0000000000002",
-        Some(Carrier::SfExpress),
-        Direction::Inbound,
-    );
-    input.signature_required = Some(true);
-    input.source = Some(Source {
-        namespace: "test".into(),
-        key: "existing-sf-source".into(),
-    });
-    let original = app
-        .store
-        .create(
-            input.clone(),
-            "owner",
-            "old-sf",
-            Some(&Tracker {
-                provider: ProviderId::EasyPost,
-                id: "trk_legacy_sf".into(),
-                tracking_code: input.tracking.number.clone(),
-                carrier: Carrier::SfExpress,
-                status: Status::Unknown,
-                public_url: None,
-                carrier_tracking: CarrierTracking::default(),
-            }),
-        )
-        .await
-        .unwrap();
-    assert_eq!(original.sync.provider, ProviderId::EasyPost);
+    for (carrier, number, tracker_id, registrations) in [
+        (
+            Carrier::BetterTrucks,
+            EXISTING_BETTER_TRUCKS,
+            Some("as_existing_better_trucks"),
+            0,
+        ),
+        (Carrier::BetterTrucks, "BTTEST000000003", None, 0),
+        (
+            Carrier::SfExpress,
+            "SF0000000000002",
+            Some("as_SF0000000000002"),
+            1,
+        ),
+    ] {
+        let app = App::new(false).await;
+        let mut input = input(number, Some(carrier), Direction::Inbound);
+        let adopted = carrier == Carrier::BetterTrucks;
+        input.signature_required = Some(true);
+        input.source = Some(Source {
+            namespace: "test".into(),
+            key: "existing-source".into(),
+        });
+        let original = app
+            .store
+            .create(
+                input.clone(),
+                "owner",
+                "legacy-easypost",
+                Some(&Tracker {
+                    provider: ProviderId::EasyPost,
+                    id: "trk_legacy_easypost".into(),
+                    tracking_code: input.tracking.number.clone(),
+                    carrier,
+                    status: Status::Error,
+                    public_url: None,
+                    carrier_tracking: CarrierTracking::default(),
+                }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(original.sync.provider, ProviderId::EasyPost);
 
-    let response = app
-        .client
-        .patch(format!("{}/v1/packages/{}", app.url, original.id))
-        .bearer_auth(OWNER)
-        .header("If-Match", format!("\"{}\"", original.revision))
-        .json(&UpdateShipment {
-            tracking: Patch {
-                value: Some(Some(input.tracking)),
-            },
-            ..Default::default()
-        })
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-    let updated: Shipment = response.json().await.unwrap();
-    assert_eq!(updated.id, original.id);
-    assert_eq!(updated.tracking, original.tracking);
-    assert_eq!(updated.title, original.title);
-    assert_eq!(updated.signature_required, original.signature_required);
-    assert_eq!(updated.sources, original.sources);
-    assert_eq!(updated.sync.provider, ProviderId::AfterShip);
-    assert_eq!(
-        updated.sync.tracker_id.as_deref(),
-        Some("as_SF0000000000002")
-    );
-    assert_eq!(app.easypost.calls(), 0);
-    assert_eq!(app.aftership.registrations(), 1);
-    assert_eq!(app.count().await, 1);
-    app.close().await;
+        let response = app
+            .client
+            .patch(format!("{}/v1/packages/{}", app.url, original.id))
+            .bearer_auth(OWNER)
+            .header("If-Match", format!("\"{}\"", original.revision))
+            .json(&UpdateShipment {
+                title: Some("Renamed parcel".into()),
+                tracking: if adopted {
+                    Patch {
+                        value: Some(Some(InputTracking {
+                            number: input.tracking.number.to_lowercase(),
+                            ..input.tracking.clone()
+                        })),
+                    }
+                } else {
+                    Patch::default()
+                },
+                ..Default::default()
+            })
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let renamed: Shipment = response.json().await.unwrap();
+        assert_eq!(renamed.title, "Renamed parcel");
+        assert_eq!(renamed.sync.provider, ProviderId::EasyPost);
+        assert_eq!(renamed.sync.tracker_id, original.sync.tracker_id);
+        assert_eq!(app.aftership.calls(), 0);
+
+        let response = app
+            .client
+            .patch(format!("{}/v1/packages/{}", app.url, original.id))
+            .bearer_auth(OWNER)
+            .header("If-Match", format!("\"{}\"", renamed.revision))
+            .json(&UpdateShipment {
+                adopt_existing_aftership: adopted.then_some(true),
+                tracking: Patch {
+                    value: (!adopted).then_some(Some(input.tracking)),
+                },
+                ..Default::default()
+            })
+            .send()
+            .await
+            .unwrap();
+        let Some(tracker_id) = tracker_id else {
+            assert_eq!(response.status(), StatusCode::CONFLICT);
+            let failure: Failure = response.json().await.unwrap();
+            assert!(failure.message.contains("No existing AfterShip tracker"));
+            let saved = app.store.get(original.id).await.unwrap();
+            assert_eq!(saved.revision, renamed.revision);
+            assert_eq!(saved.sync.provider, ProviderId::EasyPost);
+            assert_eq!(saved.sync.tracker_id, original.sync.tracker_id);
+            assert_eq!(app.aftership.registrations(), 0);
+            assert_eq!(app.count().await, 1);
+            app.close().await;
+            continue;
+        };
+        assert_eq!(response.status(), StatusCode::OK);
+        let updated: Shipment = response.json().await.unwrap();
+        assert_eq!(updated.id, original.id);
+        assert_eq!(updated.tracking, original.tracking);
+        assert_eq!(updated.title, renamed.title);
+        assert_eq!(updated.signature_required, original.signature_required);
+        assert_eq!(updated.sources, original.sources);
+        assert_eq!(updated.sync.provider, ProviderId::AfterShip, "{carrier:?}");
+        assert_eq!(updated.status, Status::PreTransit);
+        assert_eq!(updated.sync.tracker_id, Some(tracker_id.into()));
+        assert_eq!(app.easypost.calls(), 0);
+        assert_eq!(app.aftership.registrations(), registrations);
+        assert_eq!(app.count().await, 1);
+        app.close().await;
+    }
 }
 
 #[tokio::test]

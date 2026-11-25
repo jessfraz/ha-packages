@@ -46,6 +46,7 @@ test("carrier labels distinguish account and provider choices", async () => {
   assert.equal(providerNames.amazon_account, "Amazon Account");
   assert.equal(carrierLabel("AmazonMcf"), "Amazon MCF");
   assert.equal(carrierOptionLabel("AmazonMcf"), "Amazon MCF (AfterShip)");
+  assert.equal(carrierOptionLabel("BetterTrucks"), "Better Trucks (AfterShip)");
   assert.equal(carrierOptionLabel("SwiftX"), "SwiftX (AfterShip)");
   assert.equal(carrierOptionLabel("SpeedX"), "SpeedX (AfterShip)");
   assert.equal(carrierLabel(null), "Carrier not identified");
@@ -61,6 +62,7 @@ test("supported carrier families and their account aliases retain direct trackin
     [["FedEx", "FedExDefault", "FedexSmartPost"], "www.fedex.com", "trknbr"],
     [["DHL", "DHLExpress", "DHLExpressDefault"], "www.dhl.com", "tracking-id"],
     [["AmazonMcf"], "www.swiship.com", "id"],
+    [["BetterTrucks"], "tracking.bettertrucks.com", "trackingNumber"],
     [["OnTrac", "OntracV3", "LaserShipV2"], "www.ontrac.com", "number"],
   ]) for (const carrier of carriers) {
     const url = carrierTrackingUrl({ carrier, number });

@@ -2723,6 +2723,11 @@
       "UpdateShipment": {
         "additionalProperties": false,
         "properties": {
+          "adopt_existing_aftership": {
+            "description": "Switch a legacy Better Trucks record to its existing AfterShip tracker without replacing its label.",
+            "nullable": true,
+            "type": "boolean"
+          },
           "direction": {
             "$ref": "#/components/schemas/Direction"
           },
@@ -2753,7 +2758,7 @@
   "info": {
     "description": "Persistent local shipment records, manual corrections, and carrier synchronization. Use a Bearer owner or ingestion token. Creates require Idempotency-Key; writes to an existing shipment require its quoted revision in If-Match.",
     "title": "Packages API",
-    "version": "0.8.13"
+    "version": "0.8.14"
   },
   "openapi": "3.0.3",
   "paths": {
