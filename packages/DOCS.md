@@ -352,8 +352,10 @@ choose its canonical EasyPost carrier when detection is ambiguous.
 Select **Amazon MCF**, **Better Trucks**, **SF Express**, **SpeedX**, **SwiftX**,
 **Sway / Returnmates**, or **Veho** explicitly to use AfterShip.
 SwiftX and SpeedX are separate carriers; choose the name on the shipping label.
-For a Better Trucks or SF Express parcel previously saved through EasyPost,
-save its tracking again to switch the existing record to AfterShip.
+For a Better Trucks parcel on EasyPost, choose **Switch this package to its
+existing AfterShip tracker** when editing. This leaves the record on EasyPost
+if there is no unique match on AfterShip. Ordinary edits do not switch it.
+For an SF Express parcel on EasyPost, save its tracking again to switch.
 Use **Amazon MCF** only when the original merchant evidence identifies
 Multi-Channel Fulfillment or supplies a matching Swiship parcel link. It uses
 AfterShip `amazon`, not `amazon-mcf`, `amazon-order`, or the UK Swiship product.

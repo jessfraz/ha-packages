@@ -4,7 +4,7 @@ use crate::{
     shipping_api::{
         ShippingApi,
         error::Rejection,
-        types::{ProviderId, Tracker},
+        types::{ProviderId, Registration, Tracker},
     },
     store::{Store, validate_admission, validate_create, validate_update},
 };
@@ -701,31 +701,44 @@ async fn shipment_update(
     let mut input = body.into_inner();
     validate_update(&mut input).map_err(|error| log_validation_error(&request, error, "update"))?;
     let store = &request.context().store;
-    let changed_tracking = if let Some(value) = &input.tracking.value {
-        let tracking = value
-            .as_ref()
-            .ok_or(crate::error::Error::TrackingRequired)?;
+    let adopt_better_trucks = input.adopt_existing_aftership == Some(true);
+    let tracking_to_verify = if adopt_better_trucks || input.tracking.value.is_some() {
         let current = store.get(id).await?;
         if current.revision != expected_revision {
             return Err(crate::error::Error::Precondition.into());
         }
-        tracking.number != current.tracking.number
-            || tracking.carrier != Some(current.tracking.carrier)
-            || tracking.recipient_url != current.tracking.recipient_url
-            || (matches!(
-                tracking.carrier,
-                Some(crate::carrier::Carrier::SfExpress | crate::carrier::Carrier::BetterTrucks)
-            ) && current.sync.provider == ProviderId::EasyPost)
+        if adopt_better_trucks {
+            if input.tracking.value.is_some()
+                || current.tracking.carrier != crate::carrier::Carrier::BetterTrucks
+                || current.sync.provider != ProviderId::EasyPost
+            {
+                return Err(crate::error::Error::Invalid(
+                    "Adopting an existing AfterShip tracker requires an EasyPost Better Trucks package and no tracking edit.".into(),
+                ).into());
+            }
+            Some(InputTracking {
+                number: current.tracking.number,
+                carrier: Some(current.tracking.carrier),
+                recipient_url: current.tracking.recipient_url,
+            })
+        } else {
+            let tracking = input
+                .tracking
+                .value
+                .as_ref()
+                .and_then(Option::as_ref)
+                .ok_or(crate::error::Error::TrackingRequired)?;
+            let changed = tracking.number != current.tracking.number
+                || tracking.carrier != Some(current.tracking.carrier)
+                || tracking.recipient_url != current.tracking.recipient_url
+                || (tracking.carrier == Some(crate::carrier::Carrier::SfExpress)
+                    && current.sync.provider == ProviderId::EasyPost);
+            changed.then(|| tracking.clone())
+        }
     } else {
-        false
+        None
     };
-    let claim = if changed_tracking {
-        let tracking = input
-            .tracking
-            .value
-            .as_ref()
-            .and_then(Option::as_ref)
-            .ok_or(crate::error::Error::TrackingRequired)?;
+    let claim = if let Some(tracking) = &tracking_to_verify {
         validate_admission(tracking)
             .map_err(|error| log_validation_error(&request, error, "update"))?;
         store
@@ -736,22 +749,41 @@ async fn shipment_update(
         None
     };
     let result = async {
-        let verified = if let Some(claim) = &claim {
-            let tracking = input
-                .tracking
-                .value
-                .as_ref()
-                .and_then(Option::as_ref)
-                .ok_or(crate::error::Error::TrackingRequired)?;
+        let verified = if let Some((claim, tracking)) = claim.as_ref().zip(tracking_to_verify.as_ref()) {
             store
                 .preflight_update(id, expected_revision, tracking)
                 .await?;
-            Some(
-                request
-                    .context()
-                    .verify_tracking(claim, tracking, &request.log, &request.request_id)
-                    .await?,
-            )
+            let context = request.context();
+            if adopt_better_trucks {
+                // A legacy resave moves an existing label, not a new parcel.
+                // A missing or ambiguous AfterShip match must not create a tracker.
+                let provider = context
+                    .provider(ProviderId::AfterShip)
+                    .ok_or_else(|| crate::admission::missing_provider(ProviderId::AfterShip))?
+                    .for_request(&request.request_id, Some(&id.to_string()));
+                Some(
+                    provider
+                        .reconcile_registration(&Registration {
+                            tracking_number: tracking.number.clone(),
+                            carrier: tracking.carrier,
+                            recipient_url: tracking.recipient_url.clone(),
+                            started_at: time::OffsetDateTime::now_utc().unix_timestamp(),
+                        })
+                        .await
+                        .map_err(|error| crate::admission::provider_failure(&error))?
+                        .ok_or_else(|| {
+                            crate::error::Error::Conflict(
+                                "No existing AfterShip tracker matches this Better Trucks package. The EasyPost tracker was kept.".into(),
+                            )
+                        })?,
+                )
+            } else {
+                Some(
+                    context
+                        .verify_tracking(claim, tracking, &request.log, &request.request_id)
+                        .await?,
+                )
+            }
         } else {
             None
         };

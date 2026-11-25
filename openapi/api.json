@@ -2723,6 +2723,11 @@
       "UpdateShipment": {
         "additionalProperties": false,
         "properties": {
+          "adopt_existing_aftership": {
+            "description": "Switch a legacy Better Trucks record to its existing AfterShip tracker without replacing its label.",
+            "nullable": true,
+            "type": "boolean"
+          },
           "direction": {
             "$ref": "#/components/schemas/Direction"
           },

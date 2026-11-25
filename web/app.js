@@ -1003,6 +1003,10 @@ function closeEditor(updateUrl = true) {
   if (reopen) guarded(() => show(reopen))();
 }
 
+function usesLegacyBetterTrucks(shipment) {
+  return shipment?.tracking?.carrier === "BetterTrucks" && shipment.sync.provider === "easypost";
+}
+
 function openEditor(shipment = null) {
   closeDetail(false);
   writeRoute({ edit: shipment ? "true" : "new", shipment: shipment?.id || null });
@@ -1013,6 +1017,9 @@ function openEditor(shipment = null) {
   setEditorSaving(false);
   const form = byId("edit-form");
   form.reset();
+  const switchField = byId("better-trucks-switch");
+  switchField.hidden = !usesLegacyBetterTrucks(shipment);
+  form.elements.namedItem("switch_to_aftership").disabled = switchField.hidden;
   byId("edit-error").textContent = "";
   byId("edit-title").textContent = shipment ? "Edit package" : "Add package";
   if (shipment) {
@@ -1514,6 +1521,15 @@ byId("edit-form").addEventListener("submit", async (event) => {
       recipient_url: values.carrier === "DoorDash" ? values.recipient_url.trim() || null : null,
     },
   };
+  if (values.switch_to_aftership === "on") {
+    if (input.tracking.carrier !== shipment.tracking.carrier ||
+        input.tracking.number !== shipment.tracking.number) {
+      byId("edit-error").textContent = "Keep the original carrier and tracking number to switch to the existing AfterShip tracker.";
+      return;
+    }
+    delete input.tracking;
+    input.adopt_existing_aftership = true;
+  }
   const payload = JSON.stringify(input);
   if (!shipment) {
     if (submittedCreatePayload !== null && submittedCreatePayload !== payload)
